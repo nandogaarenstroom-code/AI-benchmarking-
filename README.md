@@ -23,9 +23,16 @@ an interruption. Completed artifacts are saved under `results/` as `.json`, `.cs
 `.svg`. Every test and failure is retained in the JSON result. Demo outputs are marked
 `DEMO DATA` in the result metadata (`demo: true`).
 
-The current dependency-free engine uses deterministic exact-match tasks. It provides a stable
+The current dependency-free engine uses deterministic generated tasks and category-specific
+evaluators. It provides a stable
 adapter/result contract so additional local adapters and sandboxed coding evaluators can be added
 without changing the UI. Controlled benchmark measurements are not universal real-world guarantees.
+
+The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
+and Python-code evaluators. Subjective categories use a clearly labelled deterministic rubric
+fallback; a future configured local evaluator model can replace that fallback without changing
+the result format. Code is executed only in a temporary isolated working directory with a short
+timeout, restricted imports, and no network-capable adapter.
 
 ## What models are tested on?
 
@@ -94,6 +101,16 @@ will always behave this way in a real application. Context accumulation is itsel
 property, so a future context-scaling profile should explicitly add controlled 4K/8K/16K/etc.
 prompts and report accuracy, latency, and failure rate by context size. Those measurements should
 be kept separate from fresh-context quality scores rather than mixed into them.
+
+Each run also records a separate context-scaling result with fresh and accumulated variants at
+4K, 8K, 16K, and 32K target prompt sizes. The accumulated variant deliberately reuses the
+conversation history so context degradation can be observed; it is not mixed into the primary
+fresh-context quality score.
+
+Performance runs perform three warm-ups, discard their outputs, then collect repeated latency,
+TTFT, generation time, token throughput, P50/P95 latency, standard deviation, and concurrency
+samples at levels 1, 2, and 4. These are controlled measurements and should not be treated as
+guarantees for unrelated real-world workloads.
 
 ## Test
 

@@ -4,9 +4,17 @@ import unittest
 from pathlib import Path
 
 from backend.benchmark import BenchmarkManager, make_tests
+from backend.evaluation import evaluate
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_domain_evaluators(self):
+        self.assertTrue(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "42"))
+        self.assertTrue(evaluate({"evaluation_method": "json_schema", "required_keys": ["ok"]}, '{"ok": true}'))
+        self.assertTrue(evaluate({"evaluation_method": "code", "tests": ["assert add(1, 2) == 3"]},
+                                 "def add(a,b): return a+b"))
+        self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
+
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
         self.assertEqual(len(make_tests("FULL", 7)), 252)
@@ -25,6 +33,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(data["demo"])
             self.assertTrue(data["configuration"]["context_reset_per_test"])
             self.assertTrue(all(item["context_reset"] for item in data["tests"]))
+            self.assertIn("fresh", data["context_scaling"])
+            self.assertIn("accumulated", data["context_scaling"])
+            self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
 
 
 if __name__ == "__main__":

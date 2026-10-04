@@ -50,9 +50,10 @@ def model_info(model):
     return {
         "name": model.get("name", "Unknown"), "family": "Unknown",
         "parameters": "Unknown", "quantization": "Unknown", "architecture": "Unknown",
-        "context_length": "Unknown", "vocabulary_size": "Unknown",
+        "context_length": model.get("context_length", "Unknown"), "vocabulary_size": "Unknown",
         "file_size": model.get("size", "Unknown"), "backend": model.get("backend", "Unknown"),
-        "endpoint": model.get("endpoint", "Unknown"), "capabilities": model.get("capabilities", {}),
+        "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
+        "capabilities": model.get("capabilities", {}),
     }
 
 
@@ -63,3 +64,23 @@ def hardware_info():
             "gpu": "Unknown", "gpu_vram": "Unknown", "ram": "Unknown",
             "os": platform.platform(), "driver": "Unknown", "cuda": "Unknown", "rocm": "Unknown",
             "collected_at": datetime.now(timezone.utc).isoformat()}
+
+
+def ask_model(model, prompt, history=None):
+    """Send one isolated prompt, or an explicit history for context accumulation tests."""
+    messages = list(history or []) + [{"role": "user", "content": prompt}]
+    if model.get("backend") == "Ollama":
+        request = urllib.request.Request(
+            model["endpoint"] + "/api/generate",
+            data=json.dumps({"model": model["id"], "prompt": prompt, "stream": False}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read()).get("response", "").strip()
+    request = urllib.request.Request(
+        model["endpoint"] + "/chat/completions",
+        data=json.dumps({"model": model["id"], "messages": messages,
+                         "temperature": 0, "max_tokens": 128}).encode(),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.loads(response.read())
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()

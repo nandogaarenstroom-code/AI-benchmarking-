@@ -10,7 +10,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import BenchmarkManager
 from backend.discovery import discover_models
@@ -50,6 +50,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(manager.status())
         if path == "/api/results":
             return self._json(manager.list_results())
+        if path == "/api/compare":
+            ids = parse_qs(urlparse(self.path).query).get("id", [])
+            return self._json(manager.compare(ids))
         if path.startswith("/api/results/"):
             result = manager.load_result(path.rsplit("/", 1)[-1])
             return self._json(result, 200 if result else 404)
