@@ -8,6 +8,7 @@ import random
 import statistics
 import time
 import uuid
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -87,7 +88,7 @@ class BenchmarkManager:
             t0 = time.perf_counter()
             # Demo is deterministic and clearly labelled. Real adapters can be added without
             # changing the result schema; unavailable endpoints are recorded as failures.
-            answer = test["expected_answer"] if model.get("demo") else ""
+            answer = self._answer(model, test)
             elapsed = time.perf_counter() - t0 + (0.004 + (int(test["id"][-3:]) % 7) / 1000)
             passed = answer == test["expected_answer"]
             item = {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
@@ -129,6 +130,28 @@ class BenchmarkManager:
                             quality=quality["overall"], performance=performance,
                             overall=result["scores"]["overall"])
         self.running = False
+
+    def _answer(self, model, test):
+        if model.get("demo"):
+            return test["expected_answer"]
+        try:
+            if model.get("backend") == "Ollama":
+                request = urllib.request.Request(
+                    model["endpoint"] + "/api/generate",
+                    data=json.dumps({"model": model["id"], "prompt": test["prompt"], "stream": False}).encode(),
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return json.loads(response.read()).get("response", "").strip()
+            request = urllib.request.Request(
+                model["endpoint"] + "/chat/completions",
+                data=json.dumps({"model": model["id"], "messages": [{"role": "user", "content": test["prompt"]}],
+                                 "temperature": 0, "max_tokens": 32}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = json.loads(response.read())
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        except Exception:
+            return ""
 
     def _scores(self, results):
         values = {c: [x["score"] * 10 for x in results if x["category"] == c] for c in CATEGORIES}

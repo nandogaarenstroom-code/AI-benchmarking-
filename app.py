@@ -53,6 +53,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/results/"):
             result = manager.load_result(path.rsplit("/", 1)[-1])
             return self._json(result, 200 if result else 404)
+        if path.startswith("/results/"):
+            file_path = manager.root / Path(path).name
+            if file_path.exists() and file_path.is_file():
+                data = file_path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/pdf" if file_path.suffix == ".pdf" else "application/octet-stream")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
         self.send_error(404)
 
     def do_POST(self):
