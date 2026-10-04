@@ -9,6 +9,7 @@ import statistics
 import time
 import uuid
 import urllib.request
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,6 +59,8 @@ class BenchmarkManager:
                 for p in self.root.glob("*.json") if p.name != "current.json"]
 
     def load_result(self, result_id):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", result_id):
+            return None
         path = self.root / f"{result_id}.json"
         return json.loads(path.read_text()) if path.exists() else None
 
