@@ -82,10 +82,12 @@ def make_tests(profile, seed):
     return [_test(CATEGORIES[i % len(CATEGORIES)], i, rng) for i in range(count)]
 
 
-def make_context_tests(seed):
+def make_context_tests(seed, max_context=131072):
     rng = random.Random(seed)
     tests = []
-    for size in (4096, 8192, 16384, 32768):
+    for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144):
+        if size > max_context:
+            continue
         marker = f"CTX-{rng.randint(1000, 9999)}"
         filler = " context" * max(1, size // 8)
         tests.append({"id": f"context-{size}", "category": "Context Scaling",
@@ -182,7 +184,13 @@ class BenchmarkManager:
             self.state_file.write_text(json.dumps({**payload, "seed": seed, "profile": profile,
                                                     "model": model, "tests": tests,
                                                     "completed_tests": completed, "failures": failures}))
-        context_tests = make_context_tests(seed)
+        advertised_context = model.get("context_length", 131072)
+        try:
+            max_context = min(int(advertised_context), 262144)
+        except (TypeError, ValueError):
+            max_context = 131072
+        context_tests = make_context_tests(seed, max_context=max_context)
+        context_sizes = [test["context_size"] for test in context_tests]
         context_results = [self._execute(model, test) for test in context_tests]
         history, accumulated_results = [], []
         for test in context_tests:
@@ -199,7 +207,9 @@ class BenchmarkManager:
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "retries": 2, "temperature": 0, "top_p": 1,
-                  "context_reset_per_test": True, "context_suite": [4096, 8192, 16384, 32768],
+                  "context_reset_per_test": True, "context_suite": context_sizes,
+                  "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
+                                      if size not in context_sizes],
                   "local_only": True}, "performance": perf, "quality": quality,
                   "context_scaling": {"fresh": context_results, "accumulated": accumulated_results},
                   "tests": completed, "failures": failures,

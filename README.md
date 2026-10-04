@@ -103,9 +103,15 @@ prompts and report accuracy, latency, and failure rate by context size. Those me
 be kept separate from fresh-context quality scores rather than mixed into them.
 
 Each run also records a separate context-scaling result with fresh and accumulated variants at
-4K, 8K, 16K, and 32K target prompt sizes. The accumulated variant deliberately reuses the
+4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. The accumulated variant deliberately reuses the
 conversation history so context degradation can be observed; it is not mixed into the primary
 fresh-context quality score.
+
+The suite never blindly exceeds the model's advertised context limit. If metadata reports a
+smaller limit, larger sizes are skipped and recorded in `context_skipped`. If the limit is
+unknown, the conservative 128K ceiling is used; 256K is only attempted when explicitly
+advertised. This makes large-context results transparent rather than turning an overflow into a
+misleading quality failure.
 
 Performance runs perform three warm-ups, discard their outputs, then collect repeated latency,
 TTFT, generation time, token throughput, P50/P95 latency, standard deviation, and concurrency
