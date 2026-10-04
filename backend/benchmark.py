@@ -61,8 +61,12 @@ class BenchmarkManager:
     def load_result(self, result_id):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", result_id):
             return None
-        path = self.root / f"{result_id}.json"
-        return json.loads(path.read_text()) if path.exists() else None
+        # Match against server-created filenames rather than constructing a path
+        # from an HTTP parameter.
+        for path in self.root.glob("*.json"):
+            if path.name != "current.json" and path.stem == result_id:
+                return json.loads(path.read_text())
+        return None
 
     def resume(self):
         if not self.state_file.exists() or self.running:
