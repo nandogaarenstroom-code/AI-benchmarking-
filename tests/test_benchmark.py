@@ -18,6 +18,8 @@ class BenchmarkTests(unittest.TestCase):
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
         self.assertEqual(len(make_tests("FULL", 7)), 252)
+        prompts = [test["prompt"] for test in make_tests("FULL", 7)]
+        self.assertEqual(len(prompts), len(set(prompts)))
         self.assertEqual([x["context_size"] for x in make_context_tests(7)],
                          [4096, 8192, 16384, 32768, 65536, 131072])
         self.assertEqual([x["context_size"] for x in make_context_tests(7, 32768)],

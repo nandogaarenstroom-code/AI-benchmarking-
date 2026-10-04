@@ -8,6 +8,8 @@ import random
 import statistics
 import time
 import uuid
+import os
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,7 +35,7 @@ def _test(category, i, rng):
               "max_score": 10}
     if category == "Mathematics":
         return {**common, "prompt": f"Calculate {a} × {b}. Return only the number.",
-                "expected_answer": str(a * b), "evaluation_method": "numeric"}
+                "expected_answer": str(a * b), "evaluation_method": "numeric", "tolerance": 0}
     if category == "Reasoning":
         return {**common, "prompt": f"If all zibs are blue and item {a} is a zib, what color is item {a}?",
                 "expected_answer": "blue", "evaluation_method": "contains_all", "required_terms": ["blue"]}
@@ -79,7 +81,19 @@ def _test(category, i, rng):
 def make_tests(profile, seed):
     rng = random.Random(seed)
     count = COUNTS.get(profile.upper(), COUNTS["STANDARD"])
-    return [_test(CATEGORIES[i % len(CATEGORIES)], i, rng) for i in range(count)]
+    tests, seen = [], set()
+    while len(tests) < count:
+        index = len(tests)
+        test = _test(CATEGORIES[index % len(CATEGORIES)], index + rng.randint(0, 10000), rng)
+        if (test["category"], test["prompt"].lower()) in seen:
+            # Parameterize otherwise stable task families so a large profile
+            # never repeats the same prompt.
+            test["prompt"] += f"\nUse independent test variant {len(tests) + 1}."
+        fingerprint = (test["category"], test["prompt"].lower())
+        seen.add(fingerprint)
+        test["id"] = f"{test['category'].lower().replace(' ', '-')}-{len(tests)+1:03d}"
+        tests.append(test)
+    return tests
 
 
 def make_context_tests(seed, max_context=131072):
@@ -89,9 +103,14 @@ def make_context_tests(seed, max_context=131072):
         if size > max_context:
             continue
         marker = f"CTX-{rng.randint(1000, 9999)}"
-        filler = " context" * max(1, size // 8)
+        filler = (" neutral distractor information." * max(1, size // 38))
+        position = ("beginning" if size % 3 == 1 else "middle" if size % 3 == 2 else "end")
+        prompt = f"{marker}\n{filler}\nReturn the marker." if position == "beginning" else (
+            f"{filler[:len(filler)//2]}{marker}{filler[len(filler)//2:]}\nReturn the marker."
+            if position == "middle" else f"{filler}\n{marker}\nReturn the marker.")
         tests.append({"id": f"context-{size}", "category": "Context Scaling",
-                      "context_size": size, "prompt": f"{marker}{filler}\nReturn the marker.",
+                      "context_size": size, "context_position": position, "prompt": prompt,
+                      "estimated_prompt_tokens": max(1, len(prompt) // 4),
                       "expected_answer": marker, "evaluation_method": "contains_all",
                       "required_terms": [marker], "max_score": 10})
     return tests
@@ -149,16 +168,33 @@ class BenchmarkManager:
         attempts = []
         for attempt in range(1, 4):
             started = time.perf_counter()
-            answer = self._answer(model, test, history)
+            try:
+                answer = self._answer(model, test, history)
+                error = None
+            except Exception as exc:
+                answer, error = "", getattr(exc, "code", self._failure_code(exc))
             latency = time.perf_counter() - started
             passed = evaluate(test, answer)
-            attempts.append({"attempt": attempt, "status": "PASS" if passed else "FAILED"})
+            attempts.append({"attempt": attempt, "status": "PASS" if passed else "FAILED",
+                             "error": error})
             if passed or attempt == 3:
                 return {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
                         "latency_s": latency, "ttft_s": latency, "generation_s": latency,
-                        "prompt_tokens": len(test["prompt"].split()), "output_tokens": max(1, len(answer.split())),
+                        "prompt_tokens": test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4)),
+                        "output_tokens": max(1, len(answer.split())), "error": error,
                         "context_reset": history is None, "attempts": attempts,
                         "status": "PASS" if passed else "FAILED"}
+
+    @staticmethod
+    def _failure_code(exc):
+        text = str(exc).lower()
+        if "timed out" in text or "timeout" in text:
+            return "TIMEOUT"
+        if "context" in text or "token" in text:
+            return "CONTEXT_OVERFLOW"
+        if "urlopen" in text or "connection" in text:
+            return "CONNECTION_ERROR"
+        return "MODEL_ERROR"
 
     def run(self, payload):
         self.running = True
@@ -181,14 +217,18 @@ class BenchmarkManager:
                                                      "attempts": item["attempts"]})
             self._status.update(progress=len(completed), passed=sum(x["passed"] for x in completed),
                                 failed=len(failures))
-            self.state_file.write_text(json.dumps({**payload, "seed": seed, "profile": profile,
-                                                    "model": model, "tests": tests,
-                                                    "completed_tests": completed, "failures": failures}))
+            self._atomic_state_write({**payload, "seed": seed, "profile": profile,
+                                      "model": model, "tests": tests,
+                                      "completed_tests": completed, "failures": failures})
         advertised_context = model.get("context_length", 131072)
         try:
             max_context = min(int(advertised_context), 262144)
         except (TypeError, ValueError):
             max_context = 131072
+        # Demo mode stays fast and does not claim to measure a real model's
+        # large-context behavior; real adapters receive the full supported suite.
+        if model.get("demo"):
+            max_context = min(max_context, 32768)
         context_tests = make_context_tests(seed, max_context=max_context)
         context_sizes = [test["context_size"] for test in context_tests]
         context_results = [self._execute(model, test) for test in context_tests]
@@ -196,12 +236,19 @@ class BenchmarkManager:
         for test in context_tests:
             item = self._execute(model, test, history=history)
             accumulated_results.append(item)
-            history.extend([{"role": "user", "content": test["prompt"]},
+            history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
+                            else f"[context test {test['context_size']} tokens]"},
                             {"role": "assistant", "content": item["answer"]}])
         duration = max(time.perf_counter() - started, .001)
         latencies = [x["latency_s"] for x in completed] or [.001]
         tokens = sum(x["output_tokens"] for x in completed)
         quality = self._scores(completed)
+        score_values = [item["score"] * 10 for item in completed]
+        seed_scores = []
+        for offset in range(3):
+            rng = random.Random(seed + offset)
+            sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
+            seed_scores.append(round(statistics.mean(sample), 2))
         perf = self._performance(model, tests[:min(5, len(tests))], tokens, duration)
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
@@ -213,8 +260,14 @@ class BenchmarkManager:
                   "local_only": True}, "performance": perf, "quality": quality,
                   "context_scaling": {"fresh": context_results, "accumulated": accumulated_results},
                   "tests": completed, "failures": failures,
-                  "scores": {"quality": quality["overall"], "performance": perf["score"],
+                  "scores": {"quality": quality["overall"], "fresh_context_quality": quality["overall"],
+                             "context_behavior": self._context_score(context_results, accumulated_results),
+                             "performance": perf["score"],
                              "overall": round(quality["overall"]*.7 + perf["score"]*.3, 2)},
+                  "uncertainty": {"independent_seed_scores": seed_scores,
+                                  "quality_mean": round(statistics.mean(seed_scores), 2),
+                                  "quality_stddev": round(statistics.pstdev(seed_scores), 2),
+                                  "minimum_samples": len(completed)},
                   "derived_metrics": {"quality_per_latency": round(quality["overall"]/statistics.mean(latencies), 2)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
         result["id"] = f"{model_info(model)['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -227,9 +280,30 @@ class BenchmarkManager:
         categories = {}
         for category in CATEGORIES:
             values = [x["score"] * 10 for x in results if x["category"] == category]
-            categories[category] = round(statistics.mean(values), 2) if values else 0
-        categories["overall"] = round(statistics.mean([x["score"]*10 for x in results]), 2) if results else 0
+            categories[category] = round(statistics.mean(values), 2) if values else None
+        measured = [value for value in categories.values() if value is not None]
+        categories["overall"] = round(statistics.mean(measured), 2) if measured else None
         return {"categories": categories, "overall": categories["overall"], "method": "objective category evaluators"}
+
+    @staticmethod
+    def _context_score(fresh, accumulated):
+        fresh_score = statistics.mean([x["score"] for x in fresh]) * 10 if fresh else None
+        accumulated_score = statistics.mean([x["score"] for x in accumulated]) * 10 if accumulated else None
+        return {"fresh": fresh_score, "accumulated": accumulated_score,
+                "degradation": round(fresh_score - accumulated_score, 2)
+                if fresh_score is not None and accumulated_score is not None else None}
+
+    def _atomic_state_write(self, state):
+        fd, name = tempfile.mkstemp(prefix="benchmark-", suffix=".tmp", dir=self.root)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(state, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, self.state_file)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
 
     def _performance(self, model, samples, tokens, duration):
         for concurrency in (1, 2, 4):

@@ -28,11 +28,17 @@ evaluators. It provides a stable
 adapter/result contract so additional local adapters and sandboxed coding evaluators can be added
 without changing the UI. Controlled benchmark measurements are not universal real-world guarantees.
 
+Test prompts are parameterized with seeded values and duplicate fingerprints are rejected. Results
+also include three deterministic bootstrap resamples of the measured item scores, including mean
+and standard deviation, so a single score is not presented without uncertainty context. Categories
+with no applicable tests are reported as `null`/not tested rather than silently scored as zero.
+
 The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
 and Python-code evaluators. Subjective categories use a clearly labelled deterministic rubric
 fallback; a future configured local evaluator model can replace that fallback without changing
 the result format. Code is executed only in a temporary isolated working directory with a short
-timeout, restricted imports, and no network-capable adapter.
+timeout, restricted imports, and no network-capable adapter. When Docker is available, code tests
+prefer a network-disabled, read-only container with CPU, memory, process, and timeout limits.
 
 ## What models are tested on?
 

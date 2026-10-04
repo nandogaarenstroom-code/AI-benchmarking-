@@ -3,7 +3,16 @@ from __future__ import annotations
 
 import json
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
+
+
+class AdapterError(RuntimeError):
+    """Typed local-adapter failure retained in benchmark results."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
 def _get(url, timeout=0.7):
@@ -69,18 +78,25 @@ def hardware_info():
 def ask_model(model, prompt, history=None):
     """Send one isolated prompt, or an explicit history for context accumulation tests."""
     messages = list(history or []) + [{"role": "user", "content": prompt}]
-    if model.get("backend") == "Ollama":
+    try:
+        if model.get("backend") == "Ollama":
+            request = urllib.request.Request(
+                model["endpoint"] + "/api/generate",
+                data=json.dumps({"model": model["id"], "prompt": prompt, "stream": False}).encode(),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.loads(response.read()).get("response", "").strip()[:50_000]
         request = urllib.request.Request(
-            model["endpoint"] + "/api/generate",
-            data=json.dumps({"model": model["id"], "prompt": prompt, "stream": False}).encode(),
+            model["endpoint"] + "/chat/completions",
+            data=json.dumps({"model": model["id"], "messages": messages,
+                             "temperature": 0, "max_tokens": 128}).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=60) as response:
-            return json.loads(response.read()).get("response", "").strip()
-    request = urllib.request.Request(
-        model["endpoint"] + "/chat/completions",
-        data=json.dumps({"model": model["id"], "messages": messages,
-                         "temperature": 0, "max_tokens": 128}).encode(),
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        data = json.loads(response.read())
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            data = json.loads(response.read())
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()[:50_000]
+    except TimeoutError as exc:
+        raise AdapterError("TIMEOUT", str(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise AdapterError("CONNECTION_ERROR", str(exc)) from exc
+    except (ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise AdapterError("SERVER_ERROR", str(exc)) from exc
