@@ -23,6 +23,8 @@ class BenchmarkTests(unittest.TestCase):
             data = json.loads(next(p for p in files if p.suffix == ".json").read_text())
             self.assertEqual(data["scores"]["quality"], 100)
             self.assertTrue(data["demo"])
+            self.assertTrue(data["configuration"]["context_reset_per_test"])
+            self.assertTrue(all(item["context_reset"] for item in data["tests"]))
 
 
 if __name__ == "__main__":

@@ -100,7 +100,8 @@ class BenchmarkManager:
             passed = answer == test["expected_answer"]
             item = {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
                     "latency_s": elapsed, "output_tokens": max(1, len(answer.split())),
-                    "status": "PASS" if passed else "FAILED"}
+                    "status": "PASS" if passed else "FAILED",
+                    "context_reset": True}
             results.append(item)
             if not passed:
                 failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
@@ -119,7 +120,8 @@ class BenchmarkManager:
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "temperature": 0, "top_p": 1, "max_tokens": 128,
-                  "retries": 2, "local_only": True},
+                  "retries": 2, "local_only": True, "context_reset_per_test": True,
+                  "context_policy": "one independent request per test; no prior answer history is reused"},
                   "performance": {"tokens_per_second": round(tokens / duration, 2),
                                   "ttft_s": round(statistics.median(latencies), 4),
                                   "latency_mean_s": round(statistics.mean(latencies), 4),
