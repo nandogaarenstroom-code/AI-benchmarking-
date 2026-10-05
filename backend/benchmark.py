@@ -217,6 +217,20 @@ class BenchmarkManager:
     def run(self, payload):
         self.running = True
         self.cancel_requested.clear()
+        requested_root = payload.get("output_dir")
+        if requested_root:
+            try:
+                selected_root = Path(requested_root).expanduser().resolve()
+                selected_root.mkdir(parents=True, exist_ok=True)
+                probe = selected_root / ".benchmark-write-test"
+                probe.write_text("ok")
+                probe.unlink()
+                self.root = selected_root
+                self.state_file = self.root / "current.json"
+            except (OSError, RuntimeError) as exc:
+                self._status.update(state="error", error=f"Invalid export directory: {exc}")
+                self.running = False
+                return
         seed, profile = int(payload.get("seed", 12345)), payload.get("profile", "STANDARD").upper()
         model = payload.get("model") or {"id": "demo-local", "name": "Demo Local Model",
                                           "backend": "Demo", "endpoint": "local://demo", "demo": True}

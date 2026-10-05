@@ -94,6 +94,16 @@ class BenchmarkTests(unittest.TestCase):
             with patch("backend.runtime.shutil.which", return_value=None, create=True):
                 self.assertTrue(any("Docker" in warning for warning in check_environment(directory)))
 
+    def test_custom_export_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            export_dir = Path(root) / "exports"
+            manager = BenchmarkManager(Path(root) / "default")
+            manager.run({"profile": "QUICK", "output_dir": str(export_dir),
+                         "model": {"name": "Demo", "backend": "Demo",
+                                   "endpoint": "local://demo", "demo": True}})
+            self.assertTrue(any(export_dir.glob("Demo_*.json")))
+            self.assertFalse(any((Path(root) / "default").glob("Demo_*.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

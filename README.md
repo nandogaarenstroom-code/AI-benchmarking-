@@ -15,6 +15,10 @@ an installed model. For real models, start Ollama, LM Studio, llama.cpp, or anot
 server before opening the dashboard. Discovery never invents metadata: unavailable values are
 reported as `Unknown`.
 
+The dashboard lets you choose an export directory before starting a run. Leave it blank to use
+`results/`, or enter a writable path on the machine running the application. All JSON, CSV, PDF,
+SVG, answer-sheet, and resume-state files for that run are written there.
+
 At startup the server checks that the results directory is writable and warns when Python is older
 than 3.10 or Docker was requested but is unavailable. The benchmark still starts so the demo and
 restricted subprocess fallback remain usable.
