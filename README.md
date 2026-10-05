@@ -15,6 +15,10 @@ an installed model. For real models, start Ollama, LM Studio, llama.cpp, or anot
 server before opening the dashboard. Discovery never invents metadata: unavailable values are
 reported as `Unknown`.
 
+At startup the server checks that the results directory is writable and warns when Python is older
+than 3.10 or Docker was requested but is unavailable. The benchmark still starts so the demo and
+restricted subprocess fallback remain usable.
+
 ## Automated behavior
 
 Selecting a model and pressing **RUN BENCHMARK** starts the selected profile without further
