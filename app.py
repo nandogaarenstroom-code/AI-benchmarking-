@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import BenchmarkManager
 from backend.discovery import discover_models
+from backend.runtime import check_environment
 
 ROOT = Path(__file__).parent
 manager = BenchmarkManager(ROOT / "results")
@@ -94,5 +95,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
+    for warning in check_environment(ROOT / "results"):
+        print(f"Warning: {warning}")
     print(f"Local AI Benchmark running at http://localhost:{port}")
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

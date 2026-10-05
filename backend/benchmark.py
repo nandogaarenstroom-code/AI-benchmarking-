@@ -225,7 +225,8 @@ class BenchmarkManager:
         failures = list(payload.get("failures", []))
         self._status.update(state="running", total=len(tests), progress=len(completed))
         # Warm up and discard warm-up outputs before measured requests.
-        for _ in range(3): self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""})
+        for _ in range(3):
+            self._safe_answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""})
         started = time.perf_counter()
         for test in tests:
             if self.cancel_requested.is_set():
