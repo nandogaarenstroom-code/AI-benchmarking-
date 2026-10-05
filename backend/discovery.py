@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import urllib.request
 import urllib.error
+import time
+import codecs
 from datetime import datetime, timezone
 
 
@@ -13,6 +15,10 @@ class AdapterError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def _estimate_tokens(text):
+    return max(1, len(text.encode("utf-8")) // 4) if text else 0
 
 
 def _get(url, timeout=0.7):
@@ -82,18 +88,50 @@ def ask_model(model, prompt, history=None):
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
                 model["endpoint"] + "/api/generate",
-                data=json.dumps({"model": model["id"], "prompt": prompt, "stream": False}).encode(),
+                data=json.dumps({"model": model["id"], "prompt": prompt, "stream": True}).encode(),
                 headers={"Content-Type": "application/json"})
+            started = time.perf_counter()
             with urllib.request.urlopen(request, timeout=60) as response:
-                return json.loads(response.read()).get("response", "").strip()[:50_000]
+                chunks, first_token_at = [], None
+                for line in response:
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    text = item.get("response", "")
+                    if text and first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    chunks.append(text)
+                    if item.get("done"):
+                        break
+                answer = "".join(chunks).strip()[:50_000]
+                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+                        "output_tokens": _estimate_tokens(answer),
+                        "ttft_s": (first_token_at or time.perf_counter()) - started,
+                        "generation_s": time.perf_counter() - (first_token_at or started)}
         request = urllib.request.Request(
             model["endpoint"] + "/chat/completions",
             data=json.dumps({"model": model["id"], "messages": messages,
                              "temperature": 0, "max_tokens": 128}).encode(),
             headers={"Content-Type": "application/json"})
+        request.data = json.dumps({"model": model["id"], "messages": messages,
+                                   "temperature": 0, "max_tokens": 128, "stream": True}).encode()
+        started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read())
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()[:50_000]
+            decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None
+            for raw in response:
+                for line in decoder.decode(raw).splitlines():
+                    if not line.startswith("data:") or line.strip() == "data: [DONE]":
+                        continue
+                    item = json.loads(line[5:].strip())
+                    text = item.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
+                    if text and first_token_at is None:
+                        first_token_at = time.perf_counter()
+                    chunks.append(text)
+            answer = "".join(chunks).strip()[:50_000]
+            return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+                    "output_tokens": _estimate_tokens(answer),
+                    "ttft_s": (first_token_at or time.perf_counter()) - started,
+                    "generation_s": time.perf_counter() - (first_token_at or started)}
     except TimeoutError as exc:
         raise AdapterError("TIMEOUT", str(exc)) from exc
     except urllib.error.URLError as exc:

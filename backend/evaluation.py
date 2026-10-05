@@ -47,7 +47,7 @@ def _run_code(source, tests):
     harness = source + "\n" + "\n".join(tests)
     try:
         with tempfile.TemporaryDirectory() as directory:
-            if shutil.which("docker") and os.environ.get("BENCHMARK_ALLOW_DOCKER", "1") == "1":
+            if shutil.which("docker") and os.environ.get("BENCHMARK_USE_DOCKER", "0") == "1":
                 completed = subprocess.run(
                     ["docker", "run", "--rm", "--network=none", "--cpus=0.5", "--memory=128m",
                      "--pids-limit=64", "--read-only", "-i", "python:3-alpine", "python", "-I", "-c", harness],

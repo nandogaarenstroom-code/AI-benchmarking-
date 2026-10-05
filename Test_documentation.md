@@ -196,13 +196,18 @@ Before measured work, the engine sends three warm-up requests and discards their
 records:
 
 - tokens per second
-- time to first response (`ttft_s`; true streaming TTFT is not yet available)
+- time to first token (`ttft_s`) for streaming-compatible real adapters
 - generation time
 - mean latency
 - P50 latency
 - P95 latency
 - latency standard deviation
 - concurrency samples at 1, 2, and 4 workers
+
+For real Ollama and OpenAI-compatible adapters, streaming is now enabled and `ttft_s` is measured
+from the first non-empty streamed content chunk. Demo mode remains deterministic and does not
+claim real streaming performance. Docker code isolation is opt-in with
+`BENCHMARK_USE_DOCKER=1`; otherwise the bounded fallback evaluator is used.
 
 The current performance score is derived from measured throughput and capped at 100. These values
 are controlled local measurements and should not be presented as universal real-world guarantees.

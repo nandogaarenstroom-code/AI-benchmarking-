@@ -10,6 +10,7 @@ import time
 import uuid
 import os
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -120,6 +121,7 @@ class BenchmarkManager:
     def __init__(self, root):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.state_file = self.root / "current.json"; self.running = False
+        self.cancel_requested = threading.Event()
         self._status = {"state": "idle", "progress": 0, "total": 0, "passed": 0, "failed": 0}
 
     def status(self): return self._status
@@ -149,7 +151,17 @@ class BenchmarkManager:
     def resume(self):
         if not self.state_file.exists() or self.running: return False
         import threading
-        threading.Thread(target=self.run, args=(json.loads(self.state_file.read_text()),), daemon=True).start()
+        try:
+            state = json.loads(self.state_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        threading.Thread(target=self.run, args=(state,), daemon=True).start()
+        return True
+
+    def cancel(self):
+        if not self.running:
+            return False
+        self.cancel_requested.set()
         return True
 
     def _answer(self, model, test, history=None):
@@ -162,7 +174,8 @@ class BenchmarkManager:
                 return "careful reliable local testing"
             return test["expected_answer"]
         from .discovery import ask_model
-        return ask_model(model, test["prompt"], history=history)
+        response = ask_model(model, test["prompt"], history=history)
+        return response
 
     def _execute(self, model, test, history=None):
         attempts = []
@@ -173,15 +186,20 @@ class BenchmarkManager:
                 error = None
             except Exception as exc:
                 answer, error = "", getattr(exc, "code", self._failure_code(exc))
+                response_metrics = {}
+            else:
+                response_metrics = answer if isinstance(answer, dict) else {}
+                answer = response_metrics.get("text", answer)
             latency = time.perf_counter() - started
             passed = evaluate(test, answer)
             attempts.append({"attempt": attempt, "status": "PASS" if passed else "FAILED",
                              "error": error})
             if passed or attempt == 3:
                 return {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
-                        "latency_s": latency, "ttft_s": latency, "generation_s": latency,
-                        "prompt_tokens": test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4)),
-                        "output_tokens": max(1, len(answer.split())), "error": error,
+                        "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
+                        "generation_s": response_metrics.get("generation_s", latency),
+                        "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
+                        "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))), "error": error,
                         "context_reset": history is None, "attempts": attempts,
                         "status": "PASS" if passed else "FAILED"}
 
@@ -198,6 +216,7 @@ class BenchmarkManager:
 
     def run(self, payload):
         self.running = True
+        self.cancel_requested.clear()
         seed, profile = int(payload.get("seed", 12345)), payload.get("profile", "STANDARD").upper()
         model = payload.get("model") or {"id": "demo-local", "name": "Demo Local Model",
                                           "backend": "Demo", "endpoint": "local://demo", "demo": True}
@@ -209,6 +228,10 @@ class BenchmarkManager:
         for _ in range(3): self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""})
         started = time.perf_counter()
         for test in tests:
+            if self.cancel_requested.is_set():
+                self._status.update(state="cancelled")
+                self.running = False
+                return
             if test["id"] in done: continue
             self._status.update(current_category=test["category"], current_test=test["id"])
             item = self._execute(model, test)
@@ -319,7 +342,17 @@ class BenchmarkManager:
                 "warmup_runs": 3, "measured_runs": 5, "concurrency_levels": [1, 2, 4]}
 
     def _write_outputs(self, result):
-        (self.root / f"{result['id']}.json").write_text(json.dumps(result, indent=2))
+        destination = self.root / f"{result['id']}.json"
+        fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=self.root)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump(result, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         with (self.root / f"{result['id']}.csv").open("w", newline="") as stream:
             fields = ["id", "category", "difficulty", "score", "status", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()

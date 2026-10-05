@@ -84,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
             if manager.resume():
                 return self._json({"started": True})
             return self._json({"error": "no resumable benchmark"}, 404)
+        if path == "/api/cancel":
+            return self._json({"cancelled": manager.cancel()})
         self.send_error(404)
 
     def log_message(self, *_):

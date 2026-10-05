@@ -40,6 +40,11 @@ the result format. Code is executed only in a temporary isolated working directo
 timeout, restricted imports, and no network-capable adapter. When Docker is available, code tests
 prefer a network-disabled, read-only container with CPU, memory, process, and timeout limits.
 
+Real adapters use streaming requests where supported. The result records an estimated TTFT from
+the first streamed content chunk, generation time after that chunk, estimated prompt tokens, and
+output tokens. Servers that do not provide compatible streaming responses are recorded as adapter
+failures rather than silently presenting a fabricated streaming metric.
+
 ## What models are tested on?
 
 Every generated test has an ID, category, subcategory, difficulty, prompt, expected answer,
@@ -123,6 +128,10 @@ Performance runs perform three warm-ups, discard their outputs, then collect rep
 TTFT, generation time, token throughput, P50/P95 latency, standard deviation, and concurrency
 samples at levels 1, 2, and 4. These are controlled measurements and should not be treated as
 guarantees for unrelated real-world workloads.
+
+Runs can be cancelled through the backend API. Resume state is written atomically, and corrupted
+resume files are rejected instead of being executed. Final JSON results are also written through
+an atomic replacement.
 
 ## Test
 
