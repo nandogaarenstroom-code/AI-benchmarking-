@@ -1,4 +1,5 @@
 import json
+import csv
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -66,6 +67,12 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(any(p.suffix == ".json" for p in files))
             self.assertTrue(any(p.suffix == ".csv" for p in files))
             self.assertTrue(any(p.suffix == ".pdf" for p in files))
+            answer_sheet = next(p for p in files if p.name.endswith("_answer_sheet.csv"))
+            with answer_sheet.open(newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertTrue(rows)
+            self.assertIn("reference_answer", rows[0])
+            self.assertEqual(rows[0]["review_score"], "")
             data = json.loads(next(p for p in files if p.suffix == ".json").read_text())
             self.assertEqual(data["scores"]["quality"], 100)
             self.assertTrue(data["demo"])

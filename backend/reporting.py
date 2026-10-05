@@ -1,5 +1,6 @@
 """Dependency-free report and chart writers."""
 from pathlib import Path
+import csv
 from xml.sax.saxutils import escape
 
 
@@ -13,6 +14,27 @@ def write_chart(path, values):
                     f'<text x="350" y="{y+12}" font-size="10">{value:.1f}</text>')
     path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="420" height="{max(80, len(bars)*22+30)}">'
                     + ''.join(bars) + "</svg>")
+
+
+def write_answer_sheet(path, result):
+    """Export model answers and private references for human review."""
+    fields = ["test_id", "category", "prompt", "model_answer", "reference_answer",
+              "evaluation_method", "review_score", "review_decision", "reviewer_notes"]
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for test in result.get("tests", []):
+            writer.writerow({
+                "test_id": test.get("id"),
+                "category": test.get("category"),
+                "prompt": test.get("prompt"),
+                "model_answer": test.get("answer", ""),
+                "reference_answer": test.get("expected_answer", ""),
+                "evaluation_method": test.get("evaluation_method", ""),
+                "review_score": "",
+                "review_decision": "",
+                "reviewer_notes": "",
+            })
 
 
 def write_pdf(path, result):

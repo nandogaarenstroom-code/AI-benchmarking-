@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .discovery import hardware_info, model_info
 from .evaluation import evaluate
-from .reporting import write_pdf, write_chart
+from .reporting import write_pdf, write_chart, write_answer_sheet
 
 CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
               "Structured Output", "Knowledge", "Hallucination Resistance",
@@ -368,3 +368,4 @@ class BenchmarkManager:
             writer.writerows({k: row.get(k) for k in fields} for row in result["tests"])
         write_pdf(self.root / f"{result['id']}.pdf", result)
         write_chart(self.root / f"{result['id']}_quality.svg", result["quality"]["categories"])
+        write_answer_sheet(self.root / f"{result['id']}_answer_sheet.csv", result)

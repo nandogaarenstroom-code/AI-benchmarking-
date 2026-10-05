@@ -27,6 +27,11 @@ an interruption. Completed artifacts are saved under `results/` as `.json`, `.cs
 `.svg`. Every test and failure is retained in the JSON result. Demo outputs are marked
 `DEMO DATA` in the result metadata (`demo: true`).
 
+Each run also exports `<result>_answer_sheet.csv` for human review. It contains the prompt, model
+answer, private reference answer, automatic evaluation method, and blank reviewer score, decision,
+and notes fields. The reference answer is never included in the prompt sent to the model; this
+sheet is an offline review artifact and should be kept separate from model-facing inputs.
+
 The current dependency-free engine uses deterministic generated tasks and category-specific
 evaluators. It provides a stable
 adapter/result contract so additional local adapters and sandboxed coding evaluators can be added
