@@ -6,6 +6,7 @@ import urllib.request
 import urllib.error
 import time
 import codecs
+import socket
 from datetime import datetime, timezone
 
 
@@ -118,8 +119,12 @@ def ask_model(model, prompt, history=None):
         started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=60) as response:
             decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None
+            pending = ""
             for raw in response:
-                for line in decoder.decode(raw).splitlines():
+                pending += decoder.decode(raw)
+                lines = pending.splitlines(keepends=True)
+                pending = lines.pop() if lines and not lines[-1].endswith(("\n", "\r")) else ""
+                for line in lines:
                     if not line.startswith("data:") or line.strip() == "data: [DONE]":
                         continue
                     item = json.loads(line[5:].strip())
@@ -127,13 +132,19 @@ def ask_model(model, prompt, history=None):
                     if text and first_token_at is None:
                         first_token_at = time.perf_counter()
                     chunks.append(text)
+            pending += decoder.decode(b"", final=True)
+            if pending.startswith("data:") and pending.strip() != "data: [DONE]":
+                item = json.loads(pending[5:].strip())
+                chunks.append(item.get("choices", [{}])[0].get("delta", {}).get("content", "") or "")
             answer = "".join(chunks).strip()[:50_000]
             return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
                     "output_tokens": _estimate_tokens(answer),
                     "ttft_s": (first_token_at or time.perf_counter()) - started,
                     "generation_s": time.perf_counter() - (first_token_at or started)}
-    except TimeoutError as exc:
+    except (TimeoutError, socket.timeout) as exc:
         raise AdapterError("TIMEOUT", str(exc)) from exc
+    except urllib.error.HTTPError as exc:
+        raise AdapterError("SERVER_ERROR", f"HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         raise AdapterError("CONNECTION_ERROR", str(exc)) from exc
     except (ValueError, KeyError, json.JSONDecodeError) as exc:

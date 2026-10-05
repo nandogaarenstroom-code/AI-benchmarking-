@@ -236,7 +236,7 @@ class BenchmarkManager:
             self._status.update(current_category=test["category"], current_test=test["id"])
             item = self._execute(model, test)
             completed.append(item)
-            if not item["passed"]: failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
+            if not item["passed"]: failures.append({"test_id": test["id"], "reason": item.get("error") or "MODEL_ERROR",
                                                      "attempts": item["attempts"]})
             self._status.update(progress=len(completed), passed=sum(x["passed"] for x in completed),
                                 failed=len(failures))
@@ -331,8 +331,9 @@ class BenchmarkManager:
     def _performance(self, model, samples, tokens, duration):
         for concurrency in (1, 2, 4):
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                list(pool.map(lambda t: self._answer(model, t), samples))
-        latencies = [self._execute(model, t)["latency_s"] for t in samples] or [.001]
+                list(pool.map(lambda t: self._safe_answer(model, t), samples))
+        measured = [self._execute(model, t) for t in samples]
+        latencies = [item["latency_s"] for item in measured] or [.001]
         return {"score": min(100, round(tokens / duration * 10, 2)),
                 "tokens_per_second": round(tokens/duration, 2), "ttft_s": round(statistics.median(latencies), 4),
                 "generation_s": round(sum(latencies), 4), "latency_mean_s": round(statistics.mean(latencies), 4),
@@ -340,6 +341,13 @@ class BenchmarkManager:
                 "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4),
                 "latency_stddev_s": round(statistics.pstdev(latencies), 4),
                 "warmup_runs": 3, "measured_runs": 5, "concurrency_levels": [1, 2, 4]}
+
+    def _safe_answer(self, model, test):
+        """Keep optional performance probes from aborting the benchmark."""
+        try:
+            return self._answer(model, test)
+        except Exception:
+            return ""
 
     def _write_outputs(self, result):
         destination = self.root / f"{result['id']}.json"
