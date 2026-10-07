@@ -4,6 +4,41 @@ An offline, zero-interaction benchmark dashboard for local LLM servers. It disco
 LM Studio, and common OpenAI-compatible endpoints, then runs deterministic tests, scores them,
 and writes JSON, CSV, PDF, and SVG chart artifacts.
 
+## Project status
+
+### In place
+
+- A dependency-free local HTTP server and browser dashboard
+- Discovery for Ollama, LM Studio, and OpenAI-compatible endpoints, plus a clearly marked demo model
+- Seeded benchmark generation, automatic scoring, retries, cancellation, and resumable progress
+- Fresh and accumulated context experiments with advertised-limit handling
+- Warm-ups, latency/throughput measurements, and concurrency samples
+- JSON, CSV, PDF, and SVG result exports and result comparison
+- A small automated regression suite for core evaluators, deterministic generation, demo execution,
+  exports, context metadata, and comparison
+
+### Still needed for broader production confidence
+
+- More varied, domain-specific benchmark datasets; several categories currently reuse simple task
+  families and do not justify broad capability claims
+- Stricter evaluators for exact instruction following, semantic quality, creative quality, and full
+  JSON Schema validation
+- A configured local evaluator model or human-calibrated rubric for subjective answers
+- Verified adapters and integration tests against multiple real server versions and malformed or
+  non-streaming responses
+- Automated coverage for the HTTP API, dashboard behavior, cancellation/resume failure paths,
+  report contents, and concurrent benchmark requests
+- Stronger hostile-code isolation validation; the subprocess fallback is bounded but Docker is the
+  intended defense-in-depth option
+- Richer hardware/model metadata collection, which is currently reported as `Unknown` when it cannot
+  be established
+- Larger and repeated real-model studies before treating scores as representative outside this
+  controlled benchmark
+
+For exact benchmark prompts and scoring limitations, see
+[Benchmark Test Documentation](Test_documentation.md). For what the repository's automated test
+suite does and does not verify, see [Automated Test Suite](tests/README.md).
+
 ## Run
 
 ```bash
@@ -108,10 +143,8 @@ Results record `context_reset: true`, and the report configuration records
 model context and artificially lowering later scores.
 
 That reset is intentional for isolated capability tests, but it does **not** claim that the model
-will always behave this way in a real application. Context accumulation is itself an important
-property, so a future context-scaling profile should explicitly add controlled 4K/8K/16K/etc.
-prompts and report accuracy, latency, and failure rate by context size. Those measurements should
-be kept separate from fresh-context quality scores rather than mixed into them.
+will always behave this way in a real application. Context accumulation is measured separately from
+fresh-context quality rather than being mixed into the primary quality score.
 
 Each run also records a separate context-scaling result with fresh and accumulated variants at
 4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. The accumulated variant deliberately reuses the
@@ -138,3 +171,5 @@ an atomic replacement.
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+See [tests/README.md](tests/README.md) for the test-by-test coverage and known gaps.
