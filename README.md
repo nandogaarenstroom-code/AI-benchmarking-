@@ -9,6 +9,8 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 ### In place
 
 - A dependency-free local HTTP server and browser dashboard
+- An offline voxel laboratory that visualizes quality, performance, context, and category scores
+  while retaining exact values in an accessible table
 - Discovery for Ollama, LM Studio, and OpenAI-compatible endpoints, plus a clearly marked demo model
 - Seeded benchmark generation, automatic scoring, retries, cancellation, and resumable progress
 - Fresh and accumulated context experiments with advertised-limit handling
