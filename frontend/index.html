@@ -1,22 +1,179 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Local AI Benchmark</title><style>
-body{font:16px system-ui;background:#0d1521;color:#eaf2ff;max-width:1000px;margin:40px auto;padding:0 20px}
-section{background:#162337;border:1px solid #29405f;border-radius:12px;padding:22px;margin:16px 0}
-button,select{padding:11px 16px;border-radius:8px;border:0;margin:6px;background:#35c98f;color:#092015;font-weight:700}
-.model{padding:14px;border:1px solid #385577;border-radius:8px;margin:8px 0;cursor:pointer}.selected{border-color:#35c98f}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.metric{font-size:24px;color:#35c98f}.muted{color:#9bb0c9}
-progress{width:100%;height:20px}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid #29405f}
-</style></head><body><h1>LOCAL AI BENCHMARK</h1><p class="muted">LOCAL ONLY · zero-interaction automated evaluation</p>
-<section><h2>Detected local models</h2><div id="models">Scanning local AI servers…</div>
-<label>Benchmark <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
-<button id="run">🚀 RUN BENCHMARK</button><button id="resume">RESUME PREVIOUS BENCHMARK</button></section>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Local AI Benchmark</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1521;--panel:#162337;--line:#29405f;--text:#eaf2ff;--muted:#9bb0c9;--accent:#35c98f}
+*{box-sizing:border-box}
+body{font:16px system-ui;background:var(--bg);color:var(--text);max-width:1100px;margin:40px auto;padding:0 20px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;margin:16px 0}
+button,select{padding:11px 16px;border-radius:8px;border:0;margin:6px;background:var(--accent);color:#092015;font-weight:700}
+.model{padding:14px;border:1px solid #385577;border-radius:8px;margin:8px 0;cursor:pointer}.selected{border-color:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.metric{font-size:24px;color:var(--accent)}.muted{color:var(--muted)}
+progress{width:100%;height:20px}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line)}
+a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px solid #fbbf24;padding-left:12px}
+.lab{position:relative;margin-top:16px;border:1px solid #385577;border-radius:10px;overflow:hidden;background:radial-gradient(circle at 50% 20%,#1c3550,#09111d 70%)}
+#voxel-lab{display:block;width:100%;height:auto;min-height:480px;touch-action:none}
+#voxel-detail{position:absolute;left:12px;top:12px;max-width:320px;padding:10px 12px;border:1px solid #4f6f93;border-radius:8px;background:#09111deb;pointer-events:none}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0}.key::before{content:"";display:inline-block;width:11px;height:11px;margin-right:6px;background:var(--key)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:600px){body{margin:18px auto}section{padding:15px}#voxel-lab{min-height:360px}}
+</style>
+</head>
+<body>
+<h1>LOCAL AI BENCHMARK</h1>
+<p class="muted">LOCAL ONLY · zero-interaction automated evaluation</p>
+<section>
+  <h2>Detected local models</h2>
+  <div id="models">Scanning local AI servers…</div>
+  <label>Benchmark <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
+  <button id="run">🚀 RUN BENCHMARK</button><button id="resume">RESUME PREVIOUS BENCHMARK</button>
+</section>
 <section id="progress" hidden><h2>BENCHMARK RUNNING</h2><progress id="bar" value="0" max="1"></progress><p id="live"></p></section>
-<section id="result" hidden><h2>BENCHMARK COMPLETE</h2><div class="grid"><div>Quality <div class="metric" id="quality"></div></div><div>Performance <div class="metric" id="performance"></div></div><div>Overall <div class="metric" id="overall"></div></div></div><p id="links"></p><h3>Category scores</h3><table id="categories"></table></section>
+<section id="result" hidden>
+  <h2>BENCHMARK COMPLETE <span id="demo-label" class="demo"></span></h2>
+  <div class="grid">
+    <div>Quality <div class="metric" id="quality"></div></div>
+    <div>Performance <div class="metric" id="performance"></div></div>
+    <div>Overall <div class="metric" id="overall"></div></div>
+  </div>
+  <p id="links"></p>
+  <h3>Voxel benchmark laboratory</h3>
+  <p class="muted">Tower height represents the reported score. Point to or select a tower for its exact value. This visualization summarizes controlled benchmark results; it does not predict every real-world workload.</p>
+  <div class="legend" aria-hidden="true">
+    <span class="key" style="--key:#35c98f">Strong (80–100)</span>
+    <span class="key" style="--key:#fbbf24">Average (50–79)</span>
+    <span class="key" style="--key:#ef6a6a">Weak (0–49)</span>
+    <span class="key" style="--key:#64748b">Not tested</span>
+  </div>
+  <div class="lab">
+    <canvas id="voxel-lab" width="1000" height="620" aria-label="Voxel chart of benchmark scores. Exact values are listed in the table below."></canvas>
+    <div id="voxel-detail" aria-live="polite">Select a tower to inspect a measurement.</div>
+  </div>
+  <p id="result-note" class="notice"></p>
+  <h3>Category scores (authoritative values)</h3>
+  <table id="categories"><caption class="sr-only">Exact benchmark category scores</caption></table>
+</section>
 <script>
-let selected=null;const $=id=>document.getElementById(id);
-async function load(){let d=await (await fetch('/api/models')).json();$('models').innerHTML=d.models.map((m,i)=>`<div class="model ${i===0?'selected':''}" data-i="${i}"><b>✓ ${m.name}</b><br><span class="muted">${m.backend} · ${m.size||'Unknown'}</span></div>`).join('');selected=d.models[0];document.querySelectorAll('.model').forEach(e=>e.onclick=()=>{document.querySelectorAll('.model').forEach(x=>x.classList.remove('selected'));e.classList.add('selected');selected=d.models[e.dataset.i]})}
-async function poll(){let s=await (await fetch('/api/status')).json();if(s.state==='running'){ $('progress').hidden=false;$('bar').max=s.total||1;$('bar').value=s.progress||0;$('live').textContent=`${s.progress||0} / ${s.total||0} · ${s.current_category||''} · passed ${s.passed||0} · failed ${s.failed||0}`;setTimeout(poll,400)}else if(s.state==='complete'){let r=await (await fetch('/api/results/'+s.result_id)).json();show(r)}}
-function show(r){$('progress').hidden=true;$('result').hidden=false;$('quality').textContent=r.scores.quality+'/100';$('performance').textContent=r.scores.performance+'/100';$('overall').textContent=r.scores.overall+'/100';$('links').innerHTML=`<a href="/api/results/${r.id}" download>JSON</a> · <a href="/results/${r.id}.pdf" download>PDF</a>`; $('categories').innerHTML='<tr><th>Category</th><th>Score</th></tr>'+Object.entries(r.quality.categories).filter(x=>x[0]!='overall').map(x=>`<tr><td>${x[0]}</td><td>${x[1]}</td></tr>`).join('')}
-$('run').onclick=async()=>{await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value})});poll()};$('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST'});poll()};load();poll();
-</script></body></html>
+let selected=null,currentResult=null,hitAreas=[];
+const $=id=>document.getElementById(id);
+const escapeText=value=>String(value??'');
+
+async function load(){
+  const response=await fetch('/api/models'),data=await response.json(),container=$('models');
+  container.replaceChildren();
+  data.models.forEach((model,index)=>{
+    const card=document.createElement('div');
+    card.className='model'+(index===0?' selected':'');
+    card.tabIndex=0;
+    const title=document.createElement('b'),meta=document.createElement('span');
+    title.textContent='✓ '+escapeText(model.name);
+    meta.className='muted';
+    meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`;
+    card.append(title,document.createElement('br'),meta);
+    const choose=()=>{document.querySelectorAll('.model').forEach(item=>item.classList.remove('selected'));card.classList.add('selected');selected=model};
+    card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
+    container.append(card);
+  });
+  selected=data.models[0]||null;
+}
+
+async function poll(){
+  const response=await fetch('/api/status'),status=await response.json();
+  if(status.state==='running'){
+    $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
+    $('live').textContent=`${status.progress||0} / ${status.total||0} · ${status.current_category||''} · passed ${status.passed||0} · failed ${status.failed||0}`;
+    setTimeout(poll,400);
+  }else if(status.state==='complete'){
+    const result=await (await fetch('/api/results/'+encodeURIComponent(status.result_id))).json();show(result);
+  }
+}
+
+function scoreColor(score){
+  if(score===null||score===undefined)return '#64748b';
+  if(score>=80)return '#35c98f';
+  if(score>=50)return '#fbbf24';
+  return '#ef6a6a';
+}
+function shade(hex,amount){
+  const number=parseInt(hex.slice(1),16);
+  return '#'+[number>>16,(number>>8)&255,number&255].map(value=>Math.max(0,Math.min(255,value+amount)).toString(16).padStart(2,'0')).join('');
+}
+function polygon(context,points,fill,stroke='#09111d'){
+  context.beginPath();points.forEach(([x,y],index)=>index?context.lineTo(x,y):context.moveTo(x,y));context.closePath();
+  context.fillStyle=fill;context.fill();context.strokeStyle=stroke;context.stroke();
+}
+function cube(context,x,y,size,height,color){
+  const half=size/2,top=y-height;
+  const topFace=[[x,top-half/2],[x+half,top],[x,top+half/2],[x-half,top]];
+  const left=[[x-half,top],[x,top+half/2],[x,y+half/2],[x-half,y]];
+  const right=[[x+half,top],[x,top+half/2],[x,y+half/2],[x+half,y]];
+  polygon(context,left,shade(color,-28));polygon(context,right,shade(color,-48));polygon(context,topFace,shade(color,18));
+  return [[x-half,top-half/2],[x+half,top-half/2],[x+half,y+half/2],[x-half,y+half/2]];
+}
+function drawLab(){
+  if(!currentResult)return;
+  const canvas=$('voxel-lab'),context=canvas.getContext('2d'),width=canvas.width,height=canvas.height;
+  context.clearRect(0,0,width,height);hitAreas=[];
+  context.strokeStyle='#1d3853';context.lineWidth=1;
+  for(let i=-10;i<=10;i++){context.beginPath();context.moveTo(width/2+i*55,80);context.lineTo(width/2+i*55-390,height-70);context.stroke();context.beginPath();context.moveTo(width/2+i*55,80);context.lineTo(width/2+i*55+390,height-70);context.stroke()}
+  const categories=Object.entries(currentResult.quality.categories).filter(([name])=>name!=='overall');
+  const contextScore=currentResult.scores.context_behavior?.fresh;
+  const towers=[
+    {name:'QUALITY ZONE',score:currentResult.scores.quality,zone:true,detail:'Fresh-context primary quality score.'},
+    {name:'PERFORMANCE ZONE',score:currentResult.scores.performance,zone:true,detail:'Controlled local throughput-derived score.'},
+    {name:'CONTEXT ZONE',score:contextScore,zone:true,detail:'Fresh context-retrieval score; separate from primary quality.'},
+    ...categories.map(([name,score])=>({name,score,detail:'Primary category score from applicable generated tests.'}))
+  ];
+  towers.forEach((tower,index)=>{
+    const zone=tower.zone,row=zone?0:1+Math.floor((index-3)/5),column=zone?index*2+1:(index-3)%5;
+    const x=zone?300+column*70:280+(column-row)*92;
+    const y=zone?170:270+(column+row)*38;
+    const value=tower.score===null||tower.score===undefined?null:Number(tower.score);
+    const blocks=value===null?1:Math.max(1,Math.ceil(value/10)),blockHeight=zone?15:12,size=zone?58:48,color=scoreColor(value);
+    for(let block=0;block<blocks;block++)cube(context,x,y-block*blockHeight,size,blockHeight,color);
+    const bounds=cube(context,x,y-blocks*blockHeight,size,0,color);
+    hitAreas.push({tower,bounds:{left:x-size/2,right:x+size/2,top:y-blocks*blockHeight-size/4,bottom:y+size/4}});
+    context.fillStyle='#dceafe';context.font=zone?'bold 12px system-ui':'11px system-ui';context.textAlign='center';
+    const label=tower.name.length>18?tower.name.slice(0,16)+'…':tower.name;
+    context.fillText(label,x,y+size/2+15);context.fillStyle=value===null?'#94a3b8':'#ffffff';
+    context.fillText(value===null?'N/T':value.toFixed(1),x,y+size/2+29);
+  });
+}
+function inspectAt(event){
+  const canvas=$('voxel-lab'),rect=canvas.getBoundingClientRect(),x=(event.clientX-rect.left)*canvas.width/rect.width,y=(event.clientY-rect.top)*canvas.height/rect.height;
+  const match=[...hitAreas].reverse().find(area=>x>=area.bounds.left&&x<=area.bounds.right&&y>=area.bounds.top&&y<=area.bounds.bottom);
+  canvas.style.cursor=match?'pointer':'default';
+  if(match){
+    const value=match.tower.score===null||match.tower.score===undefined?'Not tested':Number(match.tower.score).toFixed(1)+'/100';
+    $('voxel-detail').textContent=`${match.tower.name}: ${value}. ${match.tower.detail}`;
+  }
+}
+function show(result){
+  currentResult=result;$('progress').hidden=true;$('result').hidden=false;
+  $('quality').textContent=result.scores.quality+'/100';$('performance').textContent=result.scores.performance+'/100';$('overall').textContent=result.scores.overall+'/100';
+  $('demo-label').textContent=result.demo?'— DEMO DATA':'';
+  $('result-note').textContent=result.demo?'Demo data validates the application flow and must not be interpreted as model performance.':'These are controlled local benchmark measurements, not universal performance guarantees.';
+  const links=$('links');links.replaceChildren();
+  [['JSON','/api/results/'+encodeURIComponent(result.id)],['PDF','/results/'+encodeURIComponent(result.id)+'.pdf']].forEach(([label,url],index)=>{
+    if(index)links.append(' · ');const link=document.createElement('a');link.href=url;link.download='';link.textContent=label;links.append(link);
+  });
+  const table=$('categories');table.replaceChildren();
+  const header=document.createElement('tr');['Category','Score','Meaning'].forEach(text=>{const cell=document.createElement('th');cell.textContent=text;header.append(cell)});table.append(header);
+  Object.entries(result.quality.categories).filter(([name])=>name!=='overall').forEach(([name,score])=>{
+    const row=document.createElement('tr'),meaning=score===null?'Not tested':score>=80?'Strong':score>=50?'Average':'Weak';
+    [name,score===null?'Not tested':score+'/100',meaning].forEach(text=>{const cell=document.createElement('td');cell.textContent=text;row.append(cell)});table.append(row);
+  });
+  drawLab();$('result').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+$('voxel-lab').addEventListener('pointermove',inspectAt);
+$('voxel-lab').addEventListener('pointerdown',inspectAt);
+$('run').onclick=async()=>{if(!selected)return;await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value})});poll()};
+$('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST'});poll()};
+load();poll();
+</script>
+</body>
+</html>
