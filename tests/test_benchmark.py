@@ -268,6 +268,51 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIsNone(manager._performance({"demo": True}, [{"id": "test"}]))
             self.assertEqual(manager.status()["state"], "cancelled")
 
+    def test_execute_does_not_retry_after_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+
+            def answer_and_cancel(*_args, **_kwargs):
+                manager.cancel_requested.set()
+                return "green"
+
+            with patch.object(manager, "_answer", side_effect=answer_and_cancel) as answer:
+                with self.assertRaises(RuntimeError):
+                    manager._execute(
+                        {"demo": True},
+                        {"prompt": "What color?", "expected_answer": "blue",
+                         "evaluation_method": "contains_all", "required_terms": ["blue"]},
+                    )
+            answer.assert_called_once()
+
+    def test_run_does_not_start_another_repeat_after_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            tests = [{
+                "id": "reasoning-001", "category": "Reasoning", "difficulty": "Easy",
+                "prompt": "What color?", "expected_answer": "blue",
+                "evaluation_method": "contains_all", "required_terms": ["blue"],
+            }]
+
+            def execute_and_cancel(*_args, **_kwargs):
+                manager.cancel()
+                return {**tests[0], "answer": "blue", "passed": True, "score": 10,
+                        "status": "PASS", "latency_s": .1, "ttft_s": .1,
+                        "generation_s": .1, "prompt_tokens": 1, "output_tokens": 1,
+                        "error": None, "context_reset": True, "attempts": []}
+
+            with patch("backend.benchmark.make_tests", return_value=tests), \
+                    patch("backend.benchmark.make_context_tests") as context_tests, \
+                    patch.object(manager, "_execute", side_effect=execute_and_cancel) as execute:
+                manager.run({
+                    "profile": "QUICK", "repeat_runs": 3,
+                    "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
+                              "endpoint": "local://demo", "demo": True},
+                })
+            self.assertEqual(manager.status()["state"], "cancelled")
+            execute.assert_called_once()
+            context_tests.assert_not_called()
+
     def test_pdf_includes_dashboard_measurements_and_escapes_model_names(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "report.pdf"

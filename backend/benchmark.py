@@ -29,6 +29,10 @@ COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Expert")
 
 
+class _BenchmarkCancelled(RuntimeError):
+    """Stop the worker promptly after an in-flight model request is cancelled."""
+
+
 def _test(category, i, rng):
     difficulty = DIFFICULTIES[i % 4]
     a, b = rng.randint(2, 99), rng.randint(2, 99)
@@ -222,6 +226,9 @@ class BenchmarkManager:
         try:
             self._run(payload)
             return True
+        except _BenchmarkCancelled:
+            self._cancel_if_requested()
+            return False
         except Exception as exc:
             self._status.update(state="error", error=str(exc)[:500])
             return False
@@ -262,6 +269,8 @@ class BenchmarkManager:
     def _execute(self, model, test, history=None, generation_options=None):
         attempts = []
         for attempt in range(1, 4):
+            if self.cancel_requested.is_set():
+                raise _BenchmarkCancelled
             started = time.perf_counter()
             try:
                 answer = self._answer(model, test, history, generation_options)
@@ -362,6 +371,8 @@ class BenchmarkManager:
                                 activity=f"Evaluating {test['category']} · {test['difficulty']} test.")
             repetitions = []
             for repeat_index in range(repeat_runs):
+                if self._cancel_if_requested():
+                    return
                 run_options = dict(generation_options)
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
                 repetitions.append(self._execute(model, test, generation_options=run_options))
@@ -534,7 +545,11 @@ class BenchmarkManager:
             if self._cancel_if_requested():
                 return None
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
+                def sample(test):
+                    if self.cancel_requested.is_set():
+                        return None
+                    return self._answer(model, test, generation_options=generation_options)
+                list(pool.map(sample, samples))
             if self._cancel_if_requested():
                 return None
             progress += 1
