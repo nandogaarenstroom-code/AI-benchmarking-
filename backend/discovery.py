@@ -6,7 +6,36 @@ import urllib.request
 import urllib.error
 import time
 import codecs
+import math
 from datetime import datetime, timezone
+
+
+GENERATION_DEFAULTS = {
+    "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
+    "repeat_penalty": 1.1, "max_tokens": 128, "seed": 12345,
+}
+
+
+def normalize_generation_options(options=None):
+    """Validate generation settings supplied by the local dashboard or API."""
+    options = options if isinstance(options, dict) else {}
+    limits = {
+        "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),
+        "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
+        "max_tokens": (1, 4096), "seed": (0, 2147483647),
+    }
+    normalized = {}
+    for name, default in GENERATION_DEFAULTS.items():
+        try:
+            value = float(options.get(name, default))
+            if not math.isfinite(value):
+                raise ValueError
+        except (TypeError, ValueError):
+            value = default
+        lower, upper = limits[name]
+        value = min(upper, max(lower, value))
+        normalized[name] = int(value) if name in ("top_k", "max_tokens", "seed") else value
+    return normalized
 
 
 class AdapterError(RuntimeError):
@@ -27,6 +56,24 @@ def _get(url, timeout=0.7):
             return json.loads(response.read())
     except Exception:
         return None
+
+
+def _llama_runtime_details(endpoint):
+    base_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+    props = _get(base_endpoint + "/props")
+    if not isinstance(props, dict):
+        return {}
+    settings = props.get("default_generation_settings") or {}
+    details = {}
+    details["llama_cpp"] = True
+    for key, value in (
+        ("backend_version", props.get("version") or props.get("server_version") or props.get("build_info")),
+        ("context_length", settings.get("n_ctx") if settings.get("n_ctx") is not None else props.get("n_ctx")),
+        ("gpu_offload", props.get("n_gpu_layers") if props.get("n_gpu_layers") is not None else props.get("gpu_layers")),
+    ):
+        if value is not None:
+            details[key] = value
+    return details
 
 
 def discover_models():
@@ -52,9 +99,11 @@ def discover_models():
                            ("OpenAI-compatible", "http://localhost:8080/v1")):
         data = _get(endpoint + "/models")
         if data:
+            runtime_details = _llama_runtime_details(endpoint)
             for item in data.get("data", []):
                 models.append({"id": item.get("id"), "name": item.get("id"),
                                "backend": name, "endpoint": endpoint, "size": "Unknown",
+                               **runtime_details,
                                "capabilities": {"streaming": True, "structured_output": "Unknown",
                                                 "tools": "Unknown"}, "demo": False})
     return models
@@ -68,6 +117,8 @@ def model_info(model):
         "context_length": model.get("context_length", "Unknown"), "vocabulary_size": "Unknown",
         "file_size": model.get("size", "Unknown"), "backend": model.get("backend", "Unknown"),
         "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
+        "gpu_offload": model.get("gpu_offload", "Unknown"),
+        "llama_cpp": model.get("llama_cpp", False),
         "capabilities": model.get("capabilities", {}),
     }
 
@@ -81,14 +132,23 @@ def hardware_info():
             "collected_at": datetime.now(timezone.utc).isoformat()}
 
 
-def ask_model(model, prompt, history=None):
+def ask_model(model, prompt, history=None, options=None):
     """Send one isolated prompt, or an explicit history for context accumulation tests."""
+    options = normalize_generation_options(options)
     messages = list(history or []) + [{"role": "user", "content": prompt}]
     try:
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
                 model["endpoint"] + "/api/generate",
-                data=json.dumps({"model": model["id"], "prompt": prompt, "stream": True}).encode(),
+                data=json.dumps({
+                    "model": model["id"], "prompt": prompt, "stream": True,
+                    "options": {
+                        "temperature": options["temperature"], "top_p": options["top_p"],
+                        "top_k": options["top_k"], "min_p": options["min_p"],
+                        "repeat_penalty": options["repeat_penalty"], "num_predict": options["max_tokens"],
+                        "seed": options["seed"],
+                    },
+                }).encode(),
                 headers={"Content-Type": "application/json"})
             started = time.perf_counter()
             with urllib.request.urlopen(request, timeout=60) as response:
@@ -108,13 +168,17 @@ def ask_model(model, prompt, history=None):
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
                         "generation_s": time.perf_counter() - (first_token_at or started)}
+        body = {
+            "model": model["id"], "messages": messages,
+            "temperature": options["temperature"], "top_p": options["top_p"],
+            "max_tokens": options["max_tokens"], "seed": options["seed"], "stream": True,
+        }
+        if model.get("llama_cpp"):
+            body.update({"top_k": options["top_k"], "min_p": options["min_p"],
+                         "repeat_penalty": options["repeat_penalty"]})
         request = urllib.request.Request(
-            model["endpoint"] + "/chat/completions",
-            data=json.dumps({"model": model["id"], "messages": messages,
-                             "temperature": 0, "max_tokens": 128}).encode(),
+            model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
-        request.data = json.dumps({"model": model["id"], "messages": messages,
-                                   "temperature": 0, "max_tokens": 128, "stream": True}).encode()
         started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=60) as response:
             decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None
