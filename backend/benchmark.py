@@ -127,6 +127,7 @@ class BenchmarkManager:
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
             "progress": 0, "total": 0, "passed": 0, "failed": 0,
+            "result_directory": str(self.root.resolve()),
         }
 
     def status(self): return self._status
@@ -174,6 +175,9 @@ class BenchmarkManager:
             if self.running:
                 return False
             self.running = True
+            self._status.update(state="running", phase="Starting benchmark",
+                                activity="Preparing the local model and test suite.",
+                                progress=0, total=1)
             worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
             try:
                 worker.start()
