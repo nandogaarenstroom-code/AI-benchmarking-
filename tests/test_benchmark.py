@@ -13,11 +13,18 @@ from backend.evaluation import evaluate
 class BenchmarkTests(unittest.TestCase):
     def test_llama_runtime_details_only_include_reported_values(self):
         with patch("backend.discovery._get", return_value={
-                "version": "b1234", "default_generation_settings": {"n_ctx": 8192},
+                "version": "b1234", "default_generation_settings": {
+                    "n_ctx": 8192, "temperature": 0.7, "top_p": 0.8, "top_k": 30,
+                    "min_p": 0.1, "repeat_penalty": 1.15, "n_predict": 256, "seed": 19,
+                },
                 "n_gpu_layers": 0}):
             self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {
                 "llama_cpp": True, "backend_version": "b1234",
                 "context_length": 8192, "gpu_offload": 0,
+                "generation_defaults": {
+                    "temperature": 0.7, "top_p": 0.8, "top_k": 30, "min_p": 0.1,
+                    "repeat_penalty": 1.15, "max_tokens": 256, "seed": 19,
+                },
             })
         with patch("backend.discovery._get", return_value=None):
             self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {})
@@ -160,6 +167,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("fresh", data["context_scaling"])
             self.assertIn("accumulated", data["context_scaling"])
             self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
+            self.assertEqual(manager.status()["state"], "complete")
+            self.assertEqual(manager.status()["phase"], "Benchmark complete")
+            self.assertEqual(manager.status()["result_directory"], str(Path(directory).resolve()))
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
