@@ -58,6 +58,23 @@ def _get(url, timeout=0.7):
         return None
 
 
+def _llama_runtime_details(endpoint):
+    base_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
+    props = _get(base_endpoint + "/props")
+    if not isinstance(props, dict):
+        return {}
+    settings = props.get("default_generation_settings") or {}
+    details = {}
+    for key, value in (
+        ("backend_version", props.get("version") or props.get("server_version") or props.get("build_info")),
+        ("context_length", settings.get("n_ctx") if settings.get("n_ctx") is not None else props.get("n_ctx")),
+        ("gpu_offload", props.get("n_gpu_layers") if props.get("n_gpu_layers") is not None else props.get("gpu_layers")),
+    ):
+        if value is not None:
+            details[key] = value
+    return details
+
+
 def discover_models():
     models = [{
         "id": "demo-local",
@@ -81,9 +98,11 @@ def discover_models():
                            ("OpenAI-compatible", "http://localhost:8080/v1")):
         data = _get(endpoint + "/models")
         if data:
+            runtime_details = _llama_runtime_details(endpoint)
             for item in data.get("data", []):
                 models.append({"id": item.get("id"), "name": item.get("id"),
                                "backend": name, "endpoint": endpoint, "size": "Unknown",
+                               **runtime_details,
                                "capabilities": {"streaming": True, "structured_output": "Unknown",
                                                 "tools": "Unknown"}, "demo": False})
     return models
@@ -97,6 +116,7 @@ def model_info(model):
         "context_length": model.get("context_length", "Unknown"), "vocabulary_size": "Unknown",
         "file_size": model.get("size", "Unknown"), "backend": model.get("backend", "Unknown"),
         "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
+        "gpu_offload": model.get("gpu_offload", "Unknown"),
         "capabilities": model.get("capabilities", {}),
     }
 

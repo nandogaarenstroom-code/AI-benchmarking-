@@ -33,7 +33,15 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <h2>Detected local models</h2>
   <div id="models">Scanning local AI servers…</div>
   <label>Benchmark <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
-  <fieldset>
+  <label>Generation preset <select id="preset">
+    <option value="repeatable">Repeatable</option>
+    <option value="balanced">Balanced</option>
+    <option value="creative">Creative</option>
+    <option value="custom">Custom</option>
+  </select></label>
+  <details>
+    <summary>Advanced settings</summary>
+    <fieldset>
     <legend>Generation settings (llama.cpp / Ollama)</legend>
     <div class="settings">
       <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0"></label>
@@ -43,9 +51,11 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
       <label>Repeat penalty<input id="repeat-penalty" type="number" min="0.5" max="2" step="0.05" value="1.1"></label>
       <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="4096" step="1" value="128"></label>
       <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
+      <label>Primary test repeats<select id="repeat-runs"><option value="1">1 (default)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select></label>
     </div>
-    <p class="muted">Settings are recorded with each result. Context window size is set when starting llama-server (for example, with -c); this benchmark cannot change it per request.</p>
-  </fieldset>
+    <p class="muted">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
+    </fieldset>
+  </details>
   <button id="run">🚀 RUN BENCHMARK</button><button id="resume">RESUME PREVIOUS BENCHMARK</button>
 </section>
 <section id="progress" hidden><h2>BENCHMARK RUNNING</h2><progress id="bar" value="0" max="1"></progress><p id="live"></p></section>
@@ -70,6 +80,11 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     <div id="voxel-detail" aria-live="polite">Select a tower to inspect a measurement.</div>
   </div>
   <p id="result-note" class="notice"></p>
+  <details>
+    <summary>Runtime details (reported by the local server when available)</summary>
+    <table id="runtime-details"><caption class="sr-only">Read-only model runtime details</caption></table>
+  </details>
+  <p id="repeat-summary" class="muted"></p>
   <h3>Category scores (authoritative values)</h3>
   <table id="categories"><caption class="sr-only">Exact benchmark category scores</caption></table>
 </section>
@@ -173,6 +188,12 @@ function show(result){
   $('quality').textContent=result.scores.quality+'/100';$('performance').textContent=result.scores.performance+'/100';$('overall').textContent=result.scores.overall+'/100';
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
   $('result-note').textContent=result.demo?'Demo data validates the application flow and must not be interpreted as model performance.':'These are controlled local benchmark measurements, not universal performance guarantees.';
+  const runtime=$('runtime-details');runtime.replaceChildren();
+  const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
+    ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload]];
+  details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
+  const repeatScores=result.uncertainty?.repeat_run_scores||[];
+  $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · observed quality variability: ${repeatScores.length>1?`mean ${result.uncertainty.quality_mean}/100, standard deviation ${result.uncertainty.quality_stddev}`:'not estimated (single run)'}. Context and performance measurements were run once.`;
   const links=$('links');links.replaceChildren();
   [['JSON','/api/results/'+encodeURIComponent(result.id)],['PDF','/results/'+encodeURIComponent(result.id)+'.pdf']].forEach(([label,url],index)=>{
     if(index)links.append(' · ');const link=document.createElement('a');link.href=url;link.download='';link.textContent=label;links.append(link);
@@ -188,7 +209,15 @@ function show(result){
 
 $('voxel-lab').addEventListener('pointermove',inspectAt);
 $('voxel-lab').addEventListener('pointerdown',inspectAt);
-$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options})});poll()};
+const presets={
+  repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
+  balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
+  creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:128,seed:12345}
+};
+const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
+$('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
+Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
+$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)})});poll()};
 $('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST'});poll()};
 load();poll();
 </script>

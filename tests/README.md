@@ -24,6 +24,8 @@ All current tests are in `tests/test_benchmark.py`.
 Verifies generation settings are normalized to supported ranges and mapped into requests sent to
 Ollama and OpenAI-compatible adapters. The demo export test also verifies the selected setting is
 retained in result configuration. It does not replace integration testing against live servers.
+Additional coverage verifies repeated-run score metadata and that runtime details are included only
+when reported by the local server.
 
 ### `test_domain_evaluators`
 

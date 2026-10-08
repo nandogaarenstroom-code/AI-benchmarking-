@@ -5,11 +5,21 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
-from backend.discovery import ask_model, normalize_generation_options
+from backend.discovery import _llama_runtime_details, ask_model, normalize_generation_options
 from backend.evaluation import evaluate
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_llama_runtime_details_only_include_reported_values(self):
+        with patch("backend.discovery._get", return_value={
+                "version": "b1234", "default_generation_settings": {"n_ctx": 8192},
+                "n_gpu_layers": 0}):
+            self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {
+                "backend_version": "b1234", "context_length": 8192, "gpu_offload": 0,
+            })
+        with patch("backend.discovery._get", return_value=None):
+            self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {})
+
     def test_generation_options_are_normalized(self):
         options = normalize_generation_options({
             "temperature": 3, "top_p": "invalid", "top_k": -1,
@@ -105,6 +115,20 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("fresh", data["context_scaling"])
             self.assertIn("accumulated", data["context_scaling"])
             self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
+
+    def test_repeated_demo_run_records_quality_variability(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager.run({"profile": "QUICK", "repeat_runs": 2,
+                         "generation_options": {"seed": 31},
+                         "model": {"name": "Repeat Demo", "backend": "Demo",
+                                   "endpoint": "local://demo", "demo": True}})
+            result_path = next(Path(directory).glob("Repeat_Demo_*.json"))
+            result = json.loads(result_path.read_text())
+            self.assertEqual(result["configuration"]["repeat_runs"], 2)
+            self.assertEqual(result["uncertainty"]["repeat_run_scores"], [100.0, 100.0])
+            self.assertEqual(result["uncertainty"]["quality_stddev"], 0.0)
+            self.assertEqual([rep["seed"] for rep in result["tests"][0]["replicates"]], [31, 32])
 
 
 if __name__ == "__main__":

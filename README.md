@@ -65,6 +65,12 @@ maximum output tokens, and the sampling seed. Defaults favor repeatable evaluati
 `top_p: 1`, `seed: 12345`); settings are included in saved result configuration and passed to
 Ollama or OpenAI-compatible adapters. The llama.cpp context window is configured when launching
 `llama-server` (for example, with `-c`); it cannot be changed for an individual request here.
+Choose a **Repeatable**, **Balanced**, or **Creative** preset on the main screen; individual
+sampling controls and optional 2–5 repeats of the primary test suite are collapsed under
+**Advanced settings**. Repeats use consecutive sampling seeds and report per-run quality and its
+standard deviation. Context-scaling and performance experiments still run once. Available server
+version, context length, and GPU-offload information are shown as read-only runtime details; values
+the local server does not report remain `Unknown`.
 
 The current dependency-free engine uses deterministic generated tasks and category-specific
 evaluators. It provides a stable

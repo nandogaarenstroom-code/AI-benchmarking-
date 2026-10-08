@@ -223,10 +223,16 @@ class BenchmarkManager:
         generation_options = normalize_generation_options(
             payload.get("generation_options", payload.get("parameters")))
         payload["generation_options"] = generation_options
+        try:
+            repeat_runs = min(5, max(1, int(payload.get("repeat_runs", 1))))
+        except (TypeError, ValueError):
+            repeat_runs = 1
+        payload["repeat_runs"] = repeat_runs
         tests = payload.get("tests") or make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
-        self._status.update(state="running", total=len(tests), progress=len(completed))
+        self._status.update(state="running", total=len(tests) * repeat_runs,
+                            progress=len(completed) * repeat_runs)
         # Warm up and discard warm-up outputs before measured requests.
         for _ in range(3):
             self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
@@ -239,11 +245,36 @@ class BenchmarkManager:
                 return
             if test["id"] in done: continue
             self._status.update(current_category=test["category"], current_test=test["id"])
-            item = self._execute(model, test, generation_options=generation_options)
+            repetitions = []
+            for repeat_index in range(repeat_runs):
+                run_options = dict(generation_options)
+                run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
+                repetitions.append(self._execute(model, test, generation_options=run_options))
+            if repeat_runs > 1:
+                item = {
+                    **repetitions[0],
+                    "score": round(statistics.mean(entry["score"] for entry in repetitions), 2),
+                    "passed": all(entry["passed"] for entry in repetitions),
+                    "status": "PASS" if all(entry["passed"] for entry in repetitions) else "FAILED",
+                    "latency_s": round(statistics.mean(entry["latency_s"] for entry in repetitions), 4),
+                    "ttft_s": round(statistics.mean(entry["ttft_s"] for entry in repetitions), 4),
+                    "generation_s": round(statistics.mean(entry["generation_s"] for entry in repetitions), 4),
+                    "prompt_tokens": round(statistics.mean(entry["prompt_tokens"] for entry in repetitions)),
+                    "output_tokens": round(statistics.mean(entry["output_tokens"] for entry in repetitions)),
+                    "replicates": [
+                        {"seed": (generation_options["seed"] + index) % 2147483648,
+                         "score": entry["score"], "passed": entry["passed"],
+                         "latency_s": entry["latency_s"], "answer": entry["answer"]}
+                        for index, entry in enumerate(repetitions)
+                    ],
+                }
+            else:
+                item = repetitions[0]
             completed.append(item)
             if not item["passed"]: failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
                                                      "attempts": item["attempts"]})
-            self._status.update(progress=len(completed), passed=sum(x["passed"] for x in completed),
+            self._status.update(progress=len(completed) * repeat_runs,
+                                passed=sum(x["passed"] for x in completed),
                                 failed=len(failures))
             self._atomic_state_write({**payload, "seed": seed, "profile": profile,
                                       "model": model, "tests": tests,
@@ -273,11 +304,20 @@ class BenchmarkManager:
         tokens = sum(x["output_tokens"] for x in completed)
         quality = self._scores(completed)
         score_values = [item["score"] * 10 for item in completed]
-        seed_scores = []
-        for offset in range(3):
-            rng = random.Random(seed + offset)
-            sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
-            seed_scores.append(round(statistics.mean(sample), 2))
+        repeat_quality_scores = []
+        if repeat_runs > 1:
+            for repeat_index in range(repeat_runs):
+                run_results = []
+                for item in completed:
+                    replicate = item["replicates"][repeat_index]
+                    run_results.append({**item, "score": replicate["score"]})
+                repeat_quality_scores.append(self._scores(run_results)["overall"])
+        seed_scores = repeat_quality_scores
+        if not seed_scores:
+            for offset in range(3):
+                rng = random.Random(seed + offset)
+                sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
+                seed_scores.append(round(statistics.mean(sample), 2))
         perf = self._performance(model, tests[:min(5, len(tests))], tokens, duration,
                                  generation_options)
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -285,6 +325,8 @@ class BenchmarkManager:
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
                   "top_p": generation_options["top_p"], "generation_options": generation_options,
+                  "repeat_runs": repeat_runs,
+                  "repeat_seed_policy": "sampling seed increments by one per repeat" if repeat_runs > 1 else "single run",
                   "context_reset_per_test": True, "context_suite": context_sizes,
                   "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
                                       if size not in context_sizes],
@@ -298,7 +340,8 @@ class BenchmarkManager:
                   "uncertainty": {"independent_seed_scores": seed_scores,
                                   "quality_mean": round(statistics.mean(seed_scores), 2),
                                   "quality_stddev": round(statistics.pstdev(seed_scores), 2),
-                                  "minimum_samples": len(completed)},
+                                  "minimum_samples": len(completed),
+                                  "repeat_run_scores": repeat_quality_scores},
                   "derived_metrics": {"quality_per_latency": round(quality["overall"]/statistics.mean(latencies), 2)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
         result["id"] = f"{model_info(model)['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
