@@ -84,7 +84,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     </fieldset>
   </details>
   <button class="primary" id="run">Run benchmark</button><button class="secondary" id="resume">Resume previous run</button>
-  <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
+  <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. Each run gets its own date-and-time folder containing JSON, CSV, PDF, and SVG exports.</p>
   <p id="run-error" role="alert" hidden></p>
 </section>
 <section id="progress" aria-live="polite" hidden>
@@ -306,10 +306,11 @@ function show(result,resultDirectory){
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
   $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · observed quality variability: ${repeatScores.length>1?`mean ${result.uncertainty.quality_mean}/100, standard deviation ${result.uncertainty.quality_stddev}`:'not estimated (single run)'}. Context and performance measurements were run once.`;
-  $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
+  $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · this folder contains this benchmark's exports.`;
   const links=$('result-links');links.replaceChildren();
   [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]].forEach(([label,filename])=>{
-    const link=document.createElement('a');link.href='/results/'+encodeURIComponent(filename);
+    const folder=result.output_directory?encodeURIComponent(result.output_directory)+'/':'';
+    const link=document.createElement('a');link.href='/results/'+folder+encodeURIComponent(filename);
     link.download=filename;link.textContent=`Download ${label}`;links.append(link);
   });
   const table=$('categories');table.replaceChildren();

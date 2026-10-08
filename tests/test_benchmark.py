@@ -168,11 +168,13 @@ class BenchmarkTests(unittest.TestCase):
                 manager.run({"profile": "QUICK", "generation_options": {"temperature": 0.6},
                              "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
                                        "endpoint": "local://demo", "demo": True}})
-            files = list(Path(directory).glob("benchmark_*"))
+            files = list(Path(directory).glob("*/*"))
             self.assertTrue(any(p.suffix == ".json" for p in files))
             self.assertTrue(any(p.suffix == ".csv" for p in files))
             self.assertTrue(any(p.suffix == ".pdf" for p in files))
-            data = json.loads(next(p for p in files if p.suffix == ".json").read_text())
+            result_path = next(p for p in files if p.suffix == ".json")
+            data = json.loads(result_path.read_text())
+            self.assertEqual(data["output_directory"], result_path.parent.name)
             self.assertEqual(data["scores"]["quality"], 100)
             self.assertTrue(data["demo"])
             self.assertEqual(data["configuration"]["generation_options"]["temperature"], 0.6)
@@ -183,7 +185,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
-            self.assertEqual(manager.status()["result_directory"], str(Path(directory).resolve()))
+            self.assertEqual(manager.status()["result_directory"], str(result_path.parent.resolve()))
+            self.assertEqual(manager.list_results()[0]["output_directory"], result_path.parent.name)
+            self.assertEqual(manager.load_result(data["id"])["id"], data["id"])
 
     def test_pdf_includes_dashboard_measurements_and_escapes_model_names(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -244,7 +248,7 @@ class BenchmarkTests(unittest.TestCase):
                              "generation_options": {"seed": 31},
                              "model": {"id": "demo-local", "name": "Repeat Demo", "backend": "Demo",
                                        "endpoint": "local://demo", "demo": True}})
-            result_path = next(Path(directory).glob("benchmark_*.json"))
+            result_path = next(Path(directory).glob("*/*.json"))
             result = json.loads(result_path.read_text())
             self.assertEqual(result["configuration"]["repeat_runs"], 2)
             self.assertEqual(result["uncertainty"]["repeat_run_scores"], [100.0, 100.0])
@@ -260,7 +264,7 @@ class BenchmarkTests(unittest.TestCase):
                 "model": {"id": "demo-local", "name": "demo", "backend": "Demo",
                           "endpoint": "local://demo", "demo": True},
             }))
-            result_path = next(Path(directory).glob("benchmark_*.json"))
+            result_path = next(Path(directory).glob("*/*.json"))
             result = json.loads(result_path.read_text())
             self.assertEqual(len(result["tests"]), 25)
             self.assertNotEqual(result["tests"][0]["id"], "attack")
@@ -289,6 +293,8 @@ class BenchmarkTests(unittest.TestCase):
             }
             manager._write_outputs(result)
             self.assertTrue((root / f"{result['id']}.json").is_file())
+            self.assertEqual(manager.load_result(result["id"])["id"], result["id"])
+            self.assertIsNone(manager.list_results()[0]["output_directory"])
             csv_row = (root / f"{result['id']}.csv").read_text().splitlines()[1]
             self.assertIn(",'=1+1,", csv_row)
             result["id"] = "../escaped"
@@ -299,9 +305,10 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "results"
             root.mkdir()
-            external = Path(directory) / "private.json"
-            external.write_text('{"model":{"name":"private"}}')
-            (root / "linked.json").symlink_to(external)
+            external = Path(directory) / "private"
+            external.mkdir()
+            (external / "linked.json").write_text('{"model":{"name":"private"}}')
+            (root / "linked-run").symlink_to(external, target_is_directory=True)
             manager = BenchmarkManager(root)
             self.assertEqual(manager.list_results(), [])
             self.assertIsNone(manager.load_result("linked"))

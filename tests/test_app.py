@@ -1,7 +1,9 @@
 import http.client
 import json
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import app
@@ -93,6 +95,33 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(app.CSRF_TOKEN, body)
         self.assertNotIn("__CSRF_TOKEN__", body)
+
+    def test_result_download_supports_timestamped_run_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_name = "2026-10-08_12-55-34_123456"
+            run_dir = root / run_name
+            run_dir.mkdir()
+            (run_dir / "report.pdf").write_bytes(b"%PDF test")
+            with patch.object(app, "manager", type("Manager", (), {"root": root})()):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.server.server_port, timeout=3)
+                connection.request("GET", f"/results/{run_name}/report.pdf",
+                                   headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "application/pdf")
+                self.assertEqual(response.read(), b"%PDF test")
+                connection.close()
+
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.server.server_port, timeout=3)
+                connection.request("GET", "/results/../private.pdf",
+                                   headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 404)
+                response.read()
+                connection.close()
 
 
 if __name__ == "__main__":

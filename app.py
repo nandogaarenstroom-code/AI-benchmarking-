@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import hmac
 import os
+import re
 import secrets
 import socketserver
 import threading
@@ -131,12 +132,28 @@ class Handler(BaseHTTPRequestHandler):
             result = manager.load_result(path.rsplit("/", 1)[-1])
             return self._json(result, 200 if result else 404)
         if path.startswith("/results/"):
-            file_path = manager.root / Path(path).name
-            if (file_path.exists() and file_path.is_file() and not file_path.is_symlink() and
-                    file_path.resolve().parent == manager.root.resolve()):
+            parts = path.removeprefix("/results/").split("/")
+            if len(parts) == 1:
+                file_path = manager.root / parts[0]
+                expected_parent = manager.root.resolve()
+                safe_parent = True
+            elif (len(parts) == 2 and
+                  re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{6}", parts[0])):
+                run_dir = manager.root / parts[0]
+                file_path = run_dir / parts[1]
+                expected_parent = run_dir.resolve()
+                safe_parent = not run_dir.is_symlink() and expected_parent.parent == manager.root.resolve()
+            else:
+                return self.send_error(404)
+            if (safe_parent and file_path.exists() and file_path.is_file() and
+                    not file_path.is_symlink() and file_path.resolve().parent == expected_parent):
                 data = file_path.read_bytes()
                 self.send_response(200)
-                self.send_header("Content-Type", "application/pdf" if file_path.suffix == ".pdf" else "application/octet-stream")
+                content_types = {
+                    ".csv": "text/csv; charset=utf-8", ".json": "application/json",
+                    ".pdf": "application/pdf", ".svg": "image/svg+xml",
+                }
+                self.send_header("Content-Type", content_types.get(file_path.suffix, "application/octet-stream"))
                 self.send_header("Content-Length", str(len(data)))
                 self._security_headers()
                 self.end_headers()

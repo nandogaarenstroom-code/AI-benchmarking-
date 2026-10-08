@@ -135,19 +135,37 @@ class BenchmarkManager:
     def list_results(self):
         results = []
         root = self.root.resolve()
-        for path in self.root.glob("*.json"):
-            if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
-                continue
+        paths = list(self.root.glob("*.json")) + list(self.root.glob("*/*.json"))
+        for path in paths:
+            if path.parent == self.root:
+                if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
+                    continue
+                output_directory = None
+            else:
+                run_dir = path.parent
+                if (run_dir.is_symlink() or path.is_symlink() or
+                        run_dir.resolve().parent != root or path.resolve().parent != run_dir.resolve()):
+                    continue
+                output_directory = run_dir.name
             data = json.loads(path.read_text())
             results.append({"id": path.stem, "model": data.get("model", {}).get("name"),
-                            "timestamp": data.get("timestamp")})
+                            "timestamp": data.get("timestamp"),
+                            "output_directory": output_directory})
+        results.sort(key=lambda item: item.get("timestamp") or "", reverse=True)
         return results
 
     def load_result(self, result_id):
         root = self.root.resolve()
-        for path in self.root.glob("*.json"):
-            if (path.name != "current.json" and path.stem == result_id and
-                    not path.is_symlink() and path.resolve().parent == root):
+        if (not isinstance(result_id, str) or result_id == "current" or
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id)):
+            return None
+        candidates = [self.root / f"{result_id}.json", *self.root.glob(f"*/{result_id}.json")]
+        for path in candidates:
+            parent = path.parent
+            resolved_parent = parent.resolve()
+            if (path.is_file() and not parent.is_symlink() and not path.is_symlink() and
+                    (resolved_parent == root or resolved_parent.parent == root) and
+                    path.resolve().parent == resolved_parent):
                 return json.loads(path.read_text())
         return None
 
@@ -264,6 +282,17 @@ class BenchmarkManager:
         if not isinstance(payload, dict):
             raise ValueError("invalid benchmark request")
         self.cancel_requested.clear()
+        output_directory = payload.get("output_directory")
+        resuming = output_directory is not None
+        if output_directory is None:
+            output_directory = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_%f")
+            payload["output_directory"] = output_directory
+        if not isinstance(output_directory, str) or not re.fullmatch(
+                r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{6}", output_directory):
+            raise ValueError("invalid result directory")
+        output_path = self.root / output_directory
+        if output_path.is_symlink():
+            raise ValueError("invalid result directory")
         profile_value = payload.get("profile", "STANDARD")
         if not isinstance(profile_value, str) or profile_value.upper() not in COUNTS:
             raise ValueError("invalid benchmark profile")
@@ -284,6 +313,10 @@ class BenchmarkManager:
             repeat_runs = 1
         payload["repeat_runs"] = repeat_runs
         tests = make_tests(profile, seed)
+        output_path.mkdir(exist_ok=resuming)
+        if output_path.is_symlink() or output_path.resolve().parent != self.root.resolve():
+            raise ValueError("invalid result directory")
+        self._status.update(result_directory=str(output_path.resolve()))
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
         self._status.update(state="running", phase="Warming up the model",
@@ -426,12 +459,13 @@ class BenchmarkManager:
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
         self._status.update(phase="Saving result files",
-                            activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
+                            activity=f"Writing JSON, CSV, PDF, and SVG to {output_path.resolve()}.",
                             total=1, progress=0)
+        result["output_directory"] = output_directory
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._status.update(state="complete", phase="Benchmark complete",
                             activity="All result files are ready.", progress=1, total=1,
-                            result_id=result["id"], result_directory=str(self.root.resolve()),
+                            result_id=result["id"], result_directory=str(output_path.resolve()),
                             quality=quality["overall"], performance=perf["score"],
                             overall=result["scores"]["overall"])
 
@@ -492,9 +526,20 @@ class BenchmarkManager:
         result_id = result["id"]
         if not isinstance(result_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id):
             raise ValueError("invalid result identifier")
-        result_dir = self.root.resolve()
+        output_directory = result.get("output_directory")
+        if output_directory is None:
+            result_dir = self.root.resolve()
+        else:
+            if (not isinstance(output_directory, str) or not re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_\d{6}", output_directory)):
+                raise ValueError("invalid result directory")
+            result_dir = self.root / output_directory
+            if result_dir.is_symlink() or result_dir.resolve().parent != self.root.resolve():
+                raise ValueError("invalid result directory")
+            result_dir.mkdir(exist_ok=True)
+            result_dir = result_dir.resolve()
         destination = result_dir / f"{result_id}.json"
-        fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=self.root)
+        fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=result_dir)
         try:
             with os.fdopen(fd, "w") as stream:
                 json.dump(result, stream, indent=2)

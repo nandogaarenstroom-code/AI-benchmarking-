@@ -56,10 +56,11 @@ Selecting a model and pressing **Run benchmark** starts the selected profile wit
 questions. The dashboard reports warm-up, primary tests, fresh and accumulated context tests,
 performance measurements, and file-saving phases, with phase progress and pass/fail counts.
 Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
-Completed files are saved under `results/` with a generated name such as
-`benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
-dashboard shows the results folder and provides download links. Every test and failure is retained
-in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+Completed files are saved in their own UTC date-and-time folder under `results/`, for example
+`results/2026-10-08_12-55-34_123456/`. Each folder contains matching JSON, CSV, PDF, and
+`_quality.svg` exports. The dashboard shows the run folder and provides download links. Every test
+and failure is retained in the JSON result. Demo outputs are marked `DEMO DATA` in the result
+metadata (`demo: true`).
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
