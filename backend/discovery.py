@@ -65,6 +65,7 @@ def _llama_runtime_details(endpoint):
         return {}
     settings = props.get("default_generation_settings") or {}
     details = {}
+    details["llama_cpp"] = True
     for key, value in (
         ("backend_version", props.get("version") or props.get("server_version") or props.get("build_info")),
         ("context_length", settings.get("n_ctx") if settings.get("n_ctx") is not None else props.get("n_ctx")),
@@ -117,6 +118,7 @@ def model_info(model):
         "file_size": model.get("size", "Unknown"), "backend": model.get("backend", "Unknown"),
         "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
         "gpu_offload": model.get("gpu_offload", "Unknown"),
+        "llama_cpp": model.get("llama_cpp", False),
         "capabilities": model.get("capabilities", {}),
     }
 
@@ -166,23 +168,17 @@ def ask_model(model, prompt, history=None, options=None):
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
                         "generation_s": time.perf_counter() - (first_token_at or started)}
-        request = urllib.request.Request(
-            model["endpoint"] + "/chat/completions",
-            data=json.dumps({
-                "model": model["id"], "messages": messages,
-                "temperature": options["temperature"], "top_p": options["top_p"],
-                "top_k": options["top_k"], "min_p": options["min_p"],
-                "repeat_penalty": options["repeat_penalty"],
-                "max_tokens": options["max_tokens"], "seed": options["seed"],
-            }).encode(),
-            headers={"Content-Type": "application/json"})
-        request.data = json.dumps({
+        body = {
             "model": model["id"], "messages": messages,
             "temperature": options["temperature"], "top_p": options["top_p"],
-            "top_k": options["top_k"], "min_p": options["min_p"],
-            "repeat_penalty": options["repeat_penalty"],
             "max_tokens": options["max_tokens"], "seed": options["seed"], "stream": True,
-        }).encode()
+        }
+        if model.get("llama_cpp"):
+            body.update({"top_k": options["top_k"], "min_p": options["min_p"],
+                         "repeat_penalty": options["repeat_penalty"]})
+        request = urllib.request.Request(
+            model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
         started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=60) as response:
             decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None

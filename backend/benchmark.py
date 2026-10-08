@@ -342,7 +342,7 @@ class BenchmarkManager:
                                   "quality_stddev": round(statistics.pstdev(seed_scores), 2),
                                   "minimum_samples": len(completed),
                                   "repeat_run_scores": repeat_quality_scores},
-                  "derived_metrics": {"quality_per_latency": round(quality["overall"]/statistics.mean(latencies), 2)},
+                  "derived_metrics": {"quality_per_latency": round(quality["overall"]/max(statistics.mean(latencies), .001), 2)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
         result["id"] = f"{model_info(model)['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)

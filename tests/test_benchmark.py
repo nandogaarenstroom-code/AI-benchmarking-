@@ -15,7 +15,8 @@ class BenchmarkTests(unittest.TestCase):
                 "version": "b1234", "default_generation_settings": {"n_ctx": 8192},
                 "n_gpu_layers": 0}):
             self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {
-                "backend_version": "b1234", "context_length": 8192, "gpu_offload": 0,
+                "llama_cpp": True, "backend_version": "b1234",
+                "context_length": 8192, "gpu_offload": 0,
             })
         with patch("backend.discovery._get", return_value=None):
             self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {})
@@ -69,7 +70,7 @@ class BenchmarkTests(unittest.TestCase):
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
             ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
-                       "id": "model"}, "prompt", options=options)
+                       "id": "model", "llama_cpp": True}, "prompt", options=options)
         self.assertEqual(captured["temperature"], 0.4)
         self.assertEqual(captured["top_p"], 0.9)
         self.assertEqual(captured["top_k"], 20)
@@ -78,6 +79,24 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(captured["max_tokens"], 64)
         self.assertEqual(captured["seed"], 23)
         self.assertTrue(captured["stream"])
+
+    def test_openai_adapter_omits_llama_cpp_only_sampler_options(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self): return iter([b'data: [DONE]\n'])
+
+        captured = {}
+        def fake_urlopen(request, timeout):
+            captured.update(json.loads(request.data))
+            return Response()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                       "id": "model"}, "prompt")
+        self.assertNotIn("top_k", captured)
+        self.assertNotIn("min_p", captured)
+        self.assertNotIn("repeat_penalty", captured)
 
     def test_domain_evaluators(self):
         self.assertTrue(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "42"))
