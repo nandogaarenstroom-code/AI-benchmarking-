@@ -48,7 +48,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
 #voxel-detail{min-height:1.5em;margin:8px 0 0}
 .legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0}.key::before{content:"";display:inline-block;width:11px;height:11px;margin-right:6px;background:var(--key)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-@media(max-width:600px){body{margin:18px auto;padding:0 14px}section{padding:17px}#voxel-lab{min-height:360px}.controls{display:grid}.controls label{display:flex;align-items:center;justify-content:space-between}.controls select{margin:0}.settings{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){body{margin:18px auto;padding:0 14px}section{padding:17px}.controls{display:grid}.controls label{display:flex;align-items:center;justify-content:space-between}.controls select{margin:0}.settings{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -216,7 +216,8 @@ function scoreColor(score){
 }
 function drawLab(){
   if(!currentResult)return;
-  const canvas=$('voxel-lab'),width=1000,rowHeight=36;
+  const canvas=$('voxel-lab'),width=Math.max(360,canvas.clientWidth);
+  const narrow=width<560,rowHeight=narrow?33:36;
   const categories=Object.entries(currentResult.quality.categories).filter(([name])=>name!=='overall');
   const contextScores=currentResult.scores.context_behavior||{};
   const hasContext=contextScores.fresh!==null||contextScores.accumulated!==null;
@@ -237,16 +238,18 @@ function drawLab(){
   canvas.width=width;canvas.height=height;
   const context=canvas.getContext('2d');
   context.fillStyle='#09111d';context.fillRect(0,0,width,height);hitAreas=[];
-  const barX=310,barWidth=560,labelX=42,valueX=890;
+  const labelX=narrow?16:42,barX=narrow?Math.floor(width*.43):310;
+  const valueX=width-(narrow?12:110),barWidth=narrow?
+    Math.max(60,valueX-barX-78):560;
 
   function heading(title,y){
     context.fillStyle='#edf4fd';context.font='bold 18px system-ui';context.textAlign='left';
     context.fillText(title,labelX,y);
     context.fillStyle='#a7b7ca';context.font='12px system-ui';context.textAlign='right';
-    context.fillText('SCORE / 100',valueX,y);
+    context.fillText(narrow?'SCORE':'SCORE / 100',valueX,y);
     const axisY=y+17;
     context.strokeStyle='#2b4059';context.lineWidth=1;
-    [0,25,50,75,100].forEach(tick=>{
+    (narrow?[0,50,100]:[0,25,50,75,100]).forEach(tick=>{
       const x=barX+barWidth*tick/100;
       context.beginPath();context.moveTo(x,axisY);context.lineTo(x,height-28);context.stroke();
       context.fillStyle='#a7b7ca';context.textAlign='center';
@@ -259,17 +262,18 @@ function drawLab(){
       const y=startY+index*rowHeight,value=item.score===null||item.score===undefined?
         null:Math.max(0,Math.min(100,Number(item.score)));
       context.textAlign='left';context.textBaseline='middle';
-      context.font='14px system-ui';context.fillStyle='#dce7f4';
-      context.fillText(item.name,labelX,y,250);
+      context.font=narrow?'11px system-ui':'14px system-ui';context.fillStyle='#dce7f4';
+      const label=narrow&&item.name.length>18?`${item.name.slice(0,16)}…`:item.name;
+      context.fillText(label,labelX,y,barX-labelX-12);
       context.fillStyle='#17283c';context.fillRect(barX,y-9,barWidth,18);
       if(value!==null){
         context.fillStyle=scoreColor(value);
         context.fillRect(barX,y-9,barWidth*value/100,18);
       }
-      context.textAlign='right';context.font='bold 14px system-ui';
+      context.textAlign='right';context.font=`bold ${narrow?10:14}px system-ui`;
       context.fillStyle=value===null?'#a7b7ca':'#edf4fd';
-      context.fillText(value===null?'Not tested':`${value.toFixed(1)} / 100`,valueX,y);
-      hitAreas.push({item,bounds:{left:24,right:976,top:y-rowHeight/2,bottom:y+rowHeight/2}});
+      context.fillText(value===null?'N/T':`${value.toFixed(1)} / 100`,valueX,y);
+      hitAreas.push({item,bounds:{left:0,right:width,top:y-rowHeight/2,bottom:y+rowHeight/2}});
     });
   }
   let y=heading('Summary scores',32);rows(summaryRows,y);
