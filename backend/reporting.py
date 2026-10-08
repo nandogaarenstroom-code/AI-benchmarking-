@@ -108,22 +108,27 @@ def write_pdf(path, result):
     if not pages:
         pages = [[]]
 
-    objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        f"<< /Type /Pages /Kids [{' '.join(f'{4 + i * 2} 0 R' for i in range(len(pages)))}] "
-        f"/Count {len(pages)} >>",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    ]
-    for index, page_lines in enumerate(pages):
-        page_number = 4 + index * 2
-        content_number = page_number + 1
+    content_streams = [_visual_summary(result)]
+    for page_lines in pages:
         content = ["BT /F1 10 Tf 48 748 Td"]
         content.extend(f"({_pdf_string(line)}) Tj 0 -14 Td" for line in page_lines)
         content.append("ET")
-        stream = "\n".join(content).encode("cp1252", errors="replace")
+        content_streams.append("\n".join(content).encode("cp1252", errors="replace"))
+
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{' '.join(f'{5 + i * 2} 0 R' for i in range(len(content_streams)))}] "
+        f"/Count {len(content_streams)} >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+    ]
+    for index, stream in enumerate(content_streams):
+        page_number = 5 + index * 2
+        content_number = page_number + 1
         objects.extend([
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_number} 0 R >>",
+            f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> "
+            f"/Contents {content_number} 0 R >>",
             f"<< /Length {len(stream)} >>\nstream\n".encode("ascii") + stream + b"\nendstream",
         ])
     out = b"%PDF-1.4\n"; offsets = [0]
@@ -140,3 +145,126 @@ def write_pdf(path, result):
 def _pdf_string(value):
     """Escape a text string for a PDF literal string."""
     return str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _visual_summary(result):
+    """Draw the PDF's chart-based summary page using dependency-free PDF vectors."""
+    scores = result.get("scores", {})
+    model = result.get("model", {})
+    categories = [
+        (name, value) for name, value in result.get("quality", {}).get("categories", {}).items()
+        if name != "overall"
+    ]
+    context_scaling = result.get("context_scaling", {})
+    fresh = {item.get("context_size"): item.get("score")
+             for item in context_scaling.get("fresh", []) if item.get("context_size") is not None}
+    accumulated = {item.get("context_size"): item.get("score")
+                   for item in context_scaling.get("accumulated", [])
+                   if item.get("context_size") is not None}
+    colors = {
+        "navy": (0.055, 0.11, 0.18), "ink": (0.12, 0.18, 0.25),
+        "muted": (0.38, 0.45, 0.53), "line": (0.86, 0.89, 0.92),
+        "track": (0.91, 0.93, 0.95), "green": (0.10, 0.66, 0.44),
+        "amber": (0.91, 0.62, 0.12), "red": (0.84, 0.29, 0.29),
+        "blue": (0.22, 0.49, 0.78), "white": (1, 1, 1),
+        "card": (0.97, 0.98, 0.99),
+    }
+    commands = []
+
+    def fill(color):
+        commands.append(f"{' '.join(map(str, colors[color]))} rg")
+
+    def rect(x, y, width, height, color):
+        fill(color)
+        commands.append(f"{x} {y} {width} {height} re f")
+
+    def text(x, y, value, size=9, color="ink", bold=False):
+        fill(color)
+        font = "/F2" if bold else "/F1"
+        commands.append(f"BT {font} {size} Tf {x} {y} Td ({_pdf_string(value)}) Tj ET")
+
+    def score_color(value):
+        if value is None:
+            return "muted"
+        if value >= 80:
+            return "green"
+        if value >= 50:
+            return "amber"
+        return "red"
+
+    rect(0, 710, 612, 82, "navy")
+    text(40, 759, "LOCAL AI BENCHMARK", 20, "white", True)
+    text(40, 738, str(model.get("name", "Unknown"))[:82], 10, "white")
+    text(40, 720, f"{result.get('timestamp', 'Unknown')}  |  "
+                   f"{result.get('configuration', {}).get('profile', 'Unknown')} profile",
+         8, "white")
+
+    metric_cards = [
+        ("QUALITY", scores.get("quality")),
+        ("PERFORMANCE", scores.get("performance")),
+        ("OVERALL", scores.get("overall")),
+    ]
+    for index, (label, value) in enumerate(metric_cards):
+        x = 40 + index * 180
+        rect(x, 632, 168, 64, "card")
+        text(x + 12, 676, label, 8, "muted", True)
+        text(x + 12, 648, f"{'Unknown' if value is None else value} / 100", 17,
+             score_color(value), True)
+
+    text(40, 610, "CATEGORY SCORES", 11, "ink", True)
+    text(502, 610, "0", 7, "muted")
+    text(558, 610, "100", 7, "muted")
+    for index, (name, value) in enumerate(categories[:12]):
+        y = 590 - index * 19
+        text(42, y, str(name)[:25], 8)
+        rect(214, y - 2, 276, 8, "track")
+        if value is not None:
+            rect(214, y - 2, max(1, min(100, value) * 2.76), 8, score_color(value))
+        text(504, y, "N/T" if value is None else f"{value:g}", 8,
+             score_color(value), True)
+    if len(categories) > 12:
+        text(42, 359, f"+ {len(categories) - 12} more categories in the detailed report",
+             8, "muted")
+
+    text(40, 346, "CONTEXT SCALING", 11, "ink", True)
+    rect(405, 343, 8, 8, "green")
+    text(417, 344, "Fresh", 7, "muted")
+    rect(468, 343, 8, 8, "blue")
+    text(480, 344, "Accumulated", 7, "muted")
+    sizes = sorted(set(fresh) | set(accumulated))[:7]
+    if not sizes:
+        text(42, 321, "No per-size context results recorded", 8, "muted")
+    for index, size in enumerate(sizes):
+        y = 323 - index * 16
+        text(42, y, f"{size:,}", 8)
+        rect(132, y + 2, 250, 4, "track")
+        rect(132, y - 4, 250, 4, "track")
+        fresh_score = fresh.get(size)
+        accumulated_score = accumulated.get(size)
+        if fresh_score is not None:
+            rect(132, y + 2, max(1, min(10, fresh_score) * 25), 4, "green")
+        if accumulated_score is not None:
+            rect(132, y - 4, max(1, min(10, accumulated_score) * 25), 4, "blue")
+        text(390, y, f"{'N/T' if fresh_score is None else f'{fresh_score * 10:g}'} / "
+                     f"{'N/T' if accumulated_score is None else f'{accumulated_score * 10:g}'}",
+             7, "muted")
+
+    performance = result.get("performance", {})
+    rect(40, 113, 532, 62, "card")
+    text(52, 158, "PERFORMANCE SNAPSHOT", 8, "muted", True)
+    stats = [
+        ("THROUGHPUT", performance.get("tokens_per_second"), "tokens/sec"),
+        ("TIME TO FIRST TOKEN", performance.get("ttft_s"), "seconds"),
+        ("P95 LATENCY", performance.get("latency_p95_s"), "seconds"),
+    ]
+    for index, (label, value, unit) in enumerate(stats):
+        x = 52 + index * 172
+        text(x, 140, label, 7, "muted")
+        text(x, 123, f"{'Unknown' if value is None else value} {unit}", 10,
+             "ink", True)
+
+    text(40, 85, "Controlled benchmark measurements; not universal performance guarantees.",
+         8, "muted")
+    text(40, 69, "Detailed measurements, settings, and methodology follow on the next page.",
+         8, "muted")
+    return "\n".join(commands).encode("cp1252", errors="replace")

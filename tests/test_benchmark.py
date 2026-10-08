@@ -228,6 +228,11 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn(b"4,096 tokens | 100/100 | 80/100", report)
             self.assertIn(b"max_tokens=1024", report)
             self.assertIn(b"Local \\(test\\) \\\\ model", report)
+            self.assertIn(b"Helvetica-Bold", report)
+            self.assertIn(b"CONTEXT SCALING", report)
+            self.assertIn(b"PERFORMANCE SNAPSHOT", report)
+            self.assertIn(b"/Count 2", report)
+            self.assertGreater(report.count(b" re f"), 10)
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
