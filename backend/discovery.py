@@ -23,7 +23,7 @@ def _open(request, timeout):
 
 GENERATION_DEFAULTS = {
     "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
-    "repeat_penalty": 1.1, "max_tokens": 128, "seed": 12345,
+    "repeat_penalty": 1.1, "max_tokens": 1024, "seed": 12345,
 }
 GENERATION_LIMITS = {
     "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),

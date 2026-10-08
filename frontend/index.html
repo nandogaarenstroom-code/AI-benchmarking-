@@ -76,7 +76,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
       <label>Top K (0 disables)<input id="top-k" type="number" min="0" max="1000" step="1" value="40"></label>
       <label>Min P<input id="min-p" type="number" min="0" max="1" step="0.01" value="0.05"></label>
       <label>Repeat penalty<input id="repeat-penalty" type="number" min="0.5" max="2" step="0.05" value="1.1"></label>
-      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="4096" step="1" value="128"></label>
+      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="4096" step="1" value="1024"></label>
       <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
       <label>Primary test repeats<select id="repeat-runs"><option value="1">1 (default)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select></label>
     </div>
@@ -298,9 +298,9 @@ function show(result,resultDirectory){
 $('voxel-lab').addEventListener('pointermove',inspectAt);
 $('voxel-lab').addEventListener('pointerdown',inspectAt);
 const presets={
-  repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
-  balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
-  creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:128,seed:12345}
+  repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:1024,seed:12345},
+  balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:1024,seed:12345},
+  creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:1024,seed:12345}
 };
 const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
 $('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
