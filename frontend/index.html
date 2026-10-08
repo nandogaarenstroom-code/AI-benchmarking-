@@ -220,7 +220,8 @@ function drawLab(){
   const narrow=width<560,rowHeight=narrow?33:36;
   const categories=Object.entries(currentResult.quality.categories).filter(([name])=>name!=='overall');
   const contextScores=currentResult.scores.context_behavior||{};
-  const hasContext=contextScores.fresh!==null||contextScores.accumulated!==null;
+  const hasContext=(contextScores.fresh!==null&&contextScores.fresh!==undefined)||
+    (contextScores.accumulated!==null&&contextScores.accumulated!==undefined);
   const categoryRows=categories.map(([name,score])=>({
     name,score,detail:`${name} primary-test category score. This is distinct from context behavior.`
   }));
