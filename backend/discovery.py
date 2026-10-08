@@ -6,7 +6,36 @@ import urllib.request
 import urllib.error
 import time
 import codecs
+import math
 from datetime import datetime, timezone
+
+
+GENERATION_DEFAULTS = {
+    "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
+    "repeat_penalty": 1.1, "max_tokens": 128, "seed": 12345,
+}
+
+
+def normalize_generation_options(options=None):
+    """Validate generation settings supplied by the local dashboard or API."""
+    options = options if isinstance(options, dict) else {}
+    limits = {
+        "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),
+        "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
+        "max_tokens": (1, 4096), "seed": (0, 2147483647),
+    }
+    normalized = {}
+    for name, default in GENERATION_DEFAULTS.items():
+        try:
+            value = float(options.get(name, default))
+            if not math.isfinite(value):
+                raise ValueError
+        except (TypeError, ValueError):
+            value = default
+        lower, upper = limits[name]
+        value = min(upper, max(lower, value))
+        normalized[name] = int(value) if name in ("top_k", "max_tokens", "seed") else value
+    return normalized
 
 
 class AdapterError(RuntimeError):
@@ -81,14 +110,23 @@ def hardware_info():
             "collected_at": datetime.now(timezone.utc).isoformat()}
 
 
-def ask_model(model, prompt, history=None):
+def ask_model(model, prompt, history=None, options=None):
     """Send one isolated prompt, or an explicit history for context accumulation tests."""
+    options = normalize_generation_options(options)
     messages = list(history or []) + [{"role": "user", "content": prompt}]
     try:
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
                 model["endpoint"] + "/api/generate",
-                data=json.dumps({"model": model["id"], "prompt": prompt, "stream": True}).encode(),
+                data=json.dumps({
+                    "model": model["id"], "prompt": prompt, "stream": True,
+                    "options": {
+                        "temperature": options["temperature"], "top_p": options["top_p"],
+                        "top_k": options["top_k"], "min_p": options["min_p"],
+                        "repeat_penalty": options["repeat_penalty"], "num_predict": options["max_tokens"],
+                        "seed": options["seed"],
+                    },
+                }).encode(),
                 headers={"Content-Type": "application/json"})
             started = time.perf_counter()
             with urllib.request.urlopen(request, timeout=60) as response:
@@ -110,11 +148,21 @@ def ask_model(model, prompt, history=None):
                         "generation_s": time.perf_counter() - (first_token_at or started)}
         request = urllib.request.Request(
             model["endpoint"] + "/chat/completions",
-            data=json.dumps({"model": model["id"], "messages": messages,
-                             "temperature": 0, "max_tokens": 128}).encode(),
+            data=json.dumps({
+                "model": model["id"], "messages": messages,
+                "temperature": options["temperature"], "top_p": options["top_p"],
+                "top_k": options["top_k"], "min_p": options["min_p"],
+                "repeat_penalty": options["repeat_penalty"],
+                "max_tokens": options["max_tokens"], "seed": options["seed"],
+            }).encode(),
             headers={"Content-Type": "application/json"})
-        request.data = json.dumps({"model": model["id"], "messages": messages,
-                                   "temperature": 0, "max_tokens": 128, "stream": True}).encode()
+        request.data = json.dumps({
+            "model": model["id"], "messages": messages,
+            "temperature": options["temperature"], "top_p": options["top_p"],
+            "top_k": options["top_k"], "min_p": options["min_p"],
+            "repeat_penalty": options["repeat_penalty"],
+            "max_tokens": options["max_tokens"], "seed": options["seed"], "stream": True,
+        }).encode()
         started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=60) as response:
             decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None

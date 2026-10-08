@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .discovery import hardware_info, model_info
+from .discovery import hardware_info, model_info, normalize_generation_options
 from .evaluation import evaluate
 from .reporting import write_pdf, write_chart
 
@@ -164,7 +164,7 @@ class BenchmarkManager:
         self.cancel_requested.set()
         return True
 
-    def _answer(self, model, test, history=None):
+    def _answer(self, model, test, history=None, generation_options=None):
         if model.get("demo"):
             if test["evaluation_method"] == "code":
                 return "def add(a,b):\n return a+b"
@@ -174,15 +174,15 @@ class BenchmarkManager:
                 return "careful reliable local testing"
             return test["expected_answer"]
         from .discovery import ask_model
-        response = ask_model(model, test["prompt"], history=history)
+        response = ask_model(model, test["prompt"], history=history, options=generation_options)
         return response
 
-    def _execute(self, model, test, history=None):
+    def _execute(self, model, test, history=None, generation_options=None):
         attempts = []
         for attempt in range(1, 4):
             started = time.perf_counter()
             try:
-                answer = self._answer(model, test, history)
+                answer = self._answer(model, test, history, generation_options)
                 error = None
             except Exception as exc:
                 answer, error = "", getattr(exc, "code", self._failure_code(exc))
@@ -220,12 +220,17 @@ class BenchmarkManager:
         seed, profile = int(payload.get("seed", 12345)), payload.get("profile", "STANDARD").upper()
         model = payload.get("model") or {"id": "demo-local", "name": "Demo Local Model",
                                           "backend": "Demo", "endpoint": "local://demo", "demo": True}
+        generation_options = normalize_generation_options(
+            payload.get("generation_options", payload.get("parameters")))
+        payload["generation_options"] = generation_options
         tests = payload.get("tests") or make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
         self._status.update(state="running", total=len(tests), progress=len(completed))
         # Warm up and discard warm-up outputs before measured requests.
-        for _ in range(3): self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""})
+        for _ in range(3):
+            self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
+                         generation_options=generation_options)
         started = time.perf_counter()
         for test in tests:
             if self.cancel_requested.is_set():
@@ -234,7 +239,7 @@ class BenchmarkManager:
                 return
             if test["id"] in done: continue
             self._status.update(current_category=test["category"], current_test=test["id"])
-            item = self._execute(model, test)
+            item = self._execute(model, test, generation_options=generation_options)
             completed.append(item)
             if not item["passed"]: failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
                                                      "attempts": item["attempts"]})
@@ -254,10 +259,11 @@ class BenchmarkManager:
             max_context = min(max_context, 32768)
         context_tests = make_context_tests(seed, max_context=max_context)
         context_sizes = [test["context_size"] for test in context_tests]
-        context_results = [self._execute(model, test) for test in context_tests]
+        context_results = [self._execute(model, test, generation_options=generation_options)
+                           for test in context_tests]
         history, accumulated_results = [], []
         for test in context_tests:
-            item = self._execute(model, test, history=history)
+            item = self._execute(model, test, history=history, generation_options=generation_options)
             accumulated_results.append(item)
             history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
                             else f"[context test {test['context_size']} tokens]"},
@@ -272,11 +278,13 @@ class BenchmarkManager:
             rng = random.Random(seed + offset)
             sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
             seed_scores.append(round(statistics.mean(sample), 2))
-        perf = self._performance(model, tests[:min(5, len(tests))], tokens, duration)
+        perf = self._performance(model, tests[:min(5, len(tests))], tokens, duration,
+                                 generation_options)
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
-                  "measured_runs": 5, "retries": 2, "temperature": 0, "top_p": 1,
+                  "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
+                  "top_p": generation_options["top_p"], "generation_options": generation_options,
                   "context_reset_per_test": True, "context_suite": context_sizes,
                   "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
                                       if size not in context_sizes],
@@ -328,11 +336,12 @@ class BenchmarkManager:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def _performance(self, model, samples, tokens, duration):
+    def _performance(self, model, samples, tokens, duration, generation_options=None):
         for concurrency in (1, 2, 4):
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                list(pool.map(lambda t: self._answer(model, t), samples))
-        latencies = [self._execute(model, t)["latency_s"] for t in samples] or [.001]
+                list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
+        latencies = [self._execute(model, t, generation_options=generation_options)["latency_s"]
+                     for t in samples] or [.001]
         return {"score": min(100, round(tokens / duration * 10, 2)),
                 "tokens_per_second": round(tokens/duration, 2), "ttft_s": round(statistics.median(latencies), 4),
                 "generation_s": round(sum(latencies), 4), "latency_mean_s": round(statistics.mean(latencies), 4),

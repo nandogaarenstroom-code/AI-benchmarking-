@@ -9,7 +9,11 @@
 *{box-sizing:border-box}
 body{font:16px system-ui;background:var(--bg);color:var(--text);max-width:1100px;margin:40px auto;padding:0 20px}
 section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;margin:16px 0}
-button,select{padding:11px 16px;border-radius:8px;border:0;margin:6px;background:var(--accent);color:#092015;font-weight:700}
+button,select,input{padding:11px 16px;border-radius:8px;border:0;margin:6px;background:var(--accent);color:#092015;font-weight:700}
+input{width:100%;background:#eaf2ff}
+fieldset{border:1px solid var(--line);border-radius:8px;margin:14px 0;padding:12px}
+fieldset label{display:block;font-size:14px}
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
 .model{padding:14px;border:1px solid #385577;border-radius:8px;margin:8px 0;cursor:pointer}.selected{border-color:var(--accent)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.metric{font-size:24px;color:var(--accent)}.muted{color:var(--muted)}
 progress{width:100%;height:20px}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line)}
@@ -29,6 +33,19 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <h2>Detected local models</h2>
   <div id="models">Scanning local AI servers…</div>
   <label>Benchmark <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
+  <fieldset>
+    <legend>Generation settings (llama.cpp / Ollama)</legend>
+    <div class="settings">
+      <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0"></label>
+      <label>Top P<input id="top-p" type="number" min="0.01" max="1" step="0.01" value="1"></label>
+      <label>Top K (0 disables)<input id="top-k" type="number" min="0" max="1000" step="1" value="40"></label>
+      <label>Min P<input id="min-p" type="number" min="0" max="1" step="0.01" value="0.05"></label>
+      <label>Repeat penalty<input id="repeat-penalty" type="number" min="0.5" max="2" step="0.05" value="1.1"></label>
+      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="4096" step="1" value="128"></label>
+      <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
+    </div>
+    <p class="muted">Settings are recorded with each result. Context window size is set when starting llama-server (for example, with -c); this benchmark cannot change it per request.</p>
+  </fieldset>
   <button id="run">🚀 RUN BENCHMARK</button><button id="resume">RESUME PREVIOUS BENCHMARK</button>
 </section>
 <section id="progress" hidden><h2>BENCHMARK RUNNING</h2><progress id="bar" value="0" max="1"></progress><p id="live"></p></section>
@@ -171,7 +188,7 @@ function show(result){
 
 $('voxel-lab').addEventListener('pointermove',inspectAt);
 $('voxel-lab').addEventListener('pointerdown',inspectAt);
-$('run').onclick=async()=>{if(!selected)return;await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value})});poll()};
+$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options})});poll()};
 $('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST'});poll()};
 load();poll();
 </script>
