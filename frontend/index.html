@@ -92,6 +92,7 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
 let selected=null,currentResult=null,hitAreas=[];
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
+const csrfToken='__CSRF_TOKEN__';
 
 async function load(){
   const response=await fetch('/api/models'),data=await response.json(),container=$('models');
@@ -217,8 +218,8 @@ const presets={
 const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
 $('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
 Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
-$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)})});poll()};
-$('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST'});poll()};
+$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)})});poll()};
+$('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:'{}'});poll()};
 load();poll();
 </script>
 </body>

@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import sys
-import tempfile
-import os
 import shutil
+
+MAX_CODE_SIZE = 20_000
+MAX_TEST_COUNT = 20
+MAX_TEST_SIZE = 2_000
 
 
 def _number(text):
@@ -41,21 +42,27 @@ def evaluate(test, answer):
 
 
 def _run_code(source, tests):
-    """Prefer Docker isolation; use a restricted subprocess only when explicitly allowed."""
-    if not source or len(source) > 20_000 or any(token in source for token in ("import os", "import socket", "subprocess", "open(")):
+    """Run generated code only in a resource-limited, network-isolated container."""
+    if not isinstance(source, str) or not source or len(source) > MAX_CODE_SIZE:
+        return False
+    if not isinstance(tests, list) or len(tests) > MAX_TEST_COUNT:
+        return False
+    if any(not isinstance(test, str) or len(test) > MAX_TEST_SIZE for test in tests):
         return False
     harness = source + "\n" + "\n".join(tests)
+    if len(harness) > MAX_CODE_SIZE:
+        return False
+    docker = shutil.which("docker")
+    if not docker:
+        return False
     try:
-        with tempfile.TemporaryDirectory() as directory:
-            if shutil.which("docker") and os.environ.get("BENCHMARK_USE_DOCKER", "0") == "1":
-                completed = subprocess.run(
-                    ["docker", "run", "--rm", "--network=none", "--cpus=0.5", "--memory=128m",
-                     "--pids-limit=64", "--read-only", "-i", "python:3-alpine", "python", "-I", "-c", harness],
-                    cwd=directory, capture_output=True, timeout=3, check=False)
-                return completed.returncode == 0
-            completed = subprocess.run([sys.executable, "-I", "-c", harness],
-                                       cwd=directory, capture_output=True, timeout=2,
-                                       check=False)
-            return completed.returncode == 0
+        completed = subprocess.run(
+            [docker, "run", "--rm", "--pull=never", "--network=none", "--cpus=0.5",
+             "--memory=128m", "--pids-limit=64", "--read-only", "--user=65534:65534",
+             "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--ipc=none",
+             "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--workdir=/tmp",
+             "python:3-alpine", "python", "-I", "-c", harness],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
+        return completed.returncode == 0
     except (subprocess.SubprocessError, OSError):
         return False

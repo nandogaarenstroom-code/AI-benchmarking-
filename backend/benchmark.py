@@ -9,13 +9,14 @@ import statistics
 import time
 import uuid
 import os
+import re
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .discovery import hardware_info, model_info, normalize_generation_options
+from .discovery import hardware_info, model_info, normalize_generation_options, resolve_model
 from .evaluation import evaluate
 from .reporting import write_pdf, write_chart
 
@@ -121,6 +122,7 @@ class BenchmarkManager:
     def __init__(self, root):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.state_file = self.root / "current.json"; self.running = False
+        self._run_lock = threading.Lock()
         self.cancel_requested = threading.Event()
         self._status = {"state": "idle", "progress": 0, "total": 0, "passed": 0, "failed": 0}
 
@@ -149,14 +151,43 @@ class BenchmarkManager:
         return {"results": rows, "best_overall": max(rows, key=lambda x: x["overall"])["id"] if rows else None}
 
     def resume(self):
-        if not self.state_file.exists() or self.running: return False
-        import threading
+        if not self.state_file.exists(): return False
         try:
             state = json.loads(self.state_file.read_text())
         except (OSError, json.JSONDecodeError):
             return False
-        threading.Thread(target=self.run, args=(state,), daemon=True).start()
+        return self.start(state)
+
+    def start(self, payload):
+        with self._run_lock:
+            if self.running:
+                return False
+            self.running = True
+            worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
+            try:
+                worker.start()
+            except RuntimeError:
+                self.running = False
+                raise
         return True
+
+    def run(self, payload):
+        with self._run_lock:
+            if self.running:
+                return False
+            self.running = True
+        return self._run_guarded(payload)
+
+    def _run_guarded(self, payload):
+        try:
+            self._run(payload)
+            return True
+        except Exception as exc:
+            self._status.update(state="error", error=str(exc)[:500])
+            return False
+        finally:
+            with self._run_lock:
+                self.running = False
 
     def cancel(self):
         if not self.running:
@@ -214,12 +245,21 @@ class BenchmarkManager:
             return "CONNECTION_ERROR"
         return "MODEL_ERROR"
 
-    def run(self, payload):
-        self.running = True
+    def _run(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("invalid benchmark request")
         self.cancel_requested.clear()
-        seed, profile = int(payload.get("seed", 12345)), payload.get("profile", "STANDARD").upper()
-        model = payload.get("model") or {"id": "demo-local", "name": "Demo Local Model",
-                                          "backend": "Demo", "endpoint": "local://demo", "demo": True}
+        profile_value = payload.get("profile", "STANDARD")
+        if not isinstance(profile_value, str) or profile_value.upper() not in COUNTS:
+            raise ValueError("invalid benchmark profile")
+        try:
+            seed = int(payload.get("seed", 12345))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid benchmark seed") from exc
+        profile = profile_value.upper()
+        model = resolve_model(payload.get("model") or {
+            "id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
+            "endpoint": "local://demo", "demo": True})
         generation_options = normalize_generation_options(
             payload.get("generation_options", payload.get("parameters")))
         payload["generation_options"] = generation_options
@@ -228,7 +268,7 @@ class BenchmarkManager:
         except (TypeError, ValueError):
             repeat_runs = 1
         payload["repeat_runs"] = repeat_runs
-        tests = payload.get("tests") or make_tests(profile, seed)
+        tests = make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
         self._status.update(state="running", total=len(tests) * repeat_runs,
@@ -241,7 +281,6 @@ class BenchmarkManager:
         for test in tests:
             if self.cancel_requested.is_set():
                 self._status.update(state="cancelled")
-                self.running = False
                 return
             if test["id"] in done: continue
             self._status.update(current_category=test["category"], current_test=test["id"])
@@ -344,11 +383,10 @@ class BenchmarkManager:
                                   "repeat_run_scores": repeat_quality_scores},
                   "derived_metrics": {"quality_per_latency": round(quality["overall"]/max(statistics.mean(latencies), .001), 2)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
-        result["id"] = f"{model_info(model)['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._status.update(state="complete", result_id=result["id"], quality=quality["overall"],
                             performance=perf["score"], overall=result["scores"]["overall"])
-        self.running = False
 
     def _scores(self, results):
         categories = {}
@@ -394,7 +432,11 @@ class BenchmarkManager:
                 "warmup_runs": 3, "measured_runs": 5, "concurrency_levels": [1, 2, 4]}
 
     def _write_outputs(self, result):
-        destination = self.root / f"{result['id']}.json"
+        result_id = result["id"]
+        if not isinstance(result_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id):
+            raise ValueError("invalid result identifier")
+        result_dir = self.root.resolve()
+        destination = result_dir / f"{result_id}.json"
         fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=self.root)
         try:
             with os.fdopen(fd, "w") as stream:
@@ -405,9 +447,16 @@ class BenchmarkManager:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        with (self.root / f"{result['id']}.csv").open("w", newline="") as stream:
+        with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
             fields = ["id", "category", "difficulty", "score", "status", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
-            writer.writerows({k: row.get(k) for k in fields} for row in result["tests"])
-        write_pdf(self.root / f"{result['id']}.pdf", result)
-        write_chart(self.root / f"{result['id']}_quality.svg", result["quality"]["categories"])
+            writer.writerows({k: self._csv_cell(row.get(k)) for k in fields}
+                             for row in result["tests"])
+        write_pdf(result_dir / f"{result_id}.pdf", result)
+        write_chart(result_dir / f"{result_id}_quality.svg", result["quality"]["categories"])
+
+    @staticmethod
+    def _csv_cell(value):
+        if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
+            return "'" + value
+        return value

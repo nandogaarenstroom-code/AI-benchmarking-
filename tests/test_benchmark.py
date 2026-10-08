@@ -2,10 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
-from backend.discovery import _llama_runtime_details, ask_model, normalize_generation_options
+from backend.discovery import _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
 from backend.evaluation import evaluate
 
 
@@ -45,7 +46,7 @@ class BenchmarkTests(unittest.TestCase):
 
         options = {"temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("backend.discovery._open", side_effect=fake_urlopen):
             ask_model({"backend": "Ollama", "endpoint": "http://localhost:11434", "id": "model"},
                       "prompt", options=options)
         self.assertEqual(captured["options"], {
@@ -68,7 +69,7 @@ class BenchmarkTests(unittest.TestCase):
 
         options = {"temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("backend.discovery._open", side_effect=fake_urlopen):
             ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
                        "id": "model", "llama_cpp": True}, "prompt", options=options)
         self.assertEqual(captured["temperature"], 0.4)
@@ -91,7 +92,7 @@ class BenchmarkTests(unittest.TestCase):
             captured.update(json.loads(request.data))
             return Response()
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("backend.discovery._open", side_effect=fake_urlopen):
             ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
                        "id": "model"}, "prompt")
         self.assertNotIn("top_k", captured)
@@ -101,9 +102,31 @@ class BenchmarkTests(unittest.TestCase):
     def test_domain_evaluators(self):
         self.assertTrue(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "42"))
         self.assertTrue(evaluate({"evaluation_method": "json_schema", "required_keys": ["ok"]}, '{"ok": true}'))
-        self.assertTrue(evaluate({"evaluation_method": "code", "tests": ["assert add(1, 2) == 3"]},
-                                 "def add(a,b): return a+b"))
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run",
+                      return_value=CompletedProcess(args=[], returncode=0)) as run:
+            self.assertTrue(evaluate(
+                {"evaluation_method": "code", "tests": ["assert add(1, 2) == 3"]},
+                "def add(a,b): return a+b"))
+        command = run.call_args.args[0]
+        self.assertIn("--network=none", command)
+        self.assertIn("--cap-drop=ALL", command)
+        self.assertIn("--read-only", command)
         self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
+
+    def test_code_evaluation_fails_closed_without_docker(self):
+        with patch("backend.evaluation.shutil.which", return_value=None), \
+                patch("backend.evaluation.subprocess.run") as run:
+            self.assertFalse(evaluate(
+                {"evaluation_method": "code", "tests": ["assert True"]}, "print('not run')"))
+        run.assert_not_called()
+
+    def test_code_evaluation_rejects_invalid_or_oversized_tests(self):
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run") as run:
+            self.assertFalse(evaluate({"evaluation_method": "code", "tests": ["x" * 2001]}, "pass"))
+            self.assertFalse(evaluate({"evaluation_method": "code", "tests": "assert True"}, "pass"))
+        run.assert_not_called()
 
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
@@ -121,7 +144,7 @@ class BenchmarkTests(unittest.TestCase):
             manager.run({"profile": "QUICK", "generation_options": {"temperature": 0.6},
                          "model": {"name": "Demo", "backend": "Demo",
                                    "endpoint": "local://demo", "demo": True}})
-            files = list(Path(directory).glob("Demo_*"))
+            files = list(Path(directory).glob("benchmark_*"))
             self.assertTrue(any(p.suffix == ".json" for p in files))
             self.assertTrue(any(p.suffix == ".csv" for p in files))
             self.assertTrue(any(p.suffix == ".pdf" for p in files))
@@ -142,12 +165,56 @@ class BenchmarkTests(unittest.TestCase):
                          "generation_options": {"seed": 31},
                          "model": {"name": "Repeat Demo", "backend": "Demo",
                                    "endpoint": "local://demo", "demo": True}})
-            result_path = next(Path(directory).glob("Repeat_Demo_*.json"))
+            result_path = next(Path(directory).glob("benchmark_*.json"))
             result = json.loads(result_path.read_text())
             self.assertEqual(result["configuration"]["repeat_runs"], 2)
             self.assertEqual(result["uncertainty"]["repeat_run_scores"], [100.0, 100.0])
             self.assertEqual(result["uncertainty"]["quality_stddev"], 0.0)
             self.assertEqual([rep["seed"] for rep in result["tests"][0]["replicates"]], [31, 32])
+
+    def test_custom_tests_are_ignored_and_run_state_recovers_after_invalid_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self.assertTrue(manager.run({
+                "profile": "QUICK", "tests": [{"id": "attack", "evaluation_method": "code",
+                                               "tests": ["raise RuntimeError()"]}],
+                "model": {"id": "demo-local", "name": "demo", "backend": "Demo",
+                          "endpoint": "local://demo", "demo": True},
+            }))
+            result_path = next(Path(directory).glob("benchmark_*.json"))
+            result = json.loads(result_path.read_text())
+            self.assertEqual(len(result["tests"]), 25)
+            self.assertNotEqual(result["tests"][0]["id"], "attack")
+            self.assertFalse(manager.running)
+            self.assertFalse(manager.run({"seed": "invalid"}))
+            self.assertFalse(manager.running)
+            self.assertEqual(manager.status()["state"], "error")
+
+    def test_model_resolution_rejects_caller_chosen_endpoint(self):
+        with patch("backend.discovery.discover_models", return_value=[]):
+            with self.assertRaises(ValueError):
+                resolve_model({"id": "model", "backend": "OpenAI-compatible",
+                               "endpoint": "http://127.0.0.1:9"})
+
+    def test_artifact_id_is_path_safe_and_csv_cells_are_neutralized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "results"
+            manager = BenchmarkManager(root)
+            result = {
+                "id": "benchmark_20261008_000000_abcdef",
+                "model": {"name": "test"}, "timestamp": "now",
+                "scores": {"quality": 0, "performance": 0, "overall": 0},
+                "tests": [{"id": "test", "category": "=1+1", "difficulty": "Easy",
+                           "score": 0, "status": "PASS", "latency_s": 0}],
+                "failures": [], "quality": {"categories": {}},
+            }
+            manager._write_outputs(result)
+            self.assertTrue((root / f"{result['id']}.json").is_file())
+            csv_row = (root / f"{result['id']}.csv").read_text().splitlines()[1]
+            self.assertIn(",'=1+1,", csv_row)
+            result["id"] = "../escaped"
+            with self.assertRaises(ValueError):
+                manager._write_outputs(result)
 
 
 if __name__ == "__main__":

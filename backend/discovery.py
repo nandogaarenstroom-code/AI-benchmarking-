@@ -9,6 +9,17 @@ import codecs
 import math
 from datetime import datetime, timezone
 
+MAX_MODEL_RESPONSE_BYTES = 1_048_576
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        return None
+
+
+def _open(request, timeout):
+    return urllib.request.build_opener(_NoRedirectHandler()).open(request, timeout=timeout)
+
 
 GENERATION_DEFAULTS = {
     "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
@@ -52,7 +63,7 @@ def _estimate_tokens(text):
 
 def _get(url, timeout=0.7):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with _open(url, timeout=timeout) as response:
             return json.loads(response.read())
     except Exception:
         return None
@@ -109,6 +120,29 @@ def discover_models():
     return models
 
 
+def resolve_model(requested):
+    """Resolve request model metadata to an endpoint discovered by this server."""
+    if not isinstance(requested, dict):
+        raise ValueError("invalid model")
+    model_id = requested.get("id")
+    backend = requested.get("backend")
+    endpoint = requested.get("endpoint")
+    if not all(isinstance(value, str) and value for value in (model_id, backend, endpoint)):
+        raise ValueError("invalid model")
+    if (model_id, backend, endpoint) == ("demo-local", "Demo", "local://demo"):
+        return {
+            "id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
+            "endpoint": "local://demo", "size": "Unknown",
+            "capabilities": {"streaming": True, "structured_output": True, "tools": False},
+            "demo": True,
+        }
+    for model in discover_models():
+        if (model.get("id"), model.get("backend"), model.get("endpoint")) == (
+                model_id, backend, endpoint):
+            return model
+    raise ValueError("model endpoint is not an available local model")
+
+
 def model_info(model):
     """Return explicit metadata; unknown values are never fabricated."""
     return {
@@ -151,11 +185,15 @@ def ask_model(model, prompt, history=None, options=None):
                 }).encode(),
                 headers={"Content-Type": "application/json"})
             started = time.perf_counter()
-            with urllib.request.urlopen(request, timeout=60) as response:
+                with _open(request, timeout=60) as response:
                 chunks, first_token_at = [], None
-                for line in response:
-                    if not line.strip():
-                        continue
+                    response_size = 0
+                    for line in response:
+                        response_size += len(line)
+                        if response_size > MAX_MODEL_RESPONSE_BYTES:
+                            raise ValueError("model response too large")
+                        if not line.strip():
+                            continue
                     item = json.loads(line)
                     text = item.get("response", "")
                     if text and first_token_at is None:
@@ -180,9 +218,13 @@ def ask_model(model, prompt, history=None, options=None):
             model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
         started = time.perf_counter()
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _open(request, timeout=60) as response:
             decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None
+            response_size = 0
             for raw in response:
+                response_size += len(raw)
+                if response_size > MAX_MODEL_RESPONSE_BYTES:
+                    raise ValueError("model response too large")
                 for line in decoder.decode(raw).splitlines():
                     if not line.startswith("data:") or line.strip() == "data: [DONE]":
                         continue
