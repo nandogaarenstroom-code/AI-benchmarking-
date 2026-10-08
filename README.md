@@ -60,6 +60,12 @@ an interruption. Completed artifacts are saved under `results/` as `.json`, `.cs
 `.svg`. Every test and failure is retained in the JSON result. Demo outputs are marked
 `DEMO DATA` in the result metadata (`demo: true`).
 
+Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
+maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
+`top_p: 1`, `seed: 12345`); settings are included in saved result configuration and passed to
+Ollama or OpenAI-compatible adapters. The llama.cpp context window is configured when launching
+`llama-server` (for example, with `-c`); it cannot be changed for an individual request here.
+
 The current dependency-free engine uses deterministic generated tasks and category-specific
 evaluators. It provides a stable
 adapter/result contract so additional local adapters and sandboxed coding evaluators can be added
