@@ -6,8 +6,12 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
-from backend.discovery import _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
+from backend.discovery import (
+    GENERATION_DEFAULTS, _llama_runtime_details, ask_model, normalize_generation_options,
+    resolve_model,
+)
 from backend.evaluation import evaluate
+from backend.reporting import write_pdf
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -38,6 +42,8 @@ class BenchmarkTests(unittest.TestCase):
             )
 
     def test_generation_options_are_normalized(self):
+        self.assertEqual(GENERATION_DEFAULTS["max_tokens"], 1024)
+        self.assertEqual(normalize_generation_options()["max_tokens"], 1024)
         options = normalize_generation_options({
             "temperature": 3, "top_p": "invalid", "top_k": -1,
             "min_p": 0.2, "repeat_penalty": float("nan"), "max_tokens": 5000, "seed": 7,
@@ -178,6 +184,50 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
             self.assertEqual(manager.status()["result_directory"], str(Path(directory).resolve()))
+
+    def test_pdf_includes_dashboard_measurements_and_escapes_model_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.pdf"
+            write_pdf(path, {
+                "model": {
+                    "name": r"Local (test) \ model", "backend": "OpenAI-compatible",
+                    "backend_version": "b1234", "context_length": 8192, "gpu_offload": 20,
+                    "generation_defaults": {"max_tokens": 2048},
+                },
+                "timestamp": "2026-10-08T11:33:52Z",
+                "scores": {
+                    "quality": 75, "performance": 42.5, "overall": 65.25,
+                    "context_behavior": {"fresh": 90, "accumulated": 70, "degradation": 20},
+                },
+                "quality": {"categories": {"Reasoning": 100, "Math": None, "overall": 100}},
+                "performance": {
+                    "score": 42.5, "tokens_per_second": 12.3, "ttft_s": 0.25,
+                    "generation_s": 2.5, "latency_mean_s": 0.5, "latency_p50_s": 0.4,
+                    "latency_p95_s": 0.8, "latency_stddev_s": 0.1, "warmup_runs": 3,
+                    "measured_runs": 5, "concurrency_levels": [1, 2, 4],
+                },
+                "configuration": {
+                    "profile": "STANDARD", "generation_options": {"max_tokens": 1024},
+                    "repeat_runs": 2,
+                },
+                "uncertainty": {
+                    "quality_mean": 75, "quality_stddev": 5, "repeat_run_scores": [70, 80],
+                },
+                "context_scaling": {
+                    "fresh": [{"context_size": 4096, "score": 10}],
+                    "accumulated": [{"context_size": 4096, "score": 8}],
+                },
+                "tests": [{"passed": True}, {"passed": False}],
+                "failures": [{"test_id": "test"}],
+            })
+            report = path.read_bytes()
+            self.assertIn(b"Reasoning: 100/100", report)
+            self.assertIn(b"Math: Not tested", report)
+            self.assertIn(b"Throughput: 12.3 tokens/second", report)
+            self.assertIn(b"Fresh context score: 90/100", report)
+            self.assertIn(b"4,096 tokens | 100/100 | 80/100", report)
+            self.assertIn(b"max_tokens=1024", report)
+            self.assertIn(b"Local \\(test\\) \\\\ model", report)
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
