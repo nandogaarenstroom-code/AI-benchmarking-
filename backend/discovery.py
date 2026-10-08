@@ -185,15 +185,15 @@ def ask_model(model, prompt, history=None, options=None):
                 }).encode(),
                 headers={"Content-Type": "application/json"})
             started = time.perf_counter()
-                with _open(request, timeout=60) as response:
+            with _open(request, timeout=60) as response:
                 chunks, first_token_at = [], None
-                    response_size = 0
-                    for line in response:
-                        response_size += len(line)
-                        if response_size > MAX_MODEL_RESPONSE_BYTES:
-                            raise ValueError("model response too large")
-                        if not line.strip():
-                            continue
+                response_size = 0
+                for line in response:
+                    response_size += len(line)
+                    if response_size > MAX_MODEL_RESPONSE_BYTES:
+                        raise ValueError("model response too large")
+                    if not line.strip():
+                        continue
                     item = json.loads(line)
                     text = item.get("response", "")
                     if text and first_token_at is None:

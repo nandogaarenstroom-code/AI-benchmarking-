@@ -129,13 +129,21 @@ class BenchmarkManager:
     def status(self): return self._status
 
     def list_results(self):
-        return [{"id": p.stem, "model": json.loads(p.read_text()).get("model", {}).get("name"),
-                 "timestamp": json.loads(p.read_text()).get("timestamp")}
-                for p in self.root.glob("*.json") if p.name != "current.json"]
+        results = []
+        root = self.root.resolve()
+        for path in self.root.glob("*.json"):
+            if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
+                continue
+            data = json.loads(path.read_text())
+            results.append({"id": path.stem, "model": data.get("model", {}).get("name"),
+                            "timestamp": data.get("timestamp")})
+        return results
 
     def load_result(self, result_id):
+        root = self.root.resolve()
         for path in self.root.glob("*.json"):
-            if path.name != "current.json" and path.stem == result_id:
+            if (path.name != "current.json" and path.stem == result_id and
+                    not path.is_symlink() and path.resolve().parent == root):
                 return json.loads(path.read_text())
         return None
 

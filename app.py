@@ -132,7 +132,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(result, 200 if result else 404)
         if path.startswith("/results/"):
             file_path = manager.root / Path(path).name
-            if file_path.exists() and file_path.is_file():
+            if (file_path.exists() and file_path.is_file() and not file_path.is_symlink() and
+                    file_path.resolve().parent == manager.root.resolve()):
                 data = file_path.read_bytes()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/pdf" if file_path.suffix == ".pdf" else "application/octet-stream")

@@ -30,8 +30,6 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
   non-streaming responses
 - Automated coverage for the HTTP API, dashboard behavior, cancellation/resume failure paths,
   report contents, and concurrent benchmark requests
-- Stronger hostile-code isolation validation; the subprocess fallback is bounded but Docker is the
-  intended defense-in-depth option
 - Richer hardware/model metadata collection, which is currently reported as `Unknown` when it cannot
   be established
 - Larger and repeated real-model studies before treating scores as representative outside this
@@ -85,9 +83,15 @@ with no applicable tests are reported as `null`/not tested rather than silently 
 The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
 and Python-code evaluators. Subjective categories use a clearly labelled deterministic rubric
 fallback; a future configured local evaluator model can replace that fallback without changing
-the result format. Code is executed only in a temporary isolated working directory with a short
-timeout, restricted imports, and no network-capable adapter. When Docker is available, code tests
-prefer a network-disabled, read-only container with CPU, memory, process, and timeout limits.
+the result format. Model-generated code runs only in a resource-limited, network-disabled Docker
+container. If Docker or the preloaded `python:3-alpine` image is unavailable, coding evaluations
+fail closed and are recorded as failed; the app never falls back to executing model code on the
+host. Caller-supplied test code is ignored.
+
+The HTTP server binds to loopback, limits request size and concurrency, and requires a per-process
+CSRF token plus same-origin requests for state-changing API operations. Benchmark model endpoints
+must match a locally discovered server, and endpoint redirects are not followed. Result filenames
+use generated identifiers rather than model names.
 
 Real adapters use streaming requests where supported. The result records an estimated TTFT from
 the first streamed content chunk, generation time after that chunk, estimated prompt tokens, and

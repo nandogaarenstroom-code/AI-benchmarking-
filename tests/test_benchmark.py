@@ -141,9 +141,12 @@ class BenchmarkTests(unittest.TestCase):
     def test_demo_run_exports_json_csv_pdf(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
-            manager.run({"profile": "QUICK", "generation_options": {"temperature": 0.6},
-                         "model": {"name": "Demo", "backend": "Demo",
-                                   "endpoint": "local://demo", "demo": True}})
+            with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=0)):
+                manager.run({"profile": "QUICK", "generation_options": {"temperature": 0.6},
+                             "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
+                                       "endpoint": "local://demo", "demo": True}})
             files = list(Path(directory).glob("benchmark_*"))
             self.assertTrue(any(p.suffix == ".json" for p in files))
             self.assertTrue(any(p.suffix == ".csv" for p in files))
@@ -161,10 +164,13 @@ class BenchmarkTests(unittest.TestCase):
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
-            manager.run({"profile": "QUICK", "repeat_runs": 2,
-                         "generation_options": {"seed": 31},
-                         "model": {"name": "Repeat Demo", "backend": "Demo",
-                                   "endpoint": "local://demo", "demo": True}})
+            with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=0)):
+                manager.run({"profile": "QUICK", "repeat_runs": 2,
+                             "generation_options": {"seed": 31},
+                             "model": {"id": "demo-local", "name": "Repeat Demo", "backend": "Demo",
+                                       "endpoint": "local://demo", "demo": True}})
             result_path = next(Path(directory).glob("benchmark_*.json"))
             result = json.loads(result_path.read_text())
             self.assertEqual(result["configuration"]["repeat_runs"], 2)
@@ -215,6 +221,17 @@ class BenchmarkTests(unittest.TestCase):
             result["id"] = "../escaped"
             with self.assertRaises(ValueError):
                 manager._write_outputs(result)
+
+    def test_result_listing_and_loading_ignore_symlinks_outside_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "results"
+            root.mkdir()
+            external = Path(directory) / "private.json"
+            external.write_text('{"model":{"name":"private"}}')
+            (root / "linked.json").symlink_to(external)
+            manager = BenchmarkManager(root)
+            self.assertEqual(manager.list_results(), [])
+            self.assertIsNone(manager.load_result("linked"))
 
 
 if __name__ == "__main__":
