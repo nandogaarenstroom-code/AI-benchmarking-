@@ -124,7 +124,10 @@ class BenchmarkManager:
         self.state_file = self.root / "current.json"; self.running = False
         self._run_lock = threading.Lock()
         self.cancel_requested = threading.Event()
-        self._status = {"state": "idle", "progress": 0, "total": 0, "passed": 0, "failed": 0}
+        self._status = {
+            "state": "idle", "phase": "Ready to start", "activity": "",
+            "progress": 0, "total": 0, "passed": 0, "failed": 0,
+        }
 
     def status(self): return self._status
 
@@ -279,19 +282,27 @@ class BenchmarkManager:
         tests = make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
-        self._status.update(state="running", total=len(tests) * repeat_runs,
-                            progress=len(completed) * repeat_runs)
+        self._status.update(state="running", phase="Warming up the model",
+                            activity="Sending 3 warm-up requests; their answers are discarded.",
+                            total=3, progress=0, passed=sum(x["passed"] for x in completed),
+                            failed=len(failures))
         # Warm up and discard warm-up outputs before measured requests.
-        for _ in range(3):
+        for warmup in range(3):
             self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
                          generation_options=generation_options)
+            self._status.update(progress=warmup + 1,
+                                activity=f"Warm-up request {warmup + 1} of 3 complete.")
         started = time.perf_counter()
+        self._status.update(phase="Running primary tests",
+                            activity="Each test may retry up to 3 times.",
+                            total=len(tests), progress=len(done))
         for test in tests:
             if self.cancel_requested.is_set():
                 self._status.update(state="cancelled")
                 return
             if test["id"] in done: continue
-            self._status.update(current_category=test["category"], current_test=test["id"])
+            self._status.update(current_category=test["category"], current_test=test["id"],
+                                activity=f"Evaluating {test['category']} · {test['difficulty']} test.")
             repetitions = []
             for repeat_index in range(repeat_runs):
                 run_options = dict(generation_options)
@@ -320,7 +331,7 @@ class BenchmarkManager:
             completed.append(item)
             if not item["passed"]: failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
                                                      "attempts": item["attempts"]})
-            self._status.update(progress=len(completed) * repeat_runs,
+            self._status.update(progress=len(completed),
                                 passed=sum(x["passed"] for x in completed),
                                 failed=len(failures))
             self._atomic_state_write({**payload, "seed": seed, "profile": profile,
@@ -337,15 +348,28 @@ class BenchmarkManager:
             max_context = min(max_context, 32768)
         context_tests = make_context_tests(seed, max_context=max_context)
         context_sizes = [test["context_size"] for test in context_tests]
-        context_results = [self._execute(model, test, generation_options=generation_options)
-                           for test in context_tests]
+        self._status.update(phase="Testing fresh context windows",
+                            activity="Sending independent prompts at increasing context sizes.",
+                            total=len(context_tests), progress=0)
+        context_results = []
+        for index, test in enumerate(context_tests):
+            self._status.update(current_test=test["id"],
+                                activity=f"Testing a fresh {test['context_size']:,}-token prompt.")
+            context_results.append(self._execute(model, test, generation_options=generation_options))
+            self._status.update(progress=index + 1)
         history, accumulated_results = [], []
-        for test in context_tests:
+        self._status.update(phase="Testing accumulated context",
+                            activity="Reusing conversation history to measure context degradation.",
+                            total=len(context_tests), progress=0)
+        for index, test in enumerate(context_tests):
+            self._status.update(current_test=test["id"],
+                                activity=f"Accumulating history through {test['context_size']:,} tokens.")
             item = self._execute(model, test, history=history, generation_options=generation_options)
             accumulated_results.append(item)
             history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
                             else f"[context test {test['context_size']} tokens]"},
                             {"role": "assistant", "content": item["answer"]}])
+            self._status.update(progress=index + 1)
         duration = max(time.perf_counter() - started, .001)
         latencies = [x["latency_s"] for x in completed] or [.001]
         tokens = sum(x["output_tokens"] for x in completed)
@@ -365,8 +389,13 @@ class BenchmarkManager:
                 rng = random.Random(seed + offset)
                 sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
                 seed_scores.append(round(statistics.mean(sample), 2))
-        perf = self._performance(model, tests[:min(5, len(tests))], tokens, duration,
-                                 generation_options)
+        self._status.update(phase="Measuring performance",
+                            activity="Running concurrency and latency samples.",
+                            total=8, progress=0)
+        perf = self._performance(
+            model, tests[:min(5, len(tests))], tokens, duration, generation_options,
+            progress_callback=lambda progress, activity: self._status.update(
+                progress=progress, activity=activity))
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
@@ -392,9 +421,15 @@ class BenchmarkManager:
                   "derived_metrics": {"quality_per_latency": round(quality["overall"]/max(statistics.mean(latencies), .001), 2)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
+        self._status.update(phase="Saving result files",
+                            activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
+                            total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
-        self._status.update(state="complete", result_id=result["id"], quality=quality["overall"],
-                            performance=perf["score"], overall=result["scores"]["overall"])
+        self._status.update(state="complete", phase="Benchmark complete",
+                            activity="All result files are ready.", progress=1, total=1,
+                            result_id=result["id"], result_directory=str(self.root.resolve()),
+                            quality=quality["overall"], performance=perf["score"],
+                            overall=result["scores"]["overall"])
 
     def _scores(self, results):
         categories = {}
@@ -425,12 +460,22 @@ class BenchmarkManager:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def _performance(self, model, samples, tokens, duration, generation_options=None):
+    def _performance(self, model, samples, tokens, duration, generation_options=None,
+                     progress_callback=None):
+        progress = 0
         for concurrency in (1, 2, 4):
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
-        latencies = [self._execute(model, t, generation_options=generation_options)["latency_s"]
-                     for t in samples] or [.001]
+            progress += 1
+            if progress_callback:
+                progress_callback(progress, f"Concurrency sample {concurrency} complete.")
+        latencies = []
+        for index, test in enumerate(samples):
+            latencies.append(self._execute(model, test, generation_options=generation_options)["latency_s"])
+            progress += 1
+            if progress_callback:
+                progress_callback(progress, f"Measured latency sample {index + 1} of {len(samples)}.")
+        latencies = latencies or [.001]
         return {"score": min(100, round(tokens / duration * 10, 2)),
                 "tokens_per_second": round(tokens/duration, 2), "ttft_s": round(statistics.median(latencies), 4),
                 "generation_s": round(sum(latencies), 4), "latency_mean_s": round(statistics.mean(latencies), 4),

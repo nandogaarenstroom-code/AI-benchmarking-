@@ -77,6 +77,23 @@ def _llama_runtime_details(endpoint):
     settings = props.get("default_generation_settings") or {}
     details = {}
     details["llama_cpp"] = True
+    setting_names = {
+        "temperature": "temperature", "top_p": "top_p", "top_k": "top_k",
+        "min_p": "min_p", "repeat_penalty": "repeat_penalty", "max_tokens": "n_predict",
+        "seed": "seed",
+    }
+    reported_options = {}
+    for option, prop_name in setting_names.items():
+        value = settings.get(prop_name)
+        if value is None and option == "max_tokens":
+            value = settings.get("max_tokens")
+        if value is not None:
+            reported_options[option] = value
+    if reported_options:
+        details["generation_defaults"] = {
+            key: value for key, value in normalize_generation_options(reported_options).items()
+            if key in reported_options
+        }
     for key, value in (
         ("backend_version", props.get("version") or props.get("server_version") or props.get("build_info")),
         ("context_length", settings.get("n_ctx") if settings.get("n_ctx") is not None else props.get("n_ctx")),
@@ -153,6 +170,7 @@ def model_info(model):
         "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
         "gpu_offload": model.get("gpu_offload", "Unknown"),
         "llama_cpp": model.get("llama_cpp", False),
+        "generation_defaults": model.get("generation_defaults", {}),
         "capabilities": model.get("capabilities", {}),
     }
 

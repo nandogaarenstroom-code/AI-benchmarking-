@@ -5,44 +5,71 @@
 <meta name="viewport" content="width=device-width">
 <title>Local AI Benchmark</title>
 <style>
-:root{color-scheme:dark;--bg:#0d1521;--panel:#162337;--line:#29405f;--text:#eaf2ff;--muted:#9bb0c9;--accent:#35c98f}
+:root{color-scheme:dark;--bg:#09111d;--panel:#111e2e;--panel-raised:#17283c;--line:#2b4059;--text:#edf4fd;--muted:#a7b7ca;--accent:#48d6a0;--accent-dark:#0a2a21;--blue:#83b9ff;--danger:#ff8e8e}
 *{box-sizing:border-box}
-body{font:16px system-ui;background:var(--bg);color:var(--text);max-width:1100px;margin:40px auto;padding:0 20px}
-section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;margin:16px 0}
-button,select,input{padding:11px 16px;border-radius:8px;border:0;margin:6px;background:var(--accent);color:#092015;font-weight:700}
-input{width:100%;background:#eaf2ff}
-fieldset{border:1px solid var(--line);border-radius:8px;margin:14px 0;padding:12px}
-fieldset label{display:block;font-size:14px}
-.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
-.model{padding:14px;border:1px solid #385577;border-radius:8px;margin:8px 0;cursor:pointer}.selected{border-color:var(--accent)}
+body{font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;background:radial-gradient(ellipse at 50% -20%,#1a3451 0,transparent 55%),var(--bg);color:var(--text);max-width:1100px;margin:36px auto;padding:0 24px}
+h1{font-size:clamp(30px,5vw,44px);letter-spacing:-.04em;margin:0}h2{font-size:21px;margin:0 0 12px}h3{font-size:17px}
+section{background:linear-gradient(145deg,rgba(23,40,60,.96),rgba(15,27,42,.98));border:1px solid var(--line);border-radius:14px;padding:24px;margin:18px 0;box-shadow:0 16px 42px #0002}
+button,select,input{font:inherit;padding:10px 13px;border-radius:8px;border:1px solid var(--line);margin:6px 6px 6px 0;background:#0e1b2a;color:var(--text)}
+button{cursor:pointer;font-weight:700;transition:transform .15s,border-color .15s,background .15s}
+button:hover{transform:translateY(-1px);border-color:var(--accent)}
+button:disabled{cursor:wait;opacity:.65;transform:none}
+input{width:100%;background:#0e1b2a}
+select:focus,input:focus,button:focus-visible,.model:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+fieldset{border:1px solid var(--line);border-radius:10px;margin:14px 0;padding:16px}
+fieldset label{display:block;font-size:14px;color:#dce7f4}
+.settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.model{padding:14px;border:1px solid #385577;border-radius:10px;margin:9px 0;background:#0e1b2a;cursor:pointer;transition:border-color .15s,background .15s}
+.model:hover,.model.selected{border-color:var(--accent);background:#142b35}
+.model-meta{display:block;margin-top:4px;font-size:14px}
+.controls{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px}
+.controls label{font-size:14px;color:var(--muted)}
+.controls select{margin-left:8px}
+.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-dark);padding:12px 18px}
+.secondary{background:transparent}
+details{margin-top:14px}summary{cursor:pointer;color:var(--blue);font-weight:650}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.metric{font-size:24px;color:var(--accent)}.muted{color:var(--muted)}
-progress{width:100%;height:20px}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:8px;border-bottom:1px solid var(--line)}
-a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px solid #fbbf24;padding-left:12px}
+progress{display:block;width:100%;height:22px;margin:14px 0 8px;accent-color:var(--accent)}
+progress::-webkit-progress-bar{background:#07111d;border-radius:99px}progress::-webkit-progress-value{background:linear-gradient(90deg,#25b97d,#6ce8b7);border-radius:99px;transition:width .35s}
+progress::-moz-progress-bar{background:linear-gradient(90deg,#25b97d,#6ce8b7);border-radius:99px}
+table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid var(--line)}
+a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px solid #fbbf24;padding-left:12px}
+#progress{border-color:#39bd8d;background:linear-gradient(135deg,#12352f,#12283a 65%,#111e2e);box-shadow:0 0 0 1px #35c98f24,0 16px 42px #0004}
+#progress-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.live-pill{display:inline-flex;align-items:center;gap:8px;padding:5px 10px;border-radius:99px;background:#0c2923;color:#9ef2ce;font-size:12px;font-weight:800;letter-spacing:.06em}
+.live-pill::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent);animation:pulse 1.5s infinite}
+@keyframes pulse{50%{opacity:.45;box-shadow:0 0 2px var(--accent)}}
+#live{font-size:16px;font-weight:700;margin:8px 0 2px}
+#activity{min-height:1.5em;margin:2px 0 10px}
+#result-links a{display:inline-block;padding:9px 12px;border:1px solid var(--line);border-radius:8px;margin:5px 8px 5px 0;text-decoration:none}
+#run-error{color:var(--danger);font-weight:650}
 .lab{position:relative;margin-top:16px;border:1px solid #385577;border-radius:10px;overflow:hidden;background:radial-gradient(circle at 50% 20%,#1c3550,#09111d 70%)}
 #voxel-lab{display:block;width:100%;height:auto;min-height:480px;touch-action:none}
 #voxel-detail{position:absolute;left:12px;top:12px;max-width:320px;padding:10px 12px;border:1px solid #4f6f93;border-radius:8px;background:#09111deb;pointer-events:none}
 .legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0}.key::before{content:"";display:inline-block;width:11px;height:11px;margin-right:6px;background:var(--key)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
-@media(max-width:600px){body{margin:18px auto}section{padding:15px}#voxel-lab{min-height:360px}}
+@media(max-width:600px){body{margin:18px auto;padding:0 14px}section{padding:17px}#voxel-lab{min-height:360px}.controls{display:grid}.controls label{display:flex;align-items:center;justify-content:space-between}.controls select{margin:0}.settings{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
-<h1>LOCAL AI BENCHMARK</h1>
-<p class="muted">LOCAL ONLY · zero-interaction automated evaluation</p>
+<h1>Local AI Benchmark</h1>
+<p class="muted">A private, local-only evaluation dashboard for your models.</p>
 <section>
   <h2>Detected local models</h2>
   <div id="models">Scanning local AI servers…</div>
-  <label>Benchmark <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
+  <div class="controls">
+  <label>Benchmark profile <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
   <label>Generation preset <select id="preset">
     <option value="repeatable">Repeatable</option>
     <option value="balanced">Balanced</option>
     <option value="creative">Creative</option>
     <option value="custom">Custom</option>
   </select></label>
+  </div>
   <details>
     <summary>Advanced settings</summary>
     <fieldset>
-    <legend>Generation settings (llama.cpp / Ollama)</legend>
+    <legend>Generation settings</legend>
     <div class="settings">
       <label>Temperature<input id="temperature" type="number" min="0" max="2" step="0.05" value="0"></label>
       <label>Top P<input id="top-p" type="number" min="0.01" max="1" step="0.01" value="1"></label>
@@ -53,12 +80,20 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
       <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
       <label>Primary test repeats<select id="repeat-runs"><option value="1">1 (default)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select></label>
     </div>
-    <p class="muted">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
+    <p class="muted" id="settings-note">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
     </fieldset>
   </details>
-  <button id="run">🚀 RUN BENCHMARK</button><button id="resume">RESUME PREVIOUS BENCHMARK</button>
+  <button class="primary" id="run">Run benchmark</button><button class="secondary" id="resume">Resume previous run</button>
+  <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
+  <p id="run-error" role="alert" hidden></p>
 </section>
-<section id="progress" hidden><h2>BENCHMARK RUNNING</h2><progress id="bar" value="0" max="1"></progress><p id="live"></p></section>
+<section id="progress" aria-live="polite" hidden>
+  <div id="progress-heading"><h2 id="phase">Preparing benchmark…</h2><span class="live-pill" id="run-state">RUNNING</span></div>
+  <p id="activity" class="muted"></p>
+  <progress id="bar" value="0" max="1" aria-label="Current benchmark phase progress"></progress>
+  <p id="live"></p>
+  <p class="muted">Keep this page open to follow each phase. Completed results will appear below.</p>
+</section>
 <section id="result" hidden>
   <h2>BENCHMARK COMPLETE <span id="demo-label" class="demo"></span></h2>
   <div class="grid">
@@ -66,7 +101,8 @@ a{color:#6ee7b7}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     <div>Performance <div class="metric" id="performance"></div></div>
     <div>Overall <div class="metric" id="overall"></div></div>
   </div>
-  <p id="links"></p>
+  <p id="result-directory" class="muted"></p>
+  <p id="result-links"></p>
   <h3>Voxel benchmark laboratory</h3>
   <p class="muted">Tower height represents the reported score. Point to or select a tower for its exact value. This visualization summarizes controlled benchmark results; it does not predict every real-world workload.</p>
   <div class="legend" aria-hidden="true">
@@ -95,32 +131,80 @@ const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
 
 async function load(){
-  const response=await fetch('/api/models'),data=await response.json(),container=$('models');
+  const response=await fetch('/api/models');
+  if(!response.ok)throw new Error('Could not scan local model servers.');
+  const data=await response.json(),container=$('models');
   container.replaceChildren();
-  data.models.forEach((model,index)=>{
+  data.models.forEach(model=>{
     const card=document.createElement('div');
-    card.className='model'+(index===0?' selected':'');
+    card.className='model';
     card.tabIndex=0;
     const title=document.createElement('b'),meta=document.createElement('span');
     title.textContent='✓ '+escapeText(model.name);
-    meta.className='muted';
-    meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`;
+    meta.className='model-meta muted';
+    const reported=model.generation_defaults||{};
+    const settingLabels={temperature:'temp',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat penalty',max_tokens:'max tokens',seed:'seed'};
+    const defaults=Object.entries(reported).map(([key,value])=>`${settingLabels[key]||key} ${value}`);
+    meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`+
+      (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'');
     card.append(title,document.createElement('br'),meta);
-    const choose=()=>{document.querySelectorAll('.model').forEach(item=>item.classList.remove('selected'));card.classList.add('selected');selected=model};
+    const choose=()=>{
+      document.querySelectorAll('.model').forEach(item=>item.classList.remove('selected'));
+      card.classList.add('selected');selected=model;applyModelDefaults(model);
+    };
     card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
     container.append(card);
   });
-  selected=data.models[0]||null;
+  if(data.models.length){
+    selected=data.models[0];
+    container.firstElementChild.classList.add('selected');
+    applyModelDefaults(selected);
+  }else{
+    container.textContent='No local model server found. Start Ollama, LM Studio, or llama-server and refresh this page.';
+  }
 }
 
+function displayError(message){
+  $('run-error').textContent=message;
+  $('run-error').hidden=false;
+  $('run').disabled=false;$('resume').disabled=false;
+}
+function setRunning(running){
+  $('run').disabled=running;$('resume').disabled=running;
+}
 async function poll(){
-  const response=await fetch('/api/status'),status=await response.json();
+  const response=await fetch('/api/status');
+  if(!response.ok)throw new Error('Could not read benchmark status.');
+  const status=await response.json();
   if(status.state==='running'){
     $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
-    $('live').textContent=`${status.progress||0} / ${status.total||0} · ${status.current_category||''} · passed ${status.passed||0} · failed ${status.failed||0}`;
-    setTimeout(poll,400);
+    $('phase').textContent=status.phase||'Benchmark running';
+    $('activity').textContent=status.activity||'The local model is working.';
+    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed`;
+    if(status.result_directory)$('results-directory').textContent=status.result_directory;
+    setRunning(true);
+    setTimeout(()=>poll().catch(error=>displayError(error.message)),650);
   }else if(status.state==='complete'){
-    const result=await (await fetch('/api/results/'+encodeURIComponent(status.result_id))).json();show(result);
+    const resultResponse=await fetch('/api/results/'+encodeURIComponent(status.result_id));
+    if(!resultResponse.ok)throw new Error('The benchmark finished, but its result could not be loaded.');
+    show(await resultResponse.json(),status.result_directory);
+    $('progress').hidden=false;$('phase').textContent='Benchmark complete';
+    $('activity').textContent=status.activity||'All result files are ready.';
+    $('run-state').textContent='COMPLETE';$('run-state').style.color='#9ef2ce';
+    $('bar').max=1;$('bar').value=1;$('live').textContent=`${status.passed||0} passed · ${status.failed||0} failed`;
+    setRunning(false);
+  }else if(status.state==='error'){
+    $('progress').hidden=false;$('phase').textContent='Benchmark stopped';
+    $('activity').textContent=status.error||'The benchmark could not finish.';
+    $('run-state').textContent='ERROR';$('run-state').style.color='var(--danger)';
+    setRunning(false);
+  }else if(status.state==='cancelled'){
+    $('progress').hidden=false;$('phase').textContent='Benchmark cancelled';
+    $('activity').textContent='The run was cancelled. Completed tests are available to resume.';
+    $('run-state').textContent='PAUSED';$('bar').value=0;
+    setRunning(false);
+  }else{
+    setRunning(false);
   }
 }
 
@@ -184,20 +268,23 @@ function inspectAt(event){
     $('voxel-detail').textContent=`${match.tower.name}: ${value}. ${match.tower.detail}`;
   }
 }
-function show(result){
+function show(result,resultDirectory){
   currentResult=result;$('progress').hidden=true;$('result').hidden=false;
   $('quality').textContent=result.scores.quality+'/100';$('performance').textContent=result.scores.performance+'/100';$('overall').textContent=result.scores.overall+'/100';
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
   $('result-note').textContent=result.demo?'Demo data validates the application flow and must not be interpreted as model performance.':'These are controlled local benchmark measurements, not universal performance guarantees.';
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
-    ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload]];
+    ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload],
+    ['llama.cpp server defaults',result.model.generation_defaults]];
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
   $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · observed quality variability: ${repeatScores.length>1?`mean ${result.uncertainty.quality_mean}/100, standard deviation ${result.uncertainty.quality_stddev}`:'not estimated (single run)'}. Context and performance measurements were run once.`;
-  const links=$('links');links.replaceChildren();
-  [['JSON','/api/results/'+encodeURIComponent(result.id)],['PDF','/results/'+encodeURIComponent(result.id)+'.pdf']].forEach(([label,url],index)=>{
-    if(index)links.append(' · ');const link=document.createElement('a');link.href=url;link.download='';link.textContent=label;links.append(link);
+  $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
+  const links=$('result-links');links.replaceChildren();
+  [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]].forEach(([label,filename])=>{
+    const link=document.createElement('a');link.href='/results/'+encodeURIComponent(filename);
+    link.download=filename;link.textContent=`Download ${label}`;links.append(link);
   });
   const table=$('categories');table.replaceChildren();
   const header=document.createElement('tr');['Category','Score','Meaning'].forEach(text=>{const cell=document.createElement('th');cell.textContent=text;header.append(cell)});table.append(header);
@@ -218,9 +305,37 @@ const presets={
 const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
 $('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
 Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
-$('run').onclick=async()=>{if(!selected)return;const generation_options={temperature:Number($('temperature').value),top_p:Number($('top-p').value),top_k:Number($('top-k').value),min_p:Number($('min-p').value),repeat_penalty:Number($('repeat-penalty').value),max_tokens:Number($('max-tokens').value),seed:Number($('sampling-seed').value)};await fetch('/api/benchmark',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify({model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)})});poll()};
-$('resume').onclick=async()=>{await fetch('/api/resume',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:'{}'});poll()};
-load();poll();
+function applyModelDefaults(model){
+  Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=presets.repeatable[key]);
+  const defaults=model.generation_defaults||{};
+  Object.entries(defaults).forEach(([key,value])=>{if(parameterInputs[key])$(parameterInputs[key]).value=value});
+  $('preset').value=Object.keys(defaults).length?'custom':'repeatable';
+  $('settings-note').textContent=Object.keys(defaults).length
+    ?'Values reported by this llama.cpp server are loaded into the controls. Editing a value sends it as a per-request override. Settings are recorded with each result; repeats use consecutive sampling seeds.'
+    :'Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).';
+}
+async function startRun(endpoint,payload){
+  $('run-error').hidden=true;$('progress').hidden=false;$('result').hidden=true;
+  $('phase').textContent=endpoint==='/api/resume'?'Resuming benchmark':'Starting benchmark';
+  $('activity').textContent='Connecting to the local benchmark runner…';
+  $('run-state').textContent='RUNNING';$('run-state').style.color='';
+  $('bar').max=1;$('bar').value=0;$('live').textContent='Preparing the first benchmark phase…';
+  setRunning(true);
+  try{
+    const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify(payload)});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'The benchmark could not be started.');
+    await poll();
+  }catch(error){displayError(error.message)}
+}
+$('run').onclick=()=>{
+  if(!selected){displayError('Select a detected model before starting a benchmark.');return}
+  const generation_options=Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,Number($(id).value)]));
+  startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
+};
+$('resume').onclick=()=>startRun('/api/resume',{});
+load().catch(error=>{$('models').textContent=error.message});
+poll().catch(error=>displayError(error.message));
 </script>
 </body>
 </html>
