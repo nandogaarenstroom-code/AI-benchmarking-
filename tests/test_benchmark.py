@@ -28,6 +28,14 @@ class BenchmarkTests(unittest.TestCase):
             })
         with patch("backend.discovery._get", return_value=None):
             self.assertEqual(_llama_runtime_details("http://localhost:8080/v1"), {})
+        with patch("backend.discovery._get", return_value={
+                "default_generation_settings": {
+                    "temperature": 0.7, "n_predict": -1, "seed": 4294967295,
+                }}):
+            self.assertEqual(
+                _llama_runtime_details("http://localhost:8080/v1")["generation_defaults"],
+                {"temperature": 0.7},
+            )
 
     def test_generation_options_are_normalized(self):
         options = normalize_generation_options({

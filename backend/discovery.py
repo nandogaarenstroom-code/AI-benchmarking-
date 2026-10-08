@@ -25,16 +25,17 @@ GENERATION_DEFAULTS = {
     "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
     "repeat_penalty": 1.1, "max_tokens": 128, "seed": 12345,
 }
+GENERATION_LIMITS = {
+    "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),
+    "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
+    "max_tokens": (1, 4096), "seed": (0, 2147483647),
+}
+INTEGER_GENERATION_OPTIONS = {"top_k", "max_tokens", "seed"}
 
 
 def normalize_generation_options(options=None):
     """Validate generation settings supplied by the local dashboard or API."""
     options = options if isinstance(options, dict) else {}
-    limits = {
-        "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),
-        "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
-        "max_tokens": (1, 4096), "seed": (0, 2147483647),
-    }
     normalized = {}
     for name, default in GENERATION_DEFAULTS.items():
         try:
@@ -43,9 +44,9 @@ def normalize_generation_options(options=None):
                 raise ValueError
         except (TypeError, ValueError):
             value = default
-        lower, upper = limits[name]
+        lower, upper = GENERATION_LIMITS[name]
         value = min(upper, max(lower, value))
-        normalized[name] = int(value) if name in ("top_k", "max_tokens", "seed") else value
+        normalized[name] = int(value) if name in INTEGER_GENERATION_OPTIONS else value
     return normalized
 
 
@@ -88,6 +89,16 @@ def _llama_runtime_details(endpoint):
         if value is None and option == "max_tokens":
             value = settings.get("max_tokens")
         if value is not None:
+            if isinstance(value, bool):
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            lower, upper = GENERATION_LIMITS[option]
+            if (not math.isfinite(value) or not lower <= value <= upper or
+                    (option in INTEGER_GENERATION_OPTIONS and not value.is_integer())):
+                continue
             reported_options[option] = value
     if reported_options:
         details["generation_defaults"] = {
