@@ -21,7 +21,10 @@ def evaluate(test, answer):
     answer = (answer or "").strip()
     expected = test.get("expected_answer")
     if method in ("numeric_exact", "numeric"):
-        actual, target = _number(answer), _number(str(expected))
+        match = re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", answer)
+        if not match:
+            return False
+        actual, target = float(answer), _number(str(expected))
         tolerance = float(test.get("tolerance", 1e-9))
         return actual is not None and target is not None and abs(actual - target) <= tolerance
     if method == "choice":
@@ -37,7 +40,14 @@ def evaluate(test, answer):
     if method == "code":
         return _run_code(answer, test.get("tests", []))
     if method == "rubric":
-        return len(answer.split()) >= test.get("minimum_words", 1)
+        words = re.findall(r"\b[\w'-]+\b", answer.lower())
+        exact_words = test.get("exact_words")
+        if exact_words is not None and len(words) != exact_words:
+            return False
+        if exact_words is None and len(words) < test.get("minimum_words", 1):
+            return False
+        return all(any(term in words for term in group)
+                   for group in test.get("required_term_groups", []))
     return answer == str(expected)
 
 

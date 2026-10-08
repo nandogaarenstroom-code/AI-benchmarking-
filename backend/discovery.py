@@ -202,14 +202,14 @@ def ask_model(model, prompt, history=None, options=None):
     try:
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
-                model["endpoint"] + "/api/generate",
+                model["endpoint"] + "/api/chat",
                 data=json.dumps({
-                    "model": model["id"], "prompt": prompt, "stream": True,
+                    "model": model["id"], "messages": messages, "stream": True,
                     "options": {
                         "temperature": options["temperature"], "top_p": options["top_p"],
                         "top_k": options["top_k"], "min_p": options["min_p"],
-                        "repeat_penalty": options["repeat_penalty"], "num_predict": options["max_tokens"],
-                        "seed": options["seed"],
+                        "repeat_penalty": options["repeat_penalty"],
+                        "num_predict": options["max_tokens"], "seed": options["seed"],
                     },
                 }).encode(),
                 headers={"Content-Type": "application/json"})
@@ -224,14 +224,14 @@ def ask_model(model, prompt, history=None, options=None):
                     if not line.strip():
                         continue
                     item = json.loads(line)
-                    text = item.get("response", "")
+                    text = item.get("message", {}).get("content", "")
                     if text and first_token_at is None:
                         first_token_at = time.perf_counter()
                     chunks.append(text)
                     if item.get("done"):
                         break
                 answer = "".join(chunks).strip()[:50_000]
-                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+                return {"text": answer, "prompt_tokens": _estimate_tokens(json.dumps(messages)),
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
                         "generation_s": time.perf_counter() - (first_token_at or started)}

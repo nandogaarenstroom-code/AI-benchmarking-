@@ -49,8 +49,9 @@ are documented exactly below.
 
 `a` and `b` are seeded random integers from 2 through 99.
 
-**Evaluation:** Extract the first numeric value from the response and compare it with the expected
-product. The current multiplication tests use zero numeric tolerance.
+**Evaluation:** The response must contain only a signed integer or decimal number (surrounding
+whitespace is allowed), then that number is compared with the expected product. The current
+multiplication tests use zero numeric tolerance.
 
 ### Reasoning
 
@@ -109,8 +110,8 @@ not a general hallucination score.
 
 **Prompt:** Ask for exactly three words describing rain.
 
-**Evaluation:** The current rubric checks only that the response has at least the configured
-minimum number of words. It does not yet enforce exactly three words or semantic relevance.
+**Evaluation:** The answer must have exactly three words and include a rain- or weather-related
+term from a controlled keyword list. This remains a limited lexical rubric, not semantic assessment.
 
 ### Summarization
 
@@ -123,8 +124,9 @@ not semantic summary quality.
 
 **Prompt:** Ask for a four-word slogan about careful testing.
 
-**Evaluation:** The current rubric checks only a minimum word count. It does not objectively score
-originality, quality, or relevance.
+**Evaluation:** The answer must have exactly four words and include a care/caution term and a
+testing/verification term from controlled keyword lists. This remains a limited lexical rubric;
+it does not objectively score originality or quality.
 
 ### Consistency
 
@@ -178,6 +180,9 @@ Each context test:
 3. Places the marker at the beginning, middle, or end.
 4. Estimates prompt tokens from prompt length.
 5. Asks the model to retrieve the marker.
+
+Fresh context tests send independent prompts. Accumulated tests send prior user and assistant
+messages through the adapter's conversation API, including Ollama's chat endpoint.
 6. Records latency, estimated prompt tokens, answer, and pass/fail status.
 
 Two variants are recorded:
@@ -204,9 +209,11 @@ records:
 - latency standard deviation
 - concurrency samples at 1, 2, and 4 workers
 
-For real Ollama and OpenAI-compatible adapters, streaming is now enabled and `ttft_s` is measured
-from the first non-empty streamed content chunk. Demo mode remains deterministic and does not
-claim real streaming performance. Docker code isolation is opt-in with
+For real Ollama and OpenAI-compatible adapters, streaming is enabled and `ttft_s` is measured
+from the first non-empty streamed content chunk. Throughput and the performance score use the
+serial performance samples' output tokens divided by their measured generation time. Latency
+statistics use total response latency; `generation_s` is the sum of generation times for those
+samples. Demo mode remains deterministic and does not claim real streaming performance. Docker code isolation is opt-in with
 `BENCHMARK_USE_DOCKER=1`; otherwise the bounded fallback evaluator is used.
 
 The current performance score is derived from measured throughput and capped at 100. These values
@@ -229,11 +236,11 @@ Failures continue through the remaining tests and appear in the final JSON resul
 
 The current objective evaluators are intentionally simple:
 
-- numeric extraction with tolerance
+- exact numeric-only response matching with tolerance
 - first-letter multiple-choice matching
 - JSON parsing and required-key validation
 - required-term matching
-- word-count rubric checks
+- exact word-count and controlled keyword rubric checks
 - assertion-based Python execution
 
 There is no configured local evaluator-model rubric yet. Subjective categories therefore must not

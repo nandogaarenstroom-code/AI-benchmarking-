@@ -61,14 +61,19 @@ def _test(category, i, rng):
                 "required_terms": ["buenos", "días"]}
     if category == "Instruction Following":
         return {**common, "prompt": "Respond with exactly three words describing rain.",
-                "expected_answer": "three words", "evaluation_method": "rubric", "minimum_words": 3}
+                "expected_answer": "three words", "evaluation_method": "rubric", "exact_words": 3,
+                "required_term_groups": [["rain", "storm", "cloud", "wet", "drizzle", "shower", "downpour"]]}
     if category == "Summarization":
         return {**common, "prompt": "Summarize: Local systems run without sending data away. Mention local privacy.",
                 "expected_answer": "local privacy", "evaluation_method": "contains_all",
                 "required_terms": ["local", "privacy"]}
     if category == "Creative Generation":
         return {**common, "prompt": "Write a four-word slogan about careful testing.",
-                "expected_answer": "creative", "evaluation_method": "rubric", "minimum_words": 4}
+                "expected_answer": "creative", "evaluation_method": "rubric", "exact_words": 4,
+                "required_term_groups": [
+                    ["careful", "carefully", "cautious", "cautiously"],
+                    ["test", "testing", "tested", "verify", "verified", "quality"],
+                ]}
     if category == "Consistency":
         return {**common, "prompt": "Is 2 + 2 equal to 4? Answer yes or no.",
                 "expected_answer": "yes", "evaluation_method": "contains_all", "required_terms": ["yes"]}
@@ -192,6 +197,7 @@ class BenchmarkManager:
         with self._run_lock:
             if self.running:
                 return False
+            self.cancel_requested.clear()
             self.running = True
             self._status.update(state="running", phase="Starting benchmark",
                                 activity="Preparing the local model and test suite.",
@@ -208,6 +214,7 @@ class BenchmarkManager:
         with self._run_lock:
             if self.running:
                 return False
+            self.cancel_requested.clear()
             self.running = True
         return self._run_guarded(payload)
 
@@ -228,6 +235,13 @@ class BenchmarkManager:
         self.cancel_requested.set()
         return True
 
+    def _cancel_if_requested(self):
+        if not self.cancel_requested.is_set():
+            return False
+        self._status.update(state="cancelled",
+                            activity="The run was cancelled. Completed primary tests are saved and can be resumed.")
+        return True
+
     def _answer(self, model, test, history=None, generation_options=None):
         if model.get("demo"):
             if test["evaluation_method"] == "code":
@@ -235,6 +249,10 @@ class BenchmarkManager:
             if test["evaluation_method"] == "json_schema":
                 return '{"answer":"ok","valid":true}'
             if test["evaluation_method"] == "rubric":
+                if test.get("category") == "Instruction Following":
+                    return "Soft rain falls"
+                if test.get("category") == "Creative Generation":
+                    return "Careful testing builds trust"
                 return "careful reliable local testing"
             return test["expected_answer"]
         from .discovery import ask_model
@@ -263,7 +281,7 @@ class BenchmarkManager:
                         "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
                         "generation_s": response_metrics.get("generation_s", latency),
                         "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
-                        "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))), "error": error,
+                        "output_tokens": response_metrics.get("output_tokens", len(answer.split())), "error": error,
                         "context_reset": history is None, "attempts": attempts,
                         "status": "PASS" if passed else "FAILED"}
 
@@ -281,7 +299,6 @@ class BenchmarkManager:
     def _run(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("invalid benchmark request")
-        self.cancel_requested.clear()
         output_directory = payload.get("output_directory")
         resuming = output_directory is not None
         if output_directory is None:
@@ -325,11 +342,14 @@ class BenchmarkManager:
                             failed=len(failures))
         # Warm up and discard warm-up outputs before measured requests.
         for warmup in range(3):
+            if self._cancel_if_requested():
+                return
             self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
                          generation_options=generation_options)
             self._status.update(progress=warmup + 1,
                                 activity=f"Warm-up request {warmup + 1} of 3 complete.")
-        started = time.perf_counter()
+        if self._cancel_if_requested():
+            return
         self._status.update(phase="Running primary tests",
                             activity="Each test may retry up to 3 times.",
                             total=len(tests), progress=len(done))
@@ -374,6 +394,8 @@ class BenchmarkManager:
             self._atomic_state_write({**payload, "seed": seed, "profile": profile,
                                       "model": model, "tests": tests,
                                       "completed_tests": completed, "failures": failures})
+            if self._cancel_if_requested():
+                return
         advertised_context = model.get("context_length", 131072)
         try:
             max_context = min(int(advertised_context), 262144)
@@ -390,15 +412,21 @@ class BenchmarkManager:
                             total=len(context_tests), progress=0)
         context_results = []
         for index, test in enumerate(context_tests):
+            if self._cancel_if_requested():
+                return
             self._status.update(current_test=test["id"],
                                 activity=f"Testing a fresh {test['context_size']:,}-token prompt.")
             context_results.append(self._execute(model, test, generation_options=generation_options))
             self._status.update(progress=index + 1)
+            if self._cancel_if_requested():
+                return
         history, accumulated_results = [], []
         self._status.update(phase="Testing accumulated context",
                             activity="Reusing conversation history to measure context degradation.",
                             total=len(context_tests), progress=0)
         for index, test in enumerate(context_tests):
+            if self._cancel_if_requested():
+                return
             self._status.update(current_test=test["id"],
                                 activity=f"Accumulating history through {test['context_size']:,} tokens.")
             item = self._execute(model, test, history=history, generation_options=generation_options)
@@ -407,9 +435,9 @@ class BenchmarkManager:
                             else f"[context test {test['context_size']} tokens]"},
                             {"role": "assistant", "content": item["answer"]}])
             self._status.update(progress=index + 1)
-        duration = max(time.perf_counter() - started, .001)
+            if self._cancel_if_requested():
+                return
         latencies = [x["latency_s"] for x in completed] or [.001]
-        tokens = sum(x["output_tokens"] for x in completed)
         quality = self._scores(completed)
         score_values = [item["score"] * 10 for item in completed]
         repeat_quality_scores = []
@@ -430,9 +458,11 @@ class BenchmarkManager:
                             activity="Running concurrency and latency samples.",
                             total=8, progress=0)
         perf = self._performance(
-            model, tests[:min(5, len(tests))], tokens, duration, generation_options,
+            model, tests[:min(5, len(tests))], generation_options,
             progress_callback=lambda progress, activity: self._status.update(
                 progress=progress, activity=activity))
+        if perf is None or self._cancel_if_requested():
+            return
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
@@ -498,25 +528,39 @@ class BenchmarkManager:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def _performance(self, model, samples, tokens, duration, generation_options=None,
-                     progress_callback=None):
+    def _performance(self, model, samples, generation_options=None, progress_callback=None):
         progress = 0
         for concurrency in (1, 2, 4):
+            if self._cancel_if_requested():
+                return None
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
+            if self._cancel_if_requested():
+                return None
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Concurrency sample {concurrency} complete.")
-        latencies = []
+        measurements = []
         for index, test in enumerate(samples):
-            latencies.append(self._execute(model, test, generation_options=generation_options)["latency_s"])
+            if self._cancel_if_requested():
+                return None
+            measurements.append(self._execute(model, test, generation_options=generation_options))
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Measured latency sample {index + 1} of {len(samples)}.")
-        latencies = latencies or [.001]
-        return {"score": min(100, round(tokens / duration * 10, 2)),
-                "tokens_per_second": round(tokens/duration, 2), "ttft_s": round(statistics.median(latencies), 4),
-                "generation_s": round(sum(latencies), 4), "latency_mean_s": round(statistics.mean(latencies), 4),
+            if self._cancel_if_requested():
+                return None
+        measurements = measurements or [{"latency_s": .001, "ttft_s": .001,
+                                         "generation_s": .001, "output_tokens": 0}]
+        latencies = [item["latency_s"] for item in measurements]
+        generation_time = max(sum(item["generation_s"] for item in measurements), .001)
+        output_tokens = sum(item["output_tokens"] for item in measurements)
+        throughput = output_tokens / generation_time
+        return {"score": min(100, round(throughput * 10, 2)),
+                "tokens_per_second": round(throughput, 2),
+                "ttft_s": round(statistics.median(item["ttft_s"] for item in measurements), 4),
+                "generation_s": round(sum(item["generation_s"] for item in measurements), 4),
+                "latency_mean_s": round(statistics.mean(latencies), 4),
                 "latency_p50_s": round(statistics.median(latencies), 4),
                 "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4),
                 "latency_stddev_s": round(statistics.pstdev(latencies), 4),

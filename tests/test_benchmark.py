@@ -58,7 +58,7 @@ class BenchmarkTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def __iter__(self):
-                return iter([b'{"response":"ok","done":true}\n'])
+                return iter([b'{"message":{"content":"ok"},"done":true}\n'])
 
         captured = {}
         def fake_urlopen(request, timeout):
@@ -67,9 +67,12 @@ class BenchmarkTests(unittest.TestCase):
 
         options = {"temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
+        history = [{"role": "user", "content": "remember this"},
+                   {"role": "assistant", "content": "I will"}]
         with patch("backend.discovery._open", side_effect=fake_urlopen):
             ask_model({"backend": "Ollama", "endpoint": "http://localhost:11434", "id": "model"},
-                      "prompt", options=options)
+                      "prompt", history=history, options=options)
+        self.assertEqual(captured["messages"], history + [{"role": "user", "content": "prompt"}])
         self.assertEqual(captured["options"], {
             "temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
             "repeat_penalty": 1.2, "num_predict": 64, "seed": 23,
@@ -122,7 +125,23 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_domain_evaluators(self):
         self.assertTrue(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "42"))
+        self.assertTrue(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, " 42 "))
+        self.assertFalse(evaluate(
+            {"evaluation_method": "numeric", "expected_answer": "42", "tolerance": 0},
+            "42 and 999 are possible answers"))
+        self.assertFalse(evaluate(
+            {"evaluation_method": "numeric", "expected_answer": "42", "tolerance": 0},
+            "The answer is 42."))
         self.assertTrue(evaluate({"evaluation_method": "json_schema", "required_keys": ["ok"]}, '{"ok": true}'))
+        generated_tests = make_tests("STANDARD", 7)
+        rain_test = next(test for test in generated_tests if test["category"] == "Instruction Following")
+        slogan_test = next(test for test in generated_tests if test["category"] == "Creative Generation")
+        self.assertTrue(evaluate(rain_test, "Soft rain falls"))
+        self.assertFalse(evaluate(rain_test, "Rain falls softly every day"))
+        self.assertFalse(evaluate(rain_test, "Soft clouds drift by"))
+        self.assertTrue(evaluate(slogan_test, "Careful testing builds trust"))
+        self.assertFalse(evaluate(slogan_test, "Careful testing builds trust today"))
+        self.assertFalse(evaluate(slogan_test, "Boring answers fill space"))
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
                 patch("backend.evaluation.subprocess.run",
                       return_value=CompletedProcess(args=[], returncode=0)) as run:
@@ -188,6 +207,66 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.status()["result_directory"], str(result_path.parent.resolve()))
             self.assertEqual(manager.list_results()[0]["output_directory"], result_path.parent.name)
             self.assertEqual(manager.load_result(data["id"])["id"], data["id"])
+
+    def test_performance_metrics_use_measured_generation_responses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            samples = [{"id": "one"}, {"id": "two"}]
+            measured = [
+                {"latency_s": 0.5, "ttft_s": 0.1, "generation_s": 0.4, "output_tokens": 4},
+                {"latency_s": 1.0, "ttft_s": 0.2, "generation_s": 0.6, "output_tokens": 6},
+            ]
+            with patch.object(manager, "_answer", return_value="warm"), \
+                    patch.object(manager, "_execute", side_effect=measured):
+                result = manager._performance({"demo": True}, samples)
+            self.assertEqual(result["tokens_per_second"], 10)
+            self.assertEqual(result["score"], 100)
+            self.assertEqual(result["ttft_s"], 0.15)
+            self.assertEqual(result["generation_s"], 1.0)
+            self.assertEqual(result["latency_mean_s"], 0.75)
+            self.assertEqual(result["latency_p50_s"], 0.75)
+
+    def test_cancellation_during_fresh_context_stops_before_performance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            tests = [{
+                "id": "reasoning-001", "category": "Reasoning", "difficulty": "Easy",
+                "prompt": "What color?", "expected_answer": "blue",
+                "evaluation_method": "contains_all", "required_terms": ["blue"],
+            }]
+            context_tests = [{
+                "id": "context-4096", "category": "Context Scaling", "context_size": 4096,
+                "context_position": "end", "prompt": "Remember CTX-1. Return marker.",
+                "estimated_prompt_tokens": 10, "expected_answer": "CTX-1",
+                "evaluation_method": "contains_all", "required_terms": ["CTX-1"],
+                "max_score": 10,
+            }]
+            execute = manager._execute
+
+            def cancel_after_context(model, test, history=None, generation_options=None):
+                item = execute(model, test, history, generation_options)
+                if test["category"] == "Context Scaling":
+                    manager.cancel()
+                return item
+
+            with patch("backend.benchmark.make_tests", return_value=tests), \
+                    patch("backend.benchmark.make_context_tests", return_value=context_tests), \
+                    patch.object(manager, "_execute", side_effect=cancel_after_context), \
+                    patch.object(manager, "_performance") as performance:
+                manager.run({
+                    "profile": "QUICK",
+                    "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
+                              "endpoint": "local://demo", "demo": True},
+                })
+            self.assertEqual(manager.status()["state"], "cancelled")
+            performance.assert_not_called()
+
+    def test_performance_phase_honors_pending_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager.cancel_requested.set()
+            self.assertIsNone(manager._performance({"demo": True}, [{"id": "test"}]))
+            self.assertEqual(manager.status()["state"], "cancelled")
 
     def test_pdf_includes_dashboard_measurements_and_escapes_model_names(self):
         with tempfile.TemporaryDirectory() as directory:
