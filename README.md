@@ -52,17 +52,23 @@ reported as `Unknown`.
 
 ## Automated behavior
 
-Selecting a model and pressing **RUN BENCHMARK** starts the selected profile without further
-questions. Progress is persisted in `results/current.json`; use **RESUME PREVIOUS BENCHMARK** after
-an interruption. Completed artifacts are saved under `results/` as `.json`, `.csv`, `.pdf`, and
-`.svg`. Every test and failure is retained in the JSON result. Demo outputs are marked
-`DEMO DATA` in the result metadata (`demo: true`).
+Selecting a model and pressing **Run benchmark** starts the selected profile without further
+questions. The dashboard reports warm-up, primary tests, fresh and accumulated context tests,
+performance measurements, and file-saving phases, with phase progress and pass/fail counts.
+Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
+Completed files are saved under `results/` with a generated name such as
+`benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
+dashboard shows the results folder and provides download links. Every test and failure is retained
+in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
 `top_p: 1`, `seed: 12345`); settings are included in saved result configuration and passed to
-Ollama or OpenAI-compatible adapters. The llama.cpp context window is configured when launching
-`llama-server` (for example, with `-c`); it cannot be changed for an individual request here.
+Ollama or OpenAI-compatible adapters. When llama.cpp reports its startup generation defaults through
+`/props`, the dashboard displays those values on the model card and loads them into the generation
+controls. Edited controls are sent as request-level overrides and the actual benchmark settings are
+recorded with each result. The llama.cpp context window is configured when launching `llama-server`
+(for example, with `-c`); it cannot be changed for an individual request here.
 Choose a **Repeatable**, **Balanced**, or **Creative** preset on the main screen; individual
 sampling controls and optional 2–5 repeats of the primary test suite are collapsed under
 **Advanced settings**. Repeats use consecutive sampling seeds and report per-run quality and its
