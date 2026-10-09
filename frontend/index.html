@@ -16,12 +16,18 @@ button:hover{transform:translateY(-1px);border-color:var(--accent)}
 button:disabled{cursor:wait;opacity:.65;transform:none}
 input{width:100%;background:#0e1b2a}
 select:focus,input:focus,button:focus-visible,.model:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+canvas:focus-visible{outline:2px solid var(--blue);outline-offset:-4px}
 fieldset{border:1px solid var(--line);border-radius:10px;margin:14px 0;padding:16px}
 fieldset label{display:block;font-size:14px;color:#dce7f4}
 .settings{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .model{padding:14px;border:1px solid #385577;border-radius:10px;margin:9px 0;background:#0e1b2a;cursor:pointer;transition:border-color .15s,background .15s}
 .model:hover,.model.selected{border-color:var(--accent);background:#142b35}
 .model-meta{display:block;margin-top:4px;font-size:14px}
+.model[aria-pressed="true"]{border-color:var(--accent);background:#142b35}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.toolbar button{margin:0}
+.history-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
+.history-item input{width:auto;margin:0}
 .controls{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px}
 .controls label{font-size:14px;color:var(--muted)}
 .controls select{margin-left:8px}
@@ -55,8 +61,9 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
 <h1>Local AI Benchmark</h1>
 <p class="muted">A private, local-only evaluation dashboard for your models.</p>
 <section>
-  <h2>Detected local models</h2>
+  <div class="toolbar"><h2>Detected local models</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
   <div id="models">Scanning local AI servers…</div>
+  <p id="discovery-status" class="muted" role="status"></p>
   <div class="controls">
   <label>Benchmark profile <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
   <label>Generation preset <select id="preset">
@@ -83,7 +90,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     <p class="muted" id="settings-note">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
     </fieldset>
   </details>
-  <button class="primary" id="run">Run benchmark</button><button class="secondary" id="resume">Resume previous run</button>
+  <button class="primary" id="run" disabled>Choose a model to run</button><button class="secondary" id="resume" disabled>Resume previous run</button>
   <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
   <p id="run-error" role="alert" hidden></p>
 </section>
@@ -93,6 +100,13 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <progress id="bar" value="0" max="1" aria-label="Current benchmark phase progress"></progress>
   <p id="live"></p>
   <p class="muted">Keep this page open to follow each phase. Completed results will appear below.</p>
+  <button class="secondary" id="cancel" type="button" hidden>Cancel run</button>
+</section>
+<section id="history-section">
+  <div class="toolbar"><h2>Saved benchmark results</h2><button class="secondary" id="refresh-results" type="button">Refresh results</button></div>
+  <div id="history" class="muted">Loading saved results…</div>
+  <button class="secondary" id="compare-results" type="button" disabled>Compare selected</button>
+  <div id="comparison" aria-live="polite"></div>
 </section>
 <section id="result" hidden>
   <h2>BENCHMARK COMPLETE <span id="demo-label" class="demo"></span></h2>
@@ -101,6 +115,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     <div>Performance <div class="metric" id="performance"></div></div>
     <div>Overall <div class="metric" id="overall"></div></div>
   </div>
+  <p id="performance-detail" class="muted"></p>
   <p id="result-directory" class="muted"></p>
   <p id="result-links"></p>
   <h3>Voxel benchmark laboratory</h3>
@@ -112,7 +127,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
     <span class="key" style="--key:#64748b">Not tested</span>
   </div>
   <div class="lab">
-    <canvas id="voxel-lab" width="1000" height="620" aria-label="Voxel chart of benchmark scores. Exact values are listed in the table below."></canvas>
+    <canvas id="voxel-lab" width="1000" height="620" tabindex="0" aria-label="Voxel chart of benchmark scores. Focus and use arrow keys to inspect scores; exact values are listed in the table below."></canvas>
     <div id="voxel-detail" aria-live="polite">Select a tower to inspect a measurement.</div>
   </div>
   <p id="result-note" class="notice"></p>
@@ -125,62 +140,78 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <table id="categories"><caption class="sr-only">Exact benchmark category scores</caption></table>
 </section>
 <script>
-let selected=null,currentResult=null,hitAreas=[];
+let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false;
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
 
 async function load(){
-  const response=await fetch('/api/models');
-  if(!response.ok)throw new Error('Could not scan local model servers.');
-  const data=await response.json(),container=$('models');
-  container.replaceChildren();
-  data.models.forEach(model=>{
-    const card=document.createElement('div');
-    card.className='model';
-    card.tabIndex=0;
-    const title=document.createElement('b'),meta=document.createElement('span');
-    title.textContent='✓ '+escapeText(model.name);
-    meta.className='model-meta muted';
-    const reported=model.generation_defaults||{};
-    const settingLabels={temperature:'temp',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat penalty',max_tokens:'max tokens',seed:'seed'};
-    const defaults=Object.entries(reported).map(([key,value])=>`${settingLabels[key]||key} ${value}`);
-    meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`+
-      (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'');
-    card.append(title,document.createElement('br'),meta);
-    const choose=()=>{
-      document.querySelectorAll('.model').forEach(item=>item.classList.remove('selected'));
-      card.classList.add('selected');selected=model;applyModelDefaults(model);
-    };
-    card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
-    container.append(card);
-  });
-  if(data.models.length){
-    selected=data.models[0];
-    container.firstElementChild.classList.add('selected');
-    applyModelDefaults(selected);
-  }else{
-    container.textContent='No local model server found. Start Ollama, LM Studio, or llama-server and refresh this page.';
-  }
+  const button=$('refresh-models');
+  button.disabled=true;
+  $('discovery-status').textContent='Scanning local model servers…';
+  try{
+    const response=await fetch('/api/models');
+    if(!response.ok)throw new Error('The local model scan failed. Check that the app is still running.');
+    const data=await response.json(),container=$('models');
+    selected=null;$('run').disabled=true;$('run').textContent='Choose a model to run';
+    container.replaceChildren();
+    data.models.forEach(model=>{
+      const card=document.createElement('div');
+      card.className='model';card.tabIndex=0;card.setAttribute('role','button');card.setAttribute('aria-pressed','false');
+      const title=document.createElement('b'),meta=document.createElement('span');
+      title.textContent=(model.demo?'DEMO · ':'')+escapeText(model.name);
+      meta.className='model-meta muted';
+      const reported=model.generation_defaults||{};
+      const settingLabels={temperature:'temp',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat penalty',max_tokens:'max tokens',seed:'seed'};
+      const defaults=Object.entries(reported).map(([key,value])=>`${settingLabels[key]||key} ${value}`);
+      meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`+
+        (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'');
+      card.append(title,document.createElement('br'),meta);
+      const choose=()=>{
+        document.querySelectorAll('.model').forEach(item=>{item.classList.remove('selected');item.setAttribute('aria-pressed','false')});
+        card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);
+        $('run').disabled=false;$('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';
+        $('discovery-status').textContent=model.demo?'Demo results test the app only; they are not model measurements.':'Selected local model: '+model.name;
+      };
+      card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
+      container.append(card);
+    });
+    if(!data.models.length){
+      container.textContent='No local model server found. The demo model is unavailable; start a local server and refresh.';
+      $('discovery-status').textContent='Start Ollama, LM Studio, or llama-server, then scan again.';
+    }else{
+      const realCount=data.models.filter(model=>!model.demo).length;
+      $('discovery-status').textContent=realCount
+        ?`${realCount} real local model${realCount===1?'':'s'} found. Select one to enable the benchmark.`
+        :'No real model detected. Select DEMO deliberately to try the app with illustrative data.';
+    }
+  }catch(error){
+    $('models').textContent='Unable to scan local model servers.';
+    $('discovery-status').textContent=error.message;
+  }finally{button.disabled=false}
 }
 
 function displayError(message){
   $('run-error').textContent=message;
   $('run-error').hidden=false;
-  $('run').disabled=false;$('resume').disabled=false;
+  setRunning(false);
 }
 function setRunning(running){
-  $('run').disabled=running;$('resume').disabled=running;
+  $('run').disabled=running||!selected;$('resume').disabled=running||!resumeAvailable;
+  $('cancel').hidden=!running;
 }
 async function poll(){
   const response=await fetch('/api/status');
   if(!response.ok)throw new Error('Could not read benchmark status.');
   const status=await response.json();
+  resumeAvailable=Boolean(status.resume_available);
   if(status.state==='running'){
     $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
     $('phase').textContent=status.phase||'Benchmark running';
     $('activity').textContent=status.activity||'The local model is working.';
-    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed`;
+    if(lastPollActivity!==status.activity){lastPollActivity=status.activity;lastActivityAt=Date.now()}
+    const stalled=Date.now()-lastActivityAt>20000?' · Waiting for the model; this request may take a while.':'';
+    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed${stalled}`;
     if(status.result_directory)$('results-directory').textContent=status.result_directory;
     setRunning(true);
     setTimeout(()=>poll().catch(error=>displayError(error.message)),650);
@@ -193,6 +224,7 @@ async function poll(){
     $('run-state').textContent='COMPLETE';$('run-state').style.color='#9ef2ce';
     $('bar').max=1;$('bar').value=1;$('live').textContent=`${status.passed||0} passed · ${status.failed||0} failed`;
     setRunning(false);
+    loadResults().catch(()=>{});
   }else if(status.state==='error'){
     $('progress').hidden=false;$('phase').textContent='Benchmark stopped';
     $('activity').textContent=status.error||'The benchmark could not finish.';
@@ -264,22 +296,44 @@ function inspectAt(event){
   const match=[...hitAreas].reverse().find(area=>x>=area.bounds.left&&x<=area.bounds.right&&y>=area.bounds.top&&y<=area.bounds.bottom);
   canvas.style.cursor=match?'pointer':'default';
   if(match){
-    const value=match.tower.score===null||match.tower.score===undefined?'Not tested':Number(match.tower.score).toFixed(1)+'/100';
-    $('voxel-detail').textContent=`${match.tower.name}: ${value}. ${match.tower.detail}`;
+    focusedTower=hitAreas.indexOf(match);describeTower(match);
   }
+}
+function describeTower(area){
+  if(!area)return;
+  const value=area.tower.score===null||area.tower.score===undefined?'Not tested':Number(area.tower.score).toFixed(1)+'/100';
+  $('voxel-detail').textContent=`${area.tower.name}: ${value}. ${area.tower.detail}`;
+  $('voxel-lab').setAttribute('aria-label',`${area.tower.name}: ${value}. Use arrow keys to inspect other scores.`);
+}
+function moveTower(event){
+  if(!hitAreas.length)return;
+  if(event.key==='ArrowRight'||event.key==='ArrowDown')focusedTower=(focusedTower+1)%hitAreas.length;
+  else if(event.key==='ArrowLeft'||event.key==='ArrowUp')focusedTower=(focusedTower-1+hitAreas.length)%hitAreas.length;
+  else if(event.key==='Enter'||event.key===' '){describeTower(hitAreas[focusedTower]);event.preventDefault();return}
+  else return;
+  describeTower(hitAreas[focusedTower]);event.preventDefault();
 }
 function show(result,resultDirectory){
   currentResult=result;$('progress').hidden=true;$('result').hidden=false;
   $('quality').textContent=result.scores.quality+'/100';$('performance').textContent=result.scores.performance+'/100';$('overall').textContent=result.scores.overall+'/100';
+  const performance=result.performance||{};
+  $('performance-detail').textContent=`Measured sample throughput: ${performance.tokens_per_second??'not available'} estimated output tokens/s · median TTFT ${performance.ttft_s??'not available'}s (${performance.timing_is_estimated?'estimated from request timing':'stream-timed'}) · token counts are estimates.`;
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
-  $('result-note').textContent=result.demo?'Demo data validates the application flow and must not be interpreted as model performance.':'These are controlled local benchmark measurements, not universal performance guarantees.';
+  const evaluatorUnavailable=(result.failures||[]).some(item=>item.reason==='EVALUATOR_UNAVAILABLE');
+  $('result-note').textContent=result.demo
+    ?'Demo data validates the application flow and must not be interpreted as model performance.'
+    :'These are controlled local benchmark measurements, not universal performance guarantees.'+
+      (evaluatorUnavailable?' Coding checks could not run because Docker is unavailable; see the JSON failure details.':'');
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
     ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload],
     ['llama.cpp server defaults',result.model.generation_defaults]];
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
-  $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · observed quality variability: ${repeatScores.length>1?`mean ${result.uncertainty.quality_mean}/100, standard deviation ${result.uncertainty.quality_stddev}`:'not estimated (single run)'}. Context and performance measurements were run once.`;
+  const uncertainty=result.uncertainty||{};
+  $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · ${repeatScores.length>1
+    ?`observed between-run quality: mean ${uncertainty.quality_mean}/100, standard deviation ${uncertainty.quality_stddev}`
+    :`item-bootstrap variability: standard deviation ${uncertainty.quality_stddev??'not available'} (resampled tests, not independent model runs)`}. Context and performance measurements were run once.`;
   $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
   const links=$('result-links');links.replaceChildren();
   [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]].forEach(([label,filename])=>{
@@ -297,6 +351,64 @@ function show(result,resultDirectory){
 
 $('voxel-lab').addEventListener('pointermove',inspectAt);
 $('voxel-lab').addEventListener('pointerdown',inspectAt);
+$('voxel-lab').addEventListener('keydown',moveTower);
+async function loadResults(){
+  const container=$('history');
+  $('compare-results').disabled=true;
+  $('comparison').replaceChildren();
+  try{
+    const response=await fetch('/api/results');
+    if(!response.ok)throw new Error('Could not load saved results.');
+    const results=await response.json();container.replaceChildren();
+    if(!results.length){container.textContent='No completed benchmark results saved yet.';return}
+    results.forEach(item=>{
+      const row=document.createElement('div'),label=document.createElement('span'),button=document.createElement('button'),check=document.createElement('input');
+      row.className='history-item';
+      label.textContent=`${item.model||'Unknown model'} · ${item.timestamp||'Unknown date'}${item.demo?' · DEMO':''}`;
+      check.type='checkbox';check.value=item.id;check.setAttribute('aria-label',`Select ${item.model||item.id} for comparison`);
+      check.onchange=()=>{$('compare-results').disabled=document.querySelectorAll('#history input:checked').length<2};
+      button.type='button';button.className='secondary';button.textContent='View result';
+      button.onclick=async()=>{
+        try{
+          const resultResponse=await fetch('/api/results/'+encodeURIComponent(item.id));
+          if(!resultResponse.ok)throw new Error('Saved result could not be opened.');
+          show(await resultResponse.json(),$('results-directory').textContent);
+        }catch(error){$('run-error').textContent=error.message;$('run-error').hidden=false}
+      };
+      row.append(check,label,button);container.append(row);
+    });
+  }catch(error){container.textContent=error.message}
+}
+$('refresh-models').onclick=()=>load();
+$('refresh-results').onclick=()=>loadResults();
+$('compare-results').onclick=async()=>{
+  const ids=[...document.querySelectorAll('#history input:checked')].map(input=>input.value);
+  if(ids.length<2)return;
+  const query=new URLSearchParams();ids.forEach(id=>query.append('id',id));
+  try{
+    const response=await fetch('/api/compare?'+query.toString());
+    if(!response.ok)throw new Error('Could not compare the selected results.');
+    const data=await response.json(),table=document.createElement('table');
+    const header=document.createElement('tr');
+    ['Model','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
+    table.append(header);
+    data.results.forEach(item=>{
+      const row=document.createElement('tr');
+      [item.model,item.quality,item.performance,item.overall,item.id===data.best_overall?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
+      table.append(row);
+    });
+    $('comparison').replaceChildren(table);
+  }catch(error){$('comparison').textContent=error.message}
+};
+$('cancel').onclick=async()=>{
+  $('cancel').disabled=true;$('activity').textContent='Requesting cancellation; the current model request may finish first.';
+  try{
+    const response=await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:'{}'});
+    const data=await response.json();
+    if(!response.ok||!data.cancelled)throw new Error(data.error||'No active benchmark to cancel.');
+  }catch(error){displayError(error.message)}
+  finally{$('cancel').disabled=false}
+};
 const presets={
   repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
   balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
@@ -319,6 +431,7 @@ async function startRun(endpoint,payload){
   $('phase').textContent=endpoint==='/api/resume'?'Resuming benchmark':'Starting benchmark';
   $('activity').textContent='Connecting to the local benchmark runner…';
   $('run-state').textContent='RUNNING';$('run-state').style.color='';
+  lastActivityAt=Date.now();lastPollActivity=null;
   $('bar').max=1;$('bar').value=0;$('live').textContent='Preparing the first benchmark phase…';
   setRunning(true);
   try{
@@ -334,7 +447,8 @@ $('run').onclick=()=>{
   startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
-load().catch(error=>{$('models').textContent=error.message});
+load();
+loadResults();
 poll().catch(error=>displayError(error.message));
 </script>
 </body>

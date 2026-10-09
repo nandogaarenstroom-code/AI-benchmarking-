@@ -58,8 +58,10 @@ performance measurements, and file-saving phases, with phase progress and pass/f
 Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
 Completed files are saved under `results/` with a generated name such as
 `benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
-dashboard shows the results folder and provides download links. Every test and failure is retained
-in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+dashboard shows the results folder, saved-run history, and download links. Every test and failure is
+retained in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+Select a model deliberately before the run control is enabled; the demo model is never selected
+automatically. Active runs can be cancelled and resumed from their most recently checkpointed phase.
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
@@ -83,7 +85,8 @@ without changing the UI. Controlled benchmark measurements are not universal rea
 
 Test prompts are parameterized with seeded values and duplicate fingerprints are rejected. Results
 also include three deterministic bootstrap resamples of the measured item scores, including mean
-and standard deviation, so a single score is not presented without uncertainty context. Categories
+and standard deviation. These resamples describe item-level variability; they are not independent
+model runs. When repeated runs are requested, between-run scores are reported separately. Categories
 with no applicable tests are reported as `null`/not tested rather than silently scored as zero.
 
 The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
@@ -181,10 +184,13 @@ unknown, the conservative 128K ceiling is used; 256K is only attempted when expl
 advertised. This makes large-context results transparent rather than turning an overflow into a
 misleading quality failure.
 
-Performance runs perform three warm-ups, discard their outputs, then collect repeated latency,
-TTFT, generation time, token throughput, P50/P95 latency, standard deviation, and concurrency
-samples at levels 1, 2, and 4. These are controlled measurements and should not be treated as
-guarantees for unrelated real-world workloads.
+Performance runs perform three warm-ups, discard their outputs, then collect latency samples,
+streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.
+Throughput is estimated output tokens divided by the measured generation time of dedicated
+performance samples; token counts are estimates rather than tokenizer-reported counts. The result
+labels estimated timing when the adapter does not report streamed timing. P50/P95 latency and
+standard deviation are based on measured request latency. These are controlled measurements and
+should not be treated as guarantees for unrelated real-world workloads.
 
 Runs can be cancelled through the backend API. Resume state is written atomically, and corrupted
 resume files are rejected instead of being executed. Final JSON results are also written through

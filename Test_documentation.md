@@ -224,6 +224,8 @@ Known failure codes include:
 - `MODEL_ERROR`
 
 Failures continue through the remaining tests and appear in the final JSON result.
+When Docker is not installed, code tests report `EVALUATOR_UNAVAILABLE` instead of silently
+implying that the model's code was incorrect.
 
 ## Evaluator limitations
 

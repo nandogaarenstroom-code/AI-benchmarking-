@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import copy
 import json
 import math
 import random
@@ -17,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import hardware_info, model_info, normalize_generation_options, resolve_model
-from .evaluation import evaluate
+from .evaluation import code_evaluator_available, evaluate
 from .reporting import write_pdf, write_chart
 
 CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
@@ -39,39 +40,86 @@ def _test(category, i, rng):
         return {**common, "prompt": f"Calculate {a} × {b}. Return only the number.",
                 "expected_answer": str(a * b), "evaluation_method": "numeric", "tolerance": 0}
     if category == "Reasoning":
-        return {**common, "prompt": f"If all zibs are blue and item {a} is a zib, what color is item {a}?",
-                "expected_answer": "blue", "evaluation_method": "contains_all", "required_terms": ["blue"]}
+        color = rng.choice(("blue", "green", "amber", "violet"))
+        item = f"item-{a}"
+        return {**common, "prompt": f"Every dax is {color}. {item} is a dax. What color is {item}?",
+                "expected_answer": color, "evaluation_method": "contains_all",
+                "required_terms": [color]}
     if category == "Coding":
-        return {**common, "prompt": "Write Python defining add(a,b) that returns their sum. Output code only.",
-                "expected_answer": "code", "evaluation_method": "code",
-                "tests": ["assert add(2, 3) == 5", "assert add(-1, 1) == 0"]}
+        function, description, source, checks = rng.choice((
+            ("add", "return the sum of a and b", "def add(a, b):\n    return a + b",
+             [f"assert add({a}, {b}) == {a + b}", "assert add(-1, 1) == 0"]),
+            ("multiply", "return the product of a and b", "def multiply(a, b):\n    return a * b",
+             [f"assert multiply({a}, {b}) == {a * b}", "assert multiply(-2, 3) == -6"]),
+            ("square", "return n multiplied by itself", "def square(n):\n    return n * n",
+             [f"assert square({a}) == {a * a}", "assert square(-3) == 9"]),
+            ("absolute", "return the non-negative magnitude of n", "def absolute(n):\n    return abs(n)",
+             [f"assert absolute(-{a}) == {a}", "assert absolute(0) == 0"]),
+        ))
+        return {**common, "prompt": f"Write Python defining {function} that will {description}. Output code only.",
+                "expected_answer": "code", "evaluation_method": "code", "tests": checks,
+                "demo_answer": source}
     if category == "Structured Output":
-        return {**common, "prompt": 'Return JSON exactly with keys "answer" and "valid".',
-                "expected_answer": '{"answer": "ok", "valid": true}', "evaluation_method": "json_schema",
-                "required_keys": ["answer", "valid"]}
+        keys = ("answer", "valid") if i % 2 == 0 else ("result", "count")
+        types = {"answer": "string", "valid": "boolean"} if keys[0] == "answer" else {
+            "result": "string", "count": "integer"}
+        return {**common, "prompt": f'Return a JSON object with keys "{keys[0]}" and "{keys[1]}"; '
+                                     f'"{keys[0]}" must be a string and "{keys[1]}" must be '
+                                     f'a {"boolean" if keys[1] == "valid" else "integer"}.',
+                "expected_answer": "json object", "evaluation_method": "json_schema",
+                "required_keys": list(keys), "required_types": types}
     if category == "Knowledge":
-        return {**common, "prompt": "What is the capital of France? Answer concisely.",
-                "expected_answer": "Paris", "evaluation_method": "contains_all", "required_terms": ["Paris"]}
+        question, answer = rng.choice((
+            ("What is the capital of France?", "Paris"),
+            ("Which planet is known as the Red Planet?", "Mars"),
+            ("What is the chemical symbol for water?", "H2O"),
+            ("Which ocean lies between Africa and Australia?", "Indian Ocean"),
+        ))
+        return {**common, "prompt": question + " Answer concisely.",
+                "expected_answer": answer, "evaluation_method": "contains_all",
+                "required_terms": [answer]}
     if category == "Hallucination Resistance":
-        return {**common, "prompt": "What is the capital of the fictional country Zorbland? State that it is unknown.",
+        place = rng.choice(("Zorbland", "Quendor", "Nimbaria", "Veloria"))
+        return {**common, "prompt": f"What is the capital of the fictional country {place}? "
+                                    "State that it is unknown.",
                 "expected_answer": "unknown", "evaluation_method": "contains_all", "required_terms": ["unknown"]}
     if category == "Multilingual":
-        return {**common, "prompt": "Translate 'good morning' into Spanish.",
-                "expected_answer": "buenos días", "evaluation_method": "contains_all",
-                "required_terms": ["buenos", "días"]}
+        phrase, translation = rng.choice((
+            ("good morning", ["buenos", "días"]), ("thank you", ["gracias"]),
+            ("good night", ["buenas", "noches"]), ("please", ["favor"]),
+        ))
+        return {**common, "prompt": f"Translate '{phrase}' into Spanish.",
+                "expected_answer": " ".join(translation), "evaluation_method": "contains_all",
+                "required_terms": translation}
     if category == "Instruction Following":
-        return {**common, "prompt": "Respond with exactly three words describing rain.",
-                "expected_answer": "three words", "evaluation_method": "rubric", "minimum_words": 3}
+        count = 3 + i % 3
+        term = rng.choice(("rain", "wind", "sunlight", "snow"))
+        return {**common, "prompt": f"Describe {term} in exactly {count} words.",
+                "expected_answer": f"{count} words", "evaluation_method": "rubric",
+                "exact_words": count, "required_terms": [term]}
     if category == "Summarization":
-        return {**common, "prompt": "Summarize: Local systems run without sending data away. Mention local privacy.",
-                "expected_answer": "local privacy", "evaluation_method": "contains_all",
-                "required_terms": ["local", "privacy"]}
+        subject, benefit = rng.choice((
+            ("Local backups", "keep files on the device"),
+            ("Offline tools", "work without an internet connection"),
+            ("Private notes", "stay stored on your computer"),
+        ))
+        required = rng.choice(("local", "private", "offline"))
+        return {**common, "prompt": f"Summarize this in one sentence: {subject} {benefit}. "
+                                    f"Include the word '{required}'.",
+                "expected_answer": required, "evaluation_method": "contains_all",
+                "required_terms": [required]}
     if category == "Creative Generation":
-        return {**common, "prompt": "Write a four-word slogan about careful testing.",
-                "expected_answer": "creative", "evaluation_method": "rubric", "minimum_words": 4}
+        return {**common, "prompt": "Write a four-word slogan about careful testing and include "
+                                    "the word 'test'.",
+                "expected_answer": "four words", "evaluation_method": "rubric",
+                "exact_words": 4, "required_terms": ["test"]}
     if category == "Consistency":
-        return {**common, "prompt": "Is 2 + 2 equal to 4? Answer yes or no.",
-                "expected_answer": "yes", "evaluation_method": "contains_all", "required_terms": ["yes"]}
+        total = a + b
+        proposed = total + rng.choice((-1, 0, 1))
+        expected = "yes" if proposed == total else "no"
+        return {**common, "prompt": f"Is {a} + {b} equal to {proposed}? Answer yes or no.",
+                "expected_answer": expected, "evaluation_method": "contains_all",
+                "required_terms": [expected]}
     if category == "Context Retrieval":
         return {**common, "prompt": f"Remember marker BLUE-{a}. What is the marker?",
                 "expected_answer": f"BLUE-{a}", "evaluation_method": "contains_all",
@@ -123,6 +171,7 @@ class BenchmarkManager:
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.state_file = self.root / "current.json"; self.running = False
         self._run_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self.cancel_requested = threading.Event()
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
@@ -130,7 +179,15 @@ class BenchmarkManager:
             "result_directory": str(self.root.resolve()),
         }
 
-    def status(self): return self._status
+    def status(self):
+        with self._status_lock:
+            snapshot = copy.deepcopy(self._status)
+        snapshot["resume_available"] = self.state_file.is_file()
+        return snapshot
+
+    def _update_status(self, **values):
+        with self._status_lock:
+            self._status.update(values)
 
     def list_results(self):
         results = []
@@ -138,9 +195,15 @@ class BenchmarkManager:
         for path in self.root.glob("*.json"):
             if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
                 continue
-            data = json.loads(path.read_text())
-            results.append({"id": path.stem, "model": data.get("model", {}).get("name"),
-                            "timestamp": data.get("timestamp")})
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            model = data.get("model") if isinstance(data, dict) else {}
+            results.append({"id": path.stem,
+                            "model": model.get("name") if isinstance(model, dict) else None,
+                            "timestamp": data.get("timestamp"),
+                            "demo": bool(data.get("demo"))})
         return results
 
     def load_result(self, result_id):
@@ -148,7 +211,11 @@ class BenchmarkManager:
         for path in self.root.glob("*.json"):
             if (path.name != "current.json" and path.stem == result_id and
                     not path.is_symlink() and path.resolve().parent == root):
-                return json.loads(path.read_text())
+                try:
+                    data = json.loads(path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    return None
+                return data if isinstance(data, dict) else None
         return None
 
     def compare(self, result_ids):
@@ -175,7 +242,8 @@ class BenchmarkManager:
             if self.running:
                 return False
             self.running = True
-            self._status.update(state="running", phase="Starting benchmark",
+            self.cancel_requested.clear()
+            self._update_status(state="running", phase="Starting benchmark",
                                 activity="Preparing the local model and test suite.",
                                 progress=0, total=1)
             worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
@@ -191,6 +259,7 @@ class BenchmarkManager:
             if self.running:
                 return False
             self.running = True
+            self.cancel_requested.clear()
         return self._run_guarded(payload)
 
     def _run_guarded(self, payload):
@@ -198,7 +267,7 @@ class BenchmarkManager:
             self._run(payload)
             return True
         except Exception as exc:
-            self._status.update(state="error", error=str(exc)[:500])
+            self._update_status(state="error", error=str(exc)[:500])
             return False
         finally:
             with self._run_lock:
@@ -213,11 +282,17 @@ class BenchmarkManager:
     def _answer(self, model, test, history=None, generation_options=None):
         if model.get("demo"):
             if test["evaluation_method"] == "code":
-                return "def add(a,b):\n return a+b"
+                return test.get("demo_answer", "def add(a,b):\n return a+b")
             if test["evaluation_method"] == "json_schema":
-                return '{"answer":"ok","valid":true}'
+                return json.dumps({
+                    key: {"string": "ok", "boolean": True, "integer": 1}.get(kind, None)
+                    for key, kind in test.get("required_types", {}).items()
+                })
             if test["evaluation_method"] == "rubric":
-                return "careful reliable local testing"
+                count = test.get("exact_words", test.get("minimum_words", 4))
+                words = list(test.get("required_terms", []))[:count]
+                words.extend(["careful", "reliable", "local", "testing"][:count - len(words)])
+                return " ".join(words)
             return test["expected_answer"]
         from .discovery import ask_model
         response = ask_model(model, test["prompt"], history=history, options=generation_options)
@@ -238,12 +313,20 @@ class BenchmarkManager:
                 answer = response_metrics.get("text", answer)
             latency = time.perf_counter() - started
             passed = evaluate(test, answer)
+            if not passed and error is None:
+                error = ("EVALUATOR_UNAVAILABLE"
+                         if test.get("evaluation_method") == "code" and
+                         not code_evaluator_available() else "EVALUATION_FAILED")
             attempts.append({"attempt": attempt, "status": "PASS" if passed else "FAILED",
                              "error": error})
             if passed or attempt == 3:
                 return {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
                         "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
                         "generation_s": response_metrics.get("generation_s", latency),
+                        "timing_is_estimated": not bool(
+                            response_metrics and "ttft_s" in response_metrics and
+                            "generation_s" in response_metrics),
+                        "token_count_is_estimated": True,
                         "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
                         "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))), "error": error,
                         "context_reset": history is None, "attempts": attempts,
@@ -263,7 +346,6 @@ class BenchmarkManager:
     def _run(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("invalid benchmark request")
-        self.cancel_requested.clear()
         profile_value = payload.get("profile", "STANDARD")
         if not isinstance(profile_value, str) or profile_value.upper() not in COUNTS:
             raise ValueError("invalid benchmark profile")
@@ -286,26 +368,43 @@ class BenchmarkManager:
         tests = make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
-        self._status.update(state="running", phase="Warming up the model",
+        context_results = list(payload.get("context_results", []))
+        accumulated_results = list(payload.get("accumulated_results", []))
+        resume_phase = payload.get("resume_phase", "primary")
+
+        def save_checkpoint(phase):
+            self._atomic_state_write({
+                **payload, "seed": seed, "profile": profile, "model": model, "tests": tests,
+                "resume_phase": phase, "completed_tests": completed, "failures": failures,
+                "context_results": context_results, "accumulated_results": accumulated_results,
+            })
+
+        self._update_status(state="running", phase="Warming up the model",
                             activity="Sending 3 warm-up requests; their answers are discarded.",
                             total=3, progress=0, passed=sum(x["passed"] for x in completed),
                             failed=len(failures))
-        # Warm up and discard warm-up outputs before measured requests.
-        for warmup in range(3):
-            self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
-                         generation_options=generation_options)
-            self._status.update(progress=warmup + 1,
-                                activity=f"Warm-up request {warmup + 1} of 3 complete.")
-        started = time.perf_counter()
-        self._status.update(phase="Running primary tests",
+        if resume_phase == "primary":
+            save_checkpoint("warmup")
+            # Warm up and discard warm-up outputs before measured requests.
+            for warmup in range(3):
+                if self.cancel_requested.is_set():
+                    save_checkpoint("warmup")
+                    self._update_status(state="cancelled")
+                    return
+                self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
+                             generation_options=generation_options)
+                self._update_status(progress=warmup + 1,
+                                    activity=f"Warm-up request {warmup + 1} of 3 complete.")
+        self._update_status(phase="Running primary tests",
                             activity="Each test may retry up to 3 times.",
                             total=len(tests), progress=len(done))
         for test in tests:
             if self.cancel_requested.is_set():
-                self._status.update(state="cancelled")
+                save_checkpoint("primary")
+                self._update_status(state="cancelled")
                 return
             if test["id"] in done: continue
-            self._status.update(current_category=test["category"], current_test=test["id"],
+            self._update_status(current_category=test["category"], current_test=test["id"],
                                 activity=f"Evaluating {test['category']} · {test['difficulty']} test.")
             repetitions = []
             for repeat_index in range(repeat_runs):
@@ -333,14 +432,17 @@ class BenchmarkManager:
             else:
                 item = repetitions[0]
             completed.append(item)
-            if not item["passed"]: failures.append({"test_id": test["id"], "reason": "MODEL_ERROR",
+            if not item["passed"]: failures.append({"test_id": test["id"],
+                                                     "reason": item.get("error") or "EVALUATION_FAILED",
                                                      "attempts": item["attempts"]})
-            self._status.update(progress=len(completed),
+            self._update_status(progress=len(completed),
                                 passed=sum(x["passed"] for x in completed),
                                 failed=len(failures))
-            self._atomic_state_write({**payload, "seed": seed, "profile": profile,
-                                      "model": model, "tests": tests,
-                                      "completed_tests": completed, "failures": failures})
+            save_checkpoint("primary")
+        if self.cancel_requested.is_set():
+            save_checkpoint("fresh_context")
+            self._update_status(state="cancelled")
+            return
         advertised_context = model.get("context_length", 131072)
         try:
             max_context = min(int(advertised_context), 262144)
@@ -352,31 +454,58 @@ class BenchmarkManager:
             max_context = min(max_context, 32768)
         context_tests = make_context_tests(seed, max_context=max_context)
         context_sizes = [test["context_size"] for test in context_tests]
-        self._status.update(phase="Testing fresh context windows",
+        self._update_status(phase="Testing fresh context windows",
                             activity="Sending independent prompts at increasing context sizes.",
-                            total=len(context_tests), progress=0)
-        context_results = []
+                            total=len(context_tests), progress=len(context_results))
+        context_done = {item["id"] for item in context_results}
         for index, test in enumerate(context_tests):
-            self._status.update(current_test=test["id"],
+            if self.cancel_requested.is_set():
+                save_checkpoint("fresh_context")
+                self._update_status(state="cancelled")
+                return
+            if test["id"] in context_done:
+                continue
+            self._update_status(current_test=test["id"],
                                 activity=f"Testing a fresh {test['context_size']:,}-token prompt.")
             context_results.append(self._execute(model, test, generation_options=generation_options))
-            self._status.update(progress=index + 1)
-        history, accumulated_results = [], []
-        self._status.update(phase="Testing accumulated context",
+            self._update_status(progress=len(context_results))
+            save_checkpoint("fresh_context")
+        if self.cancel_requested.is_set():
+            save_checkpoint("accumulated_context")
+            self._update_status(state="cancelled")
+            return
+        history = []
+        for test, item in zip(context_tests, accumulated_results):
+            history.extend([
+                {"role": "user", "content": test["prompt"] if not model.get("demo")
+                 else f"[context test {test['context_size']} tokens]"},
+                {"role": "assistant", "content": item.get("answer", "")},
+            ])
+        accumulated_done = {item["id"] for item in accumulated_results}
+        self._update_status(phase="Testing accumulated context",
                             activity="Reusing conversation history to measure context degradation.",
-                            total=len(context_tests), progress=0)
+                            total=len(context_tests), progress=len(accumulated_results))
         for index, test in enumerate(context_tests):
-            self._status.update(current_test=test["id"],
+            if self.cancel_requested.is_set():
+                save_checkpoint("accumulated_context")
+                self._update_status(state="cancelled")
+                return
+            if test["id"] in accumulated_done:
+                continue
+            self._update_status(current_test=test["id"],
                                 activity=f"Accumulating history through {test['context_size']:,} tokens.")
             item = self._execute(model, test, history=history, generation_options=generation_options)
             accumulated_results.append(item)
             history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
                             else f"[context test {test['context_size']} tokens]"},
                             {"role": "assistant", "content": item["answer"]}])
-            self._status.update(progress=index + 1)
-        duration = max(time.perf_counter() - started, .001)
+            self._update_status(progress=len(accumulated_results))
+            save_checkpoint("accumulated_context")
+        if self.cancel_requested.is_set():
+            save_checkpoint("performance")
+            self._update_status(state="cancelled")
+            return
         latencies = [x["latency_s"] for x in completed] or [.001]
-        tokens = sum(x["output_tokens"] for x in completed)
         quality = self._scores(completed)
         score_values = [item["score"] * 10 for item in completed]
         repeat_quality_scores = []
@@ -387,19 +516,24 @@ class BenchmarkManager:
                     replicate = item["replicates"][repeat_index]
                     run_results.append({**item, "score": replicate["score"]})
                 repeat_quality_scores.append(self._scores(run_results)["overall"])
-        seed_scores = repeat_quality_scores
-        if not seed_scores:
+        bootstrap_scores = []
+        if not repeat_quality_scores:
             for offset in range(3):
                 rng = random.Random(seed + offset)
                 sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
-                seed_scores.append(round(statistics.mean(sample), 2))
-        self._status.update(phase="Measuring performance",
+                bootstrap_scores.append(round(statistics.mean(sample), 2))
+        self._update_status(phase="Measuring performance",
                             activity="Running concurrency and latency samples.",
                             total=8, progress=0)
+        save_checkpoint("performance")
         perf = self._performance(
-            model, tests[:min(5, len(tests))], tokens, duration, generation_options,
-            progress_callback=lambda progress, activity: self._status.update(
+            model, tests[:min(5, len(tests))], generation_options,
+            progress_callback=lambda progress, activity: self._update_status(
                 progress=progress, activity=activity))
+        if self.cancel_requested.is_set() or perf is None:
+            save_checkpoint("performance")
+            self._update_status(state="cancelled")
+            return
         result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
@@ -417,19 +551,25 @@ class BenchmarkManager:
                              "context_behavior": self._context_score(context_results, accumulated_results),
                              "performance": perf["score"],
                              "overall": round(quality["overall"]*.7 + perf["score"]*.3, 2)},
-                  "uncertainty": {"independent_seed_scores": seed_scores,
-                                  "quality_mean": round(statistics.mean(seed_scores), 2),
-                                  "quality_stddev": round(statistics.pstdev(seed_scores), 2),
-                                  "minimum_samples": len(completed),
-                                  "repeat_run_scores": repeat_quality_scores},
+                  "uncertainty": {
+                      "method": ("observed repeated runs" if repeat_quality_scores else
+                                 "bootstrap resampling of primary test items"),
+                      "quality_mean": round(statistics.mean(
+                          repeat_quality_scores or bootstrap_scores), 2),
+                      "quality_stddev": round(statistics.pstdev(
+                          repeat_quality_scores or bootstrap_scores), 2),
+                      "minimum_samples": len(completed),
+                      "bootstrap_resample_scores": bootstrap_scores,
+                      "repeat_run_scores": repeat_quality_scores},
                   "derived_metrics": {"quality_per_latency": round(quality["overall"]/max(statistics.mean(latencies), .001), 2)},
-                  "notes": ["Controlled benchmark results, not universal real-world guarantees."]}
+                  "notes": ["Controlled benchmark results, not universal real-world guarantees.",
+                            "Output-token counts are estimates; bootstrap resamples are not independent model runs."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
-        self._status.update(phase="Saving result files",
+        self._update_status(phase="Saving result files",
                             activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
                             total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
-        self._status.update(state="complete", phase="Benchmark complete",
+        self._update_status(state="complete", phase="Benchmark complete",
                             activity="All result files are ready.", progress=1, total=1,
                             result_id=result["id"], result_directory=str(self.root.resolve()),
                             quality=quality["overall"], performance=perf["score"],
@@ -464,29 +604,43 @@ class BenchmarkManager:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def _performance(self, model, samples, tokens, duration, generation_options=None,
-                     progress_callback=None):
+    def _performance(self, model, samples, generation_options=None, progress_callback=None):
         progress = 0
         for concurrency in (1, 2, 4):
+            if self.cancel_requested.is_set():
+                return None
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
                 list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Concurrency sample {concurrency} complete.")
-        latencies = []
+        measurements = []
         for index, test in enumerate(samples):
-            latencies.append(self._execute(model, test, generation_options=generation_options)["latency_s"])
+            if self.cancel_requested.is_set():
+                return None
+            measurements.append(self._execute(
+                model, test, generation_options=generation_options))
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Measured latency sample {index + 1} of {len(samples)}.")
-        latencies = latencies or [.001]
-        return {"score": min(100, round(tokens / duration * 10, 2)),
-                "tokens_per_second": round(tokens/duration, 2), "ttft_s": round(statistics.median(latencies), 4),
-                "generation_s": round(sum(latencies), 4), "latency_mean_s": round(statistics.mean(latencies), 4),
+        latencies = [item["latency_s"] for item in measurements] or [.001]
+        generation_times = [max(item["generation_s"], .001) for item in measurements] or [.001]
+        ttft_times = [item["ttft_s"] for item in measurements] or latencies
+        output_tokens = sum(item["output_tokens"] for item in measurements)
+        tokens_per_second = output_tokens / sum(generation_times)
+        return {"score": min(100, round(tokens_per_second * 10, 2)),
+                "tokens_per_second": round(tokens_per_second, 2),
+                "ttft_s": round(statistics.median(ttft_times), 4),
+                "generation_s": round(statistics.mean(generation_times), 4),
+                "latency_mean_s": round(statistics.mean(latencies), 4),
                 "latency_p50_s": round(statistics.median(latencies), 4),
                 "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4),
                 "latency_stddev_s": round(statistics.pstdev(latencies), 4),
-                "warmup_runs": 3, "measured_runs": 5, "concurrency_levels": [1, 2, 4]}
+                "throughput_basis": "estimated output tokens / measured generation time",
+                "timing_is_estimated": any(item["timing_is_estimated"] for item in measurements),
+                "token_count_is_estimated": True,
+                "warmup_runs": 3, "measured_runs": len(measurements),
+                "concurrency_levels": [1, 2, 4]}
 
     def _write_outputs(self, result):
         result_id = result["id"]

@@ -11,6 +11,10 @@ MAX_TEST_COUNT = 20
 MAX_TEST_SIZE = 2_000
 
 
+def code_evaluator_available():
+    return shutil.which("docker") is not None
+
+
 def _number(text):
     match = re.search(r"-?\d+(?:\.\d+)?", text or "")
     return float(match.group()) if match else None
@@ -29,14 +33,20 @@ def evaluate(test, answer):
     if method == "json_schema":
         try:
             value = json.loads(answer)
+            required_types = test.get("required_types", {})
+            if not isinstance(required_types, dict):
+                return False
             if not isinstance(value, dict) or not all(
                     key in value for key in test.get("required_keys", [])):
                 return False
+            supported_types = {"string": str, "boolean": bool, "number": (int, float),
+                               "integer": int, "object": dict, "array": list}
+            if any(kind not in supported_types for kind in required_types.values()):
+                return False
             return all(
-                isinstance(value.get(key), {"string": str, "boolean": bool, "number": (int, float),
-                                            "integer": int, "object": dict, "array": list}.get(kind, object))
+                isinstance(value.get(key), supported_types[kind])
                 and not (kind in ("number", "integer") and isinstance(value.get(key), bool))
-                for key, kind in test.get("required_types", {}).items()
+                for key, kind in required_types.items()
             )
         except (json.JSONDecodeError, TypeError):
             return False
@@ -46,9 +56,10 @@ def evaluate(test, answer):
         return _run_code(answer, test.get("tests", []))
     if method == "rubric":
         words = answer.split()
-        if "exact_words" in test:
-            return len(words) == test["exact_words"]
-        return len(words) >= test.get("minimum_words", 1)
+        valid_count = (len(words) == test["exact_words"] if "exact_words" in test
+                       else len(words) >= test.get("minimum_words", 1))
+        return valid_count and all(
+            str(term).lower() in answer.lower() for term in test.get("required_terms", []))
     return answer == str(expected)
 
 

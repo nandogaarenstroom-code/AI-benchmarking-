@@ -27,6 +27,12 @@ retained in result configuration. It does not replace integration testing agains
 Additional coverage verifies repeated-run score metadata and that runtime details are included only
 when reported by the local server.
 
+Streaming adapter tests cover first-content TTFT measurement, timeout error mapping, malformed event
+handling, and size-bounded discovery responses. Evaluator checks cover JSON value types and exact
+word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
+samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
+cancellation during context tests.
+
 ### `test_domain_evaluators`
 
 Verifies representative evaluator behavior:
@@ -70,15 +76,16 @@ PDF/CSV content and schema completeness are not deeply validated.
 The automated suite does not currently verify:
 
 - live Ollama, LM Studio, or OpenAI-compatible servers
-- streaming edge cases, timeouts, malformed responses, or adapter error mapping
+- live streaming behavior across real servers or every adapter failure mode
 - HTTP routes and status codes
 - browser rendering and user interactions
-- cancellation, interrupted-run resume, or corrupt state handling
+- cancellation during every phase or corrupt state handling
 - retry behavior and all evaluator edge cases
 - performance metric accuracy or concurrency behavior
 - output report contents beyond selected JSON fields
 - Docker isolation or adversarial generated code
 - cross-platform behavior
+- browser rendering, saved-history interactions, keyboard chart navigation, or live model-server compatibility
 
 Accordingly, a passing suite shows that the covered core paths still behave as expected. It does not
 prove model quality, benchmark validity, security against hostile code, real-server compatibility,

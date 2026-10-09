@@ -6,7 +6,7 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
-from backend.discovery import _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
+from backend.discovery import AdapterError, _get, _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
 from backend.evaluation import evaluate
 
 
@@ -96,6 +96,51 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(captured["seed"], 23)
         self.assertTrue(captured["stream"])
 
+    def test_openai_streaming_metrics_use_first_content_chunk(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self):
+                return iter([b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+                             b'data: [DONE]\n'])
+
+        with patch("backend.discovery._open", return_value=Response()), \
+                patch("backend.discovery.time.perf_counter", side_effect=[10, 10.2, 10.8, 11]):
+            result = ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                                "id": "model"}, "prompt")
+        self.assertAlmostEqual(result["ttft_s"], 0.2)
+        self.assertAlmostEqual(result["generation_s"], 0.6)
+
+    def test_adapter_timeout_and_malformed_stream_are_reported(self):
+        model = {"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                 "id": "model"}
+        with patch("backend.discovery._open", side_effect=TimeoutError("slow")):
+            with self.assertRaises(AdapterError) as caught:
+                ask_model(model, "prompt")
+        self.assertEqual(caught.exception.code, "TIMEOUT")
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self): return iter([b"data: not-json\n"])
+
+        with patch("backend.discovery._open", return_value=Response()):
+            with self.assertRaises(AdapterError) as caught:
+                ask_model(model, "prompt")
+        self.assertEqual(caught.exception.code, "SERVER_ERROR")
+
+    def test_discovery_rejects_oversized_and_non_object_responses(self):
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, size): return self.body
+
+        with patch("backend.discovery._open", return_value=Response(b"x" * 1_048_577)):
+            self.assertIsNone(_get("http://localhost/model", timeout=0.1))
+        with patch("backend.discovery._open", return_value=Response(b"[]")):
+            self.assertIsNone(_get("http://localhost/model", timeout=0.1))
+
     def test_openai_adapter_omits_llama_cpp_only_sampler_options(self):
         class Response:
             def __enter__(self): return self
@@ -129,12 +174,36 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("--read-only", command)
         self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
 
+    def test_json_types_and_exact_word_count_are_enforced(self):
+        schema = {"evaluation_method": "json_schema", "required_keys": ["answer", "valid"],
+                  "required_types": {"answer": "string", "valid": "boolean"}}
+        self.assertTrue(evaluate(schema, '{"answer":"ok","valid":true}'))
+        self.assertFalse(evaluate(schema, '{"answer":false,"valid":"true"}'))
+        self.assertFalse(evaluate({**schema, "required_types": ["invalid"]},
+                                  '{"answer":"ok","valid":true}'))
+        rubric = {"evaluation_method": "rubric", "exact_words": 3,
+                  "required_terms": ["rain"]}
+        self.assertTrue(evaluate(rubric, "soft rain falls"))
+        self.assertFalse(evaluate(rubric, "soft rain falls gently"))
+        self.assertFalse(evaluate(rubric, "soft snow falls"))
+
     def test_code_evaluation_fails_closed_without_docker(self):
         with patch("backend.evaluation.shutil.which", return_value=None), \
                 patch("backend.evaluation.subprocess.run") as run:
             self.assertFalse(evaluate(
                 {"evaluation_method": "code", "tests": ["assert True"]}, "print('not run')"))
         run.assert_not_called()
+
+    def test_unavailable_code_evaluator_is_reported_in_test_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "coding-1", "category": "Coding", "prompt": "define f",
+                    "evaluation_method": "code", "tests": ["assert f() == 1"]}
+            with patch.object(manager, "_answer", return_value="def f(): return 1"), \
+                    patch("backend.evaluation.shutil.which", return_value=None):
+                result = manager._execute({"demo": False}, test)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
 
     def test_code_evaluation_rejects_invalid_or_oversized_tests(self):
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
@@ -148,6 +217,9 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(len(make_tests("FULL", 7)), 252)
         prompts = [test["prompt"] for test in make_tests("FULL", 7)]
         self.assertEqual(len(prompts), len(set(prompts)))
+        coding_prompts = [test["prompt"] for test in make_tests("FULL", 7)
+                          if test["category"] == "Coding"]
+        self.assertGreater(len(set(coding_prompts)), 1)
         self.assertEqual([x["context_size"] for x in make_context_tests(7)],
                          [4096, 8192, 16384, 32768, 65536, 131072])
         self.assertEqual([x["context_size"] for x in make_context_tests(7, 32768)],
@@ -174,6 +246,13 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["context_reset"] for item in data["tests"]))
             self.assertIn("fresh", data["context_scaling"])
             self.assertIn("accumulated", data["context_scaling"])
+            self.assertEqual(data["performance"]["measured_runs"], 5)
+            self.assertTrue(data["performance"]["token_count_is_estimated"])
+            self.assertIn("output tokens", data["performance"]["throughput_basis"])
+            self.assertEqual(data["uncertainty"]["method"],
+                             "bootstrap resampling of primary test items")
+            self.assertNotIn("independent_seed_scores", data["uncertainty"])
+            self.assertEqual(len(data["uncertainty"]["bootstrap_resample_scores"]), 3)
             self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
@@ -195,6 +274,96 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["uncertainty"]["repeat_run_scores"], [100.0, 100.0])
             self.assertEqual(result["uncertainty"]["quality_stddev"], 0.0)
             self.assertEqual([rep["seed"] for rep in result["tests"][0]["replicates"]], [31, 32])
+            self.assertEqual(result["uncertainty"]["method"], "observed repeated runs")
+            self.assertEqual(result["uncertainty"]["bootstrap_resample_scores"], [])
+
+    def test_performance_metrics_use_sampled_generation_time_and_ttft(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            sample = {"prompt": "x", "id": "test", "evaluation_method": "raw",
+                      "expected_answer": "x", "category": "Mathematics"}
+            measurement = lambda latency, ttft: {
+                "latency_s": latency, "ttft_s": ttft, "generation_s": 1.0,
+                "output_tokens": 5, "timing_is_estimated": False,
+            }
+            with patch.object(manager, "_answer", return_value={"text": "x"}), \
+                    patch.object(manager, "_execute", side_effect=[
+                        measurement(0.5, 0.2), measurement(0.7, 0.3)]):
+                result = manager._performance({"demo": False}, [sample, sample])
+        self.assertEqual(result["tokens_per_second"], 5.0)
+        self.assertEqual(result["score"], 50.0)
+        self.assertEqual(result["ttft_s"], 0.25)
+        self.assertEqual(result["generation_s"], 1.0)
+        self.assertEqual(result["latency_mean_s"], 0.6)
+        self.assertFalse(result["timing_is_estimated"])
+
+    def test_status_returns_a_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            snapshot = manager.status()
+            snapshot["state"] = "corrupted"
+            self.assertEqual(manager.status()["state"], "idle")
+
+    def test_cancelled_context_phase_checkpoints_and_resumes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            payload = {"profile": "QUICK", "model": {
+                "id": "demo-local", "name": "Demo", "backend": "Demo",
+                "endpoint": "local://demo", "demo": True}}
+            execute = manager._execute
+            cancelled = False
+
+            def cancel_after_first_fresh(model, test, history=None, generation_options=None):
+                nonlocal cancelled
+                result = execute(model, test, history, generation_options)
+                if "context_size" in test and history is None and not cancelled:
+                    cancelled = True
+                    manager.cancel_requested.set()
+                return result
+
+            with patch.object(manager, "_execute", side_effect=cancel_after_first_fresh), \
+                    patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=0)), \
+                    patch("backend.benchmark.hardware_info", return_value={}):
+                self.assertTrue(manager.run(payload))
+                self.assertEqual(manager.status()["state"], "cancelled")
+                state = json.loads(manager.state_file.read_text())
+                self.assertEqual(state["resume_phase"], "fresh_context")
+                self.assertEqual(len(state["context_results"]), 1)
+                self.assertTrue(manager.run(state))
+            self.assertEqual(manager.status()["state"], "complete")
+
+    def test_cancelled_performance_phase_can_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            payload = {"profile": "QUICK", "model": {
+                "id": "demo-local", "name": "Demo", "backend": "Demo",
+                "endpoint": "local://demo", "demo": True}}
+
+            performance = manager._performance
+            stopped = False
+
+            def stop_first_performance(*args, **kwargs):
+                nonlocal stopped
+                if not stopped:
+                    stopped = True
+                    manager.cancel_requested.set()
+                    return None
+                return performance(*args, **kwargs)
+
+            with patch.object(manager, "_performance", side_effect=stop_first_performance), \
+                    patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=0)), \
+                    patch("backend.benchmark.hardware_info", return_value={}):
+                self.assertTrue(manager.run(payload))
+                self.assertEqual(manager.status()["state"], "cancelled")
+                state = json.loads(manager.state_file.read_text())
+                self.assertEqual(state["resume_phase"], "performance")
+                self.assertEqual(len(state["context_results"]), len(state["accumulated_results"]))
+                self.assertTrue(manager.run(state))
+            self.assertEqual(manager.status()["state"], "complete")
 
     def test_custom_tests_are_ignored_and_run_state_recovers_after_invalid_input(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -250,6 +419,14 @@ class BenchmarkTests(unittest.TestCase):
             manager = BenchmarkManager(root)
             self.assertEqual(manager.list_results(), [])
             self.assertIsNone(manager.load_result("linked"))
+
+    def test_result_listing_skips_corrupt_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "broken.json").write_text("{")
+            manager = BenchmarkManager(root)
+            self.assertEqual(manager.list_results(), [])
+            self.assertIsNone(manager.load_result("broken"))
 
 
 if __name__ == "__main__":
