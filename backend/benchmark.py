@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import hardware_info, model_info, normalize_generation_options, resolve_model
-from .evaluation import code_evaluator_available, evaluate
+from .evaluation import code_evaluator_available, evaluation_criteria, evaluate_with_details
 from .reporting import write_pdf, write_chart
 
 CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
@@ -28,102 +28,259 @@ CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
 COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Expert")
+DIFFICULTY_DESCRIPTIONS = {
+    "Easy": "A direct, single-step task with one clear requirement.",
+    "Medium": "A routine task with a larger input or an additional constraint.",
+    "Hard": "A multi-step task or one that combines several constraints.",
+    "Expert": "A more demanding task that requires careful composition or edge-case handling.",
+}
 
 
-def _test(category, i, rng):
-    difficulty = DIFFICULTIES[i % 4]
+def _test(category, i, rng, difficulty=None):
+    difficulty = difficulty or DIFFICULTIES[i % 4]
     a, b = rng.randint(2, 99), rng.randint(2, 99)
     common = {"id": f"{category.lower().replace(' ', '-')}-{i+1:03d}",
               "category": category, "subcategory": category, "difficulty": difficulty,
+              "difficulty_rationale": DIFFICULTY_DESCRIPTIONS[difficulty],
               "max_score": 10}
     if category == "Mathematics":
-        return {**common, "prompt": f"Calculate {a} × {b}. Return only the number.",
-                "expected_answer": str(a * b), "evaluation_method": "numeric", "tolerance": 0}
+        if difficulty == "Easy":
+            a, b = rng.randint(1, 9), rng.randint(1, 9)
+            operation, answer = f"{a} + {b}", a + b
+            rationale = "Single-step addition with single-digit operands."
+        elif difficulty == "Medium":
+            operation, answer = f"{a} × {b}", a * b
+            rationale = "Single-step multiplication with two-digit operands."
+        elif difficulty == "Hard":
+            c = rng.randint(100, 999)
+            operation, answer = f"({a} × {b}) + {c}", a * b + c
+            rationale = "Two-step arithmetic: multiply, then add a three-digit value."
+        else:
+            c, d = rng.randint(10, 99), rng.randint(2, 9)
+            operation, answer = f"({a} + {b}) × ({c} - {d})", (a + b) * (c - d)
+            rationale = "Evaluate two grouped expressions, then multiply their results."
+        return {**common, "difficulty_rationale": rationale,
+                "prompt": f"Calculate {operation}. Return only the number.",
+                "expected_answer": str(answer), "evaluation_method": "numeric", "tolerance": 0}
     if category == "Reasoning":
         color = rng.choice(("blue", "green", "amber", "violet"))
         item = f"item-{a}"
-        return {**common, "prompt": f"Every dax is {color}. {item} is a dax. What color is {item}?",
-                "expected_answer": color, "evaluation_method": "contains_all",
-                "required_terms": [color]}
+        if difficulty == "Easy":
+            prompt = f"Every dax is {color}. {item} is a dax. What color is {item}?"
+            expected, rationale = color, "Apply one stated rule to one item."
+        elif difficulty == "Medium":
+            prompt = (f"Every dax is a wug. Every wug is {color}. {item} is a dax. "
+                      f"What color is {item}?")
+            expected, rationale = color, "Chain two rules before answering."
+        elif difficulty == "Hard":
+            prompt = (f"Every dax is a wug. No wugs are red. {item} is a dax. "
+                      "Can the item be red? Answer yes or no.")
+            expected, rationale = "no", "Combine a category chain with a negative constraint."
+        else:
+            prompt = (f"Every dax is a wug. No wugs are red. {item} is a dax. "
+                      f"State its category and whether it can be red, in the format "
+                      "'wug; no'.")
+            expected, rationale = "wug", "Track a positive implication and an exclusion together."
+        return {**common, "difficulty_rationale": rationale, "prompt": prompt,
+                "expected_answer": expected, "evaluation_method": "contains_all",
+                "required_terms": (["wug", "no"] if difficulty == "Expert" else
+                                   ["no"] if difficulty == "Hard" else [expected])}
     if category == "Coding":
-        function, description, source, checks = rng.choice((
-            ("add", "return the sum of a and b", "def add(a, b):\n    return a + b",
-             [f"assert add({a}, {b}) == {a + b}", "assert add(-1, 1) == 0"]),
-            ("multiply", "return the product of a and b", "def multiply(a, b):\n    return a * b",
-             [f"assert multiply({a}, {b}) == {a * b}", "assert multiply(-2, 3) == -6"]),
-            ("square", "return n multiplied by itself", "def square(n):\n    return n * n",
-             [f"assert square({a}) == {a * a}", "assert square(-3) == 9"]),
-            ("absolute", "return the non-negative magnitude of n", "def absolute(n):\n    return abs(n)",
-             [f"assert absolute(-{a}) == {a}", "assert absolute(0) == 0"]),
-        ))
+        if difficulty == "Easy":
+            function, description = "add", "return the sum of a and b"
+            source = "def add(a, b):\n    return a + b"
+            checks = [f"assert add({a}, {b}) == {a + b}"]
+            rationale = "Implement one basic operation and pass a direct example."
+        elif difficulty == "Medium":
+            function, description = "multiply", "return the product of a and b"
+            source = "def multiply(a, b):\n    return a * b"
+            checks = [f"assert multiply({a}, {b}) == {a * b}",
+                      "assert multiply(-2, 3) == -6"]
+            rationale = "Implement multiplication and handle a signed input."
+        elif difficulty == "Hard":
+            function, description = "count_even", "count the even integers in a list"
+            source = ("def count_even(values):\n"
+                      "    return sum(1 for value in values if value % 2 == 0)")
+            checks = [f"assert count_even([{a}, {b}, -2, 3]) == "
+                      f"{sum(value % 2 == 0 for value in (a, b, -2, 3))}",
+                      "assert count_even([]) == 0",
+                      "assert count_even([-3, -1, 1]) == 0"]
+            rationale = "Filter a collection, count matches, and handle empty and negative inputs."
+        else:
+            function, description = "deduplicate", "remove repeated values while preserving order"
+            source = ("def deduplicate(values):\n"
+                      "    result = []\n"
+                      "    for value in values:\n"
+                      "        if value not in result:\n"
+                      "            result.append(value)\n"
+                      "    return result")
+            checks = [f"assert deduplicate([{a}, {b}, {a}, -1]) == [{a}, {b}, -1]",
+                      "assert deduplicate([]) == []",
+                      "assert deduplicate([3, 2, 3, 2, 1]) == [3, 2, 1]"]
+            rationale = "Preserve first-seen order while handling duplicates and boundary inputs."
         return {**common, "prompt": f"Write Python defining {function} that will {description}. Output code only.",
                 "expected_answer": "code", "evaluation_method": "code", "tests": checks,
-                "demo_answer": source}
+                "demo_answer": source, "difficulty_rationale": rationale}
     if category == "Structured Output":
-        keys = ("answer", "valid") if i % 2 == 0 else ("result", "count")
-        types = {"answer": "string", "valid": "boolean"} if keys[0] == "answer" else {
-            "result": "string", "count": "integer"}
-        return {**common, "prompt": f'Return a JSON object with keys "{keys[0]}" and "{keys[1]}"; '
-                                     f'"{keys[0]}" must be a string and "{keys[1]}" must be '
-                                     f'a {"boolean" if keys[1] == "valid" else "integer"}.',
-                "expected_answer": "json object", "evaluation_method": "json_schema",
-                "required_keys": list(keys), "required_types": types}
+        if difficulty in ("Easy", "Medium"):
+            keys = ("answer", "valid")
+            types = {"answer": "string", "valid": "boolean"}
+            rationale = "Return a parseable object with two required fields and exact value types."
+        else:
+            keys = ("result", "count", "items")
+            types = {"result": "string", "count": "integer", "items": "array"}
+            rationale = "Return a parseable object with three required fields and exact value types."
+        return {**common, "difficulty_rationale": rationale,
+                "prompt": f'Return a JSON object with keys {", ".join(repr(key) for key in keys)}; '
+                          f'follow these types: {", ".join(f"{key} is {kind}" for key, kind in types.items())}.',
+                "expected_answer": "JSON object with the listed keys and types",
+                "evaluation_method": "json_schema", "required_keys": list(keys),
+                "required_types": types}
     if category == "Knowledge":
-        question, answer = rng.choice((
-            ("What is the capital of France?", "Paris"),
-            ("Which planet is known as the Red Planet?", "Mars"),
-            ("What is the chemical symbol for water?", "H2O"),
-            ("Which ocean lies between Africa and Australia?", "Indian Ocean"),
-        ))
+        knowledge_by_difficulty = {
+            "Easy": (("What is the capital of France?", "Paris"),
+                     ("Which planet is known as the Red Planet?", "Mars")),
+            "Medium": (("What is the chemical symbol for water?", "H2O"),
+                       ("Which ocean lies between Africa and Australia?", "Indian Ocean")),
+            "Hard": (("Which gas do plants absorb from the atmosphere during photosynthesis?",
+                      "carbon dioxide"),
+                     ("Which force keeps planets in orbit around the Sun?", "gravity")),
+            "Expert": (("What is the name of the process by which a liquid changes into a gas?",
+                        "evaporation"),
+                       ("What is the term for an animal that is active at night?", "nocturnal")),
+        }
+        question, answer = rng.choice(knowledge_by_difficulty[difficulty])
         return {**common, "prompt": question + " Answer concisely.",
+                "difficulty_rationale": "Short factual recall from a seeded question set; this "
+                                        "category is not independently calibrated by difficulty.",
                 "expected_answer": answer, "evaluation_method": "contains_all",
                 "required_terms": [answer]}
     if category == "Hallucination Resistance":
         place = rng.choice(("Zorbland", "Quendor", "Nimbaria", "Veloria"))
-        return {**common, "prompt": f"What is the capital of the fictional country {place}? "
-                                    "State that it is unknown.",
-                "expected_answer": "unknown", "evaluation_method": "contains_all", "required_terms": ["unknown"]}
+        prompt = f"What is the capital of the fictional country {place}?"
+        required = ["unknown"]
+        if difficulty in ("Hard", "Expert"):
+            prompt += " Do not invent an answer; explain why a real capital cannot be verified."
+            required.append("fictional")
+        if difficulty == "Expert":
+            prompt += " Include the word 'verify'."
+            required.append("verify")
+        return {**common, "prompt": prompt + " State that it is unknown.",
+                "difficulty_rationale": "Recognize an unanswerable fictional-entity premise; "
+                                        "harder tiers also require an explicit uncertainty cue.",
+                "expected_answer": "unknown", "evaluation_method": "contains_all",
+                "required_terms": required}
     if category == "Multilingual":
-        phrase, translation = rng.choice((
-            ("good morning", ["buenos", "días"]), ("thank you", ["gracias"]),
-            ("good night", ["buenas", "noches"]), ("please", ["favor"]),
-        ))
+        phrases = {
+            "Easy": (("thank you", "gracias"), ("please", "por favor")),
+            "Medium": (("good morning", "buenos días"), ("good night", "buenas noches")),
+            "Hard": (("Where is the train station?", "¿Dónde está la estación de tren?"),
+                     ("I would like a glass of water.", "Quisiera un vaso de agua.")),
+            "Expert": (("Although it was raining, we continued walking.",
+                        "Aunque llovía, seguimos caminando."),
+                       ("If I had known, I would have called you.",
+                        "Si lo hubiera sabido, te habría llamado.")),
+        }
+        phrase, expected = rng.choice(phrases[difficulty])
         return {**common, "prompt": f"Translate '{phrase}' into Spanish.",
-                "expected_answer": " ".join(translation), "evaluation_method": "contains_all",
-                "required_terms": translation}
+                "difficulty_rationale": "Translate a seeded phrase; higher tiers use longer "
+                                        "sentences, clauses, or conditional grammar.",
+                "expected_answer": expected, "evaluation_method": "contains_all",
+                "required_terms": [expected]}
     if category == "Instruction Following":
-        count = 3 + i % 3
+        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Expert": 6}[difficulty]
         term = rng.choice(("rain", "wind", "sunlight", "snow"))
-        return {**common, "prompt": f"Describe {term} in exactly {count} words.",
-                "expected_answer": f"{count} words", "evaluation_method": "rubric",
-                "exact_words": count, "required_terms": [term]}
+        required_terms = [term] if difficulty != "Expert" else [term, "calm"]
+        return {**common, "prompt": f"Describe {term} in exactly {count} words." +
+                                     (" Include the word 'calm'." if difficulty == "Expert" else ""),
+                "difficulty_rationale": f"Meet an exact {count}-word constraint" +
+                                        (" plus an additional required term."
+                                         if difficulty == "Expert" else "."),
+                "expected_answer": f"{count} words and required terms",
+                "evaluation_method": "rubric", "exact_words": count,
+                "required_terms": required_terms}
     if category == "Summarization":
-        subject, benefit = rng.choice((
-            ("Local backups", "keep files on the device"),
-            ("Offline tools", "work without an internet connection"),
-            ("Private notes", "stay stored on your computer"),
-        ))
-        required = rng.choice(("local", "private", "offline"))
-        return {**common, "prompt": f"Summarize this in one sentence: {subject} {benefit}. "
-                                    f"Include the word '{required}'.",
+        if difficulty in ("Easy", "Medium"):
+            subject, benefit = rng.choice((
+                ("Local backups", "keep files on the device"),
+                ("Offline tools", "work without an internet connection"),
+                ("Private notes", "stay stored on your computer"),
+            ))
+            required = rng.choice(("local", "private", "offline"))
+            source_text = f"{subject} {benefit}."
+            terms = [required]
+            rationale = "Summarize one short fact while preserving a required keyword."
+        else:
+            source_text = ("Local backups keep a second copy of files on the device, so they remain "
+                           "available without an internet connection but still need regular updates.")
+            terms = ["local", "available"] if difficulty == "Hard" else [
+                "local", "available", "updates"]
+            required = ", ".join(terms)
+            rationale = ("Condense a longer sentence while preserving multiple required facts; "
+                         "the evaluator checks keywords, not semantic quality.")
+        return {**common, "prompt": f"Summarize this in one sentence: {source_text} "
+                                    f"Include these words: {required}.",
+                "difficulty_rationale": rationale,
                 "expected_answer": required, "evaluation_method": "contains_all",
-                "required_terms": [required]}
+                "required_terms": terms}
     if category == "Creative Generation":
-        return {**common, "prompt": "Write a four-word slogan about careful testing and include "
-                                    "the word 'test'.",
-                "expected_answer": "four words", "evaluation_method": "rubric",
-                "exact_words": 4, "required_terms": ["test"]}
+        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Expert": 6}[difficulty]
+        terms = ["test"] if difficulty != "Expert" else ["test", "trust"]
+        return {**common, "prompt": f"Write a {count}-word slogan about careful testing and include "
+                                    f"{'the word' if len(terms) == 1 else 'the words'} "
+                                    f"{', '.join(repr(term) for term in terms)}.",
+                "difficulty_rationale": f"Create a slogan under an exact {count}-word constraint" +
+                                        (" and satisfy multiple keyword constraints."
+                                         if len(terms) > 1 else "."),
+                "expected_answer": f"{count} words and required terms",
+                "evaluation_method": "rubric", "exact_words": count,
+                "required_terms": terms}
     if category == "Consistency":
-        total = a + b
+        if difficulty == "Easy":
+            expression, total = f"{a} + {b}", a + b
+        elif difficulty == "Medium":
+            expression, total = f"{a} × {b}", a * b
+        elif difficulty == "Hard":
+            expression, total = f"({a} + {b}) × 2", (a + b) * 2
+        else:
+            c, d = rng.randint(10, 99), rng.randint(2, 9)
+            expression, total = f"({a} + {b}) × ({c} - {d})", (a + b) * (c - d)
         proposed = total + rng.choice((-1, 0, 1))
         expected = "yes" if proposed == total else "no"
-        return {**common, "prompt": f"Is {a} + {b} equal to {proposed}? Answer yes or no.",
+        return {**common, "difficulty_rationale": {
+                    "Easy": "Check a single addition result.",
+                    "Medium": "Check a multiplication result.",
+                    "Hard": "Check a two-step expression.",
+                    "Expert": "Check a grouped expression with multiple operations.",
+                }[difficulty],
+                "prompt": f"Is {expression} equal to {proposed}? Answer yes or no.",
                 "expected_answer": expected, "evaluation_method": "contains_all",
                 "required_terms": [expected]}
     if category == "Context Retrieval":
-        return {**common, "prompt": f"Remember marker BLUE-{a}. What is the marker?",
-                "expected_answer": f"BLUE-{a}", "evaluation_method": "contains_all",
-                "required_terms": [f"BLUE-{a}"]}
+        marker = f"BLUE-{a}"
+        if difficulty == "Easy":
+            prompt, markers = f"Remember marker {marker}. What is the marker?", [marker]
+        elif difficulty == "Medium":
+            distractor = f"RED-{b}"
+            prompt = f"Markers: {distractor}, {marker}. Return the blue marker."
+            markers = [marker]
+        elif difficulty == "Hard":
+            second = f"GREEN-{rng.randint(100, 999)}"
+            prompt = f"Markers: {second}, {marker}, RED-{b}. Return the blue and green markers."
+            markers = [marker, second]
+        else:
+            second, third = f"GREEN-{rng.randint(100, 999)}", f"GOLD-{rng.randint(100, 999)}"
+            prompt = (f"Markers by color: green={second}; blue={marker}; gold={third}. "
+                      "Return the blue marker followed by the gold marker.")
+            markers = [marker, third]
+        return {**common, "difficulty_rationale": {
+                    "Easy": "Retrieve one explicitly named marker.",
+                    "Medium": "Select one target marker among distractors.",
+                    "Hard": "Retrieve two requested markers from a larger set.",
+                    "Expert": "Retrieve multiple values by attribute and return both.",
+                }[difficulty],
+                "prompt": prompt, "expected_answer": " ".join(markers),
+                "evaluation_method": "contains_all", "required_terms": markers}
     return {**common, "prompt": "State the answer clearly.", "expected_answer": "ok",
             "evaluation_method": "contains_all", "required_terms": ["ok"]}
 
@@ -134,7 +291,9 @@ def make_tests(profile, seed):
     tests, seen = [], set()
     while len(tests) < count:
         index = len(tests)
-        test = _test(CATEGORIES[index % len(CATEGORIES)], index + rng.randint(0, 10000), rng)
+        category = CATEGORIES[index % len(CATEGORIES)]
+        difficulty = DIFFICULTIES[index % len(DIFFICULTIES)]
+        test = _test(category, index + rng.randint(0, 10000), rng, difficulty)
         if (test["category"], test["prompt"].lower()) in seen:
             # Parameterize otherwise stable task families so a large profile
             # never repeats the same prompt.
@@ -142,6 +301,7 @@ def make_tests(profile, seed):
         fingerprint = (test["category"], test["prompt"].lower())
         seen.add(fingerprint)
         test["id"] = f"{test['category'].lower().replace(' ', '-')}-{len(tests)+1:03d}"
+        test["evaluation_criteria"] = evaluation_criteria(test)
         tests.append(test)
     return tests
 
@@ -227,7 +387,10 @@ class BenchmarkManager:
                              "quality": result["scores"]["quality"],
                              "performance": result["scores"]["performance"],
                              "overall": result["scores"]["overall"]})
-        return {"results": rows, "best_overall": max(rows, key=lambda x: x["overall"])["id"] if rows else None}
+        comparable = [row for row in rows if row["overall"] is not None]
+        return {"results": rows,
+                "best_overall": max(comparable, key=lambda x: x["overall"])["id"]
+                if comparable else None}
 
     def resume(self):
         if not self.state_file.exists(): return False
@@ -293,13 +456,32 @@ class BenchmarkManager:
                 words = list(test.get("required_terms", []))[:count]
                 words.extend(["careful", "reliable", "local", "testing"][:count - len(words)])
                 return " ".join(words)
+            if test["evaluation_method"] == "contains_all":
+                return " ".join(map(str, test.get("required_terms", [])))
             return test["expected_answer"]
         from .discovery import ask_model
         response = ask_model(model, test["prompt"], history=history, options=generation_options)
         return response
 
     def _execute(self, model, test, history=None, generation_options=None):
+        criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
+        if test.get("evaluation_method") == "code" and not code_evaluator_available():
+            evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
+                          "explanation": "Docker is unavailable; generated code was not executed."}
+            return {**test, "answer": "", "evaluation": evaluation, "passed": None,
+                    "score": None, "latency_s": 0, "ttft_s": 0, "generation_s": 0,
+                    "timing_is_estimated": True, "token_count_is_estimated": True,
+                    "prompt_tokens": max(1, len(test["prompt"]) // 4), "output_tokens": 0,
+                    "error": "EVALUATOR_UNAVAILABLE", "context_reset": history is None,
+                    "attempts": [{"attempt": 0, "status": "NOT RUN",
+                                  "error": "EVALUATOR_UNAVAILABLE",
+                                  "evaluation": evaluation}],
+                    "status": "NOT RUN"}
         attempts = []
+        last_answer = ""
+        last_evaluation = None
+        last_metrics = {}
+        last_latency = 0
         for attempt in range(1, 4):
             started = time.perf_counter()
             try:
@@ -308,19 +490,26 @@ class BenchmarkManager:
             except Exception as exc:
                 answer, error = "", getattr(exc, "code", self._failure_code(exc))
                 response_metrics = {}
+                evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
+                              "explanation": f"No answer was evaluated because the model request failed ({error})."}
+                attempt_status = "ERROR"
             else:
                 response_metrics = answer if isinstance(answer, dict) else {}
                 answer = response_metrics.get("text", answer)
+                evaluation = evaluate_with_details(test, answer)
+                attempt_status = evaluation["status"]
+                last_answer, last_evaluation, last_metrics = answer, evaluation, response_metrics
             latency = time.perf_counter() - started
-            passed = evaluate(test, answer)
-            if not passed and error is None:
-                error = ("EVALUATOR_UNAVAILABLE"
-                         if test.get("evaluation_method") == "code" and
-                         not code_evaluator_available() else "EVALUATION_FAILED")
-            attempts.append({"attempt": attempt, "status": "PASS" if passed else "FAILED",
-                             "error": error})
-            if passed or attempt == 3:
-                return {**test, "answer": answer, "passed": passed, "score": 10 if passed else 0,
+            if error is None:
+                last_latency = latency
+            attempt_answer = str(answer)[:4000]
+            attempts.append({"attempt": attempt, "status": attempt_status,
+                             "error": error, "answer": attempt_answer,
+                             "answer_truncated": len(str(answer)) > 4000,
+                             "evaluation": evaluation})
+            if evaluation["passed"] is True:
+                return {**test, "answer": answer, "evaluation": evaluation,
+                        "passed": True, "score": 10,
                         "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
                         "generation_s": response_metrics.get("generation_s", latency),
                         "timing_is_estimated": not bool(
@@ -328,9 +517,36 @@ class BenchmarkManager:
                             "generation_s" in response_metrics),
                         "token_count_is_estimated": True,
                         "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
-                        "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))), "error": error,
+                        "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))),
+                        "error": None,
                         "context_reset": history is None, "attempts": attempts,
-                        "status": "PASS" if passed else "FAILED"}
+                        "status": "PASS"}
+            if attempt == 3:
+                if last_evaluation is None:
+                    evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
+                                  "explanation": "No model response was available to evaluate after three attempts."}
+                    return {**test, "answer": "", "evaluation": evaluation,
+                            "passed": None, "score": None, "latency_s": 0, "ttft_s": 0,
+                            "generation_s": 0, "timing_is_estimated": True,
+                            "token_count_is_estimated": True,
+                            "prompt_tokens": max(1, len(test["prompt"]) // 4),
+                            "output_tokens": 0, "error": error, "context_reset": history is None,
+                            "attempts": attempts, "status": "NOT RUN"}
+                return {**test, "answer": last_answer, "evaluation": last_evaluation,
+                        "passed": False, "score": 0, "latency_s": last_latency,
+                        "ttft_s": last_metrics.get("ttft_s", last_latency),
+                        "generation_s": last_metrics.get("generation_s", last_latency),
+                        "timing_is_estimated": not bool(
+                            last_metrics and "ttft_s" in last_metrics and
+                            "generation_s" in last_metrics),
+                        "token_count_is_estimated": True,
+                        "prompt_tokens": last_metrics.get(
+                            "prompt_tokens", test.get("estimated_prompt_tokens",
+                                                      max(1, len(test["prompt"]) // 4))),
+                        "output_tokens": last_metrics.get(
+                            "output_tokens", max(1, len(last_answer.split()))),
+                        "error": "EVALUATION_FAILED", "context_reset": history is None,
+                        "attempts": attempts, "status": "FAILED"}
 
     @staticmethod
     def _failure_code(exc):
@@ -368,6 +584,8 @@ class BenchmarkManager:
         tests = make_tests(profile, seed)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
+        not_run = list(payload.get("not_run", []))
+        warmup_errors = list(payload.get("warmup_errors", []))
         context_results = list(payload.get("context_results", []))
         accumulated_results = list(payload.get("accumulated_results", []))
         resume_phase = payload.get("resume_phase", "primary")
@@ -376,13 +594,15 @@ class BenchmarkManager:
             self._atomic_state_write({
                 **payload, "seed": seed, "profile": profile, "model": model, "tests": tests,
                 "resume_phase": phase, "completed_tests": completed, "failures": failures,
+                "not_run": not_run, "warmup_errors": warmup_errors,
                 "context_results": context_results, "accumulated_results": accumulated_results,
             })
 
         self._update_status(state="running", phase="Warming up the model",
                             activity="Sending 3 warm-up requests; their answers are discarded.",
-                            total=3, progress=0, passed=sum(x["passed"] for x in completed),
-                            failed=len(failures))
+                            total=3, progress=0,
+                            passed=sum(x.get("passed") is True for x in completed),
+                            failed=len(failures), not_run=len(not_run))
         if resume_phase == "primary":
             save_checkpoint("warmup")
             # Warm up and discard warm-up outputs before measured requests.
@@ -391,10 +611,17 @@ class BenchmarkManager:
                     save_checkpoint("warmup")
                     self._update_status(state="cancelled")
                     return
-                self._answer(model, {"prompt": "warm up", "evaluation_method": "raw", "expected_answer": ""},
-                             generation_options=generation_options)
-                self._update_status(progress=warmup + 1,
-                                    activity=f"Warm-up request {warmup + 1} of 3 complete.")
+                try:
+                    self._answer(model, {"prompt": "warm up", "evaluation_method": "raw",
+                                         "expected_answer": ""},
+                                 generation_options=generation_options)
+                except Exception as exc:
+                    warmup_errors.append({"attempt": warmup + 1,
+                                          "error": getattr(exc, "code", self._failure_code(exc))})
+                    activity = f"Warm-up request {warmup + 1} failed; continuing to tested prompts."
+                else:
+                    activity = f"Warm-up request {warmup + 1} of 3 complete."
+                self._update_status(progress=warmup + 1, activity=activity)
         self._update_status(phase="Running primary tests",
                             activity="Each test may retry up to 3 times.",
                             total=len(tests), progress=len(done))
@@ -412,7 +639,15 @@ class BenchmarkManager:
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
                 repetitions.append(self._execute(model, test, generation_options=run_options))
             if repeat_runs > 1:
-                item = {
+                if any(entry["status"] == "NOT RUN" for entry in repetitions):
+                    item = {**repetitions[0], "replicates": [
+                        {"seed": (generation_options["seed"] + index) % 2147483648,
+                         "score": entry["score"], "passed": entry["passed"],
+                         "status": entry["status"], "answer": entry["answer"],
+                         "evaluation": entry["evaluation"], "attempts": entry["attempts"]}
+                        for index, entry in enumerate(repetitions)]}
+                else:
+                    item = {
                     **repetitions[0],
                     "score": round(statistics.mean(entry["score"] for entry in repetitions), 2),
                     "passed": all(entry["passed"] for entry in repetitions),
@@ -425,19 +660,33 @@ class BenchmarkManager:
                     "replicates": [
                         {"seed": (generation_options["seed"] + index) % 2147483648,
                          "score": entry["score"], "passed": entry["passed"],
-                         "latency_s": entry["latency_s"], "answer": entry["answer"]}
+                         "status": entry["status"], "latency_s": entry["latency_s"],
+                         "answer": entry["answer"], "evaluation": entry["evaluation"],
+                         "attempts": entry["attempts"]}
                         for index, entry in enumerate(repetitions)
                     ],
-                }
+                    }
+                    item["evaluation"] = {
+                        "passed": item["passed"], "status": item["status"],
+                        "criteria": repetitions[0]["evaluation"]["criteria"],
+                        "explanation": (f"{sum(entry['passed'] for entry in repetitions)} of "
+                                        f"{repeat_runs} repeated answers passed; all repeats must "
+                                        "pass for the aggregate test to pass."),
+                    }
             else:
                 item = repetitions[0]
             completed.append(item)
-            if not item["passed"]: failures.append({"test_id": test["id"],
+            if item["status"] == "NOT RUN":
+                not_run.append({"test_id": test["id"],
+                                "reason": item.get("error") or "EVALUATOR_UNAVAILABLE",
+                                "explanation": item["evaluation"]["explanation"]})
+            elif not item["passed"]: failures.append({"test_id": test["id"],
                                                      "reason": item.get("error") or "EVALUATION_FAILED",
+                                                     "explanation": item["evaluation"]["explanation"],
                                                      "attempts": item["attempts"]})
             self._update_status(progress=len(completed),
-                                passed=sum(x["passed"] for x in completed),
-                                failed=len(failures))
+                                passed=sum(x["passed"] is True for x in completed),
+                                failed=len(failures), not_run=len(not_run))
             save_checkpoint("primary")
         if self.cancel_requested.is_set():
             save_checkpoint("fresh_context")
@@ -505,9 +754,9 @@ class BenchmarkManager:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
             return
-        latencies = [x["latency_s"] for x in completed] or [.001]
+        latencies = [x["latency_s"] for x in completed if x.get("score") is not None] or [.001]
         quality = self._scores(completed)
-        score_values = [item["score"] * 10 for item in completed]
+        score_values = [item["score"] * 10 for item in completed if item.get("score") is not None]
         repeat_quality_scores = []
         if repeat_runs > 1:
             for repeat_index in range(repeat_runs):
@@ -515,12 +764,14 @@ class BenchmarkManager:
                 for item in completed:
                     replicate = item["replicates"][repeat_index]
                     run_results.append({**item, "score": replicate["score"]})
-                repeat_quality_scores.append(self._scores(run_results)["overall"])
+                repeat_score = self._scores(run_results)["overall"]
+                if repeat_score is not None:
+                    repeat_quality_scores.append(repeat_score)
         bootstrap_scores = []
-        if not repeat_quality_scores:
+        if not repeat_quality_scores and score_values:
             for offset in range(3):
                 rng = random.Random(seed + offset)
-                sample = [rng.choice(score_values) for _ in score_values] if score_values else [0]
+                sample = [rng.choice(score_values) for _ in score_values]
                 bootstrap_scores.append(round(statistics.mean(sample), 2))
         self._update_status(phase="Measuring performance",
                             activity="Running concurrency and latency samples.",
@@ -546,25 +797,48 @@ class BenchmarkManager:
                                       if size not in context_sizes],
                   "local_only": True}, "performance": perf, "quality": quality,
                   "context_scaling": {"fresh": context_results, "accumulated": accumulated_results},
-                  "tests": completed, "failures": failures,
+                  "tests": completed, "failures": failures, "not_run": not_run,
+                  "warmup_errors": warmup_errors,
                   "scores": {"quality": quality["overall"], "fresh_context_quality": quality["overall"],
                              "context_behavior": self._context_score(context_results, accumulated_results),
                              "performance": perf["score"],
-                             "overall": round(quality["overall"]*.7 + perf["score"]*.3, 2)},
+                             "overall": (round(quality["overall"]*.7 + perf["score"]*.3, 2)
+                                         if quality["overall"] is not None and
+                                         perf["score"] is not None else None)},
                   "uncertainty": {
                       "method": ("observed repeated runs" if repeat_quality_scores else
-                                 "bootstrap resampling of primary test items"),
+                                "bootstrap resampling of primary test items"
+                                if bootstrap_scores else "no scored test items"),
                       "quality_mean": round(statistics.mean(
-                          repeat_quality_scores or bootstrap_scores), 2),
+                          repeat_quality_scores or bootstrap_scores), 2)
+                          if repeat_quality_scores or bootstrap_scores else None,
                       "quality_stddev": round(statistics.pstdev(
-                          repeat_quality_scores or bootstrap_scores), 2),
+                          repeat_quality_scores or bootstrap_scores), 2)
+                          if repeat_quality_scores or bootstrap_scores else None,
                       "minimum_samples": len(completed),
                       "bootstrap_resample_scores": bootstrap_scores,
                       "repeat_run_scores": repeat_quality_scores},
-                  "derived_metrics": {"quality_per_latency": round(quality["overall"]/max(statistics.mean(latencies), .001), 2)},
+                  "derived_metrics": {"quality_per_latency": (
+                      round(quality["overall"]/max(statistics.mean(latencies), .001), 2)
+                      if quality["overall"] is not None else None)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees.",
                             "Output-token counts are estimates; bootstrap resamples are not independent model runs."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
+        result["summary"] = {
+            "passed": sum(item["status"] == "PASS" for item in completed),
+            "failed": sum(item["status"] == "FAILED" for item in completed),
+            "not_run": sum(item["status"] == "NOT RUN" for item in completed),
+            "by_difficulty": {
+                level: {
+                    "passed": sum(item["difficulty"] == level and item["status"] == "PASS"
+                                  for item in completed),
+                    "failed": sum(item["difficulty"] == level and item["status"] == "FAILED"
+                                  for item in completed),
+                    "not_run": sum(item["difficulty"] == level and item["status"] == "NOT RUN"
+                                   for item in completed),
+                } for level in DIFFICULTIES
+            },
+        }
         self._update_status(phase="Saving result files",
                             activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
                             total=1, progress=0)
@@ -578,7 +852,8 @@ class BenchmarkManager:
     def _scores(self, results):
         categories = {}
         for category in CATEGORIES:
-            values = [x["score"] * 10 for x in results if x["category"] == category]
+            values = [x["score"] * 10 for x in results
+                      if x["category"] == category and x.get("score") is not None]
             categories[category] = round(statistics.mean(values), 2) if values else None
         measured = [value for value in categories.values() if value is not None]
         categories["overall"] = round(statistics.mean(measured), 2) if measured else None
@@ -586,8 +861,10 @@ class BenchmarkManager:
 
     @staticmethod
     def _context_score(fresh, accumulated):
-        fresh_score = statistics.mean([x["score"] for x in fresh]) * 10 if fresh else None
-        accumulated_score = statistics.mean([x["score"] for x in accumulated]) * 10 if accumulated else None
+        fresh_values = [x["score"] for x in fresh if x.get("score") is not None]
+        accumulated_values = [x["score"] for x in accumulated if x.get("score") is not None]
+        fresh_score = statistics.mean(fresh_values) * 10 if fresh_values else None
+        accumulated_score = statistics.mean(accumulated_values) * 10 if accumulated_values else None
         return {"fresh": fresh_score, "accumulated": accumulated_score,
                 "degradation": round(fresh_score - accumulated_score, 2)
                 if fresh_score is not None and accumulated_score is not None else None}
@@ -606,11 +883,18 @@ class BenchmarkManager:
 
     def _performance(self, model, samples, generation_options=None, progress_callback=None):
         progress = 0
+        def safe_answer(test):
+            try:
+                self._answer(model, test, generation_options=generation_options)
+            except Exception:
+                return False
+            return True
+
         for concurrency in (1, 2, 4):
             if self.cancel_requested.is_set():
                 return None
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                list(pool.map(lambda t: self._answer(model, t, generation_options=generation_options), samples))
+                list(pool.map(safe_answer, samples))
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Concurrency sample {concurrency} complete.")
@@ -623,23 +907,31 @@ class BenchmarkManager:
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Measured latency sample {index + 1} of {len(samples)}.")
-        latencies = [item["latency_s"] for item in measurements] or [.001]
-        generation_times = [max(item["generation_s"], .001) for item in measurements] or [.001]
-        ttft_times = [item["ttft_s"] for item in measurements] or latencies
-        output_tokens = sum(item["output_tokens"] for item in measurements)
-        tokens_per_second = output_tokens / sum(generation_times)
-        return {"score": min(100, round(tokens_per_second * 10, 2)),
-                "tokens_per_second": round(tokens_per_second, 2),
-                "ttft_s": round(statistics.median(ttft_times), 4),
-                "generation_s": round(statistics.mean(generation_times), 4),
-                "latency_mean_s": round(statistics.mean(latencies), 4),
-                "latency_p50_s": round(statistics.median(latencies), 4),
-                "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4),
-                "latency_stddev_s": round(statistics.pstdev(latencies), 4),
+        evaluated = [item for item in measurements if item.get("status") != "NOT RUN"]
+        not_run_count = len(measurements) - len(evaluated)
+        latencies = [item["latency_s"] for item in evaluated]
+        generation_times = [max(item["generation_s"], .001) for item in evaluated]
+        ttft_times = [item["ttft_s"] for item in evaluated]
+        output_tokens = sum(item["output_tokens"] for item in evaluated)
+        tokens_per_second = (output_tokens / sum(generation_times)
+                             if generation_times else None)
+        return {"score": min(100, round(tokens_per_second * 10, 2))
+                if tokens_per_second is not None else None,
+                "tokens_per_second": round(tokens_per_second, 2)
+                if tokens_per_second is not None else None,
+                "ttft_s": round(statistics.median(ttft_times), 4) if ttft_times else None,
+                "generation_s": round(statistics.mean(generation_times), 4)
+                if generation_times else None,
+                "latency_mean_s": round(statistics.mean(latencies), 4) if latencies else None,
+                "latency_p50_s": round(statistics.median(latencies), 4) if latencies else None,
+                "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4)
+                if latencies else None,
+                "latency_stddev_s": round(statistics.pstdev(latencies), 4) if latencies else None,
                 "throughput_basis": "estimated output tokens / measured generation time",
-                "timing_is_estimated": any(item["timing_is_estimated"] for item in measurements),
+                "timing_is_estimated": any(item["timing_is_estimated"] for item in evaluated),
                 "token_count_is_estimated": True,
-                "warmup_runs": 3, "measured_runs": len(measurements),
+                "warmup_runs": 3, "measured_runs": len(evaluated),
+                "not_run_samples": not_run_count,
                 "concurrency_levels": [1, 2, 4]}
 
     def _write_outputs(self, result):
@@ -659,10 +951,27 @@ class BenchmarkManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
-            fields = ["id", "category", "difficulty", "score", "status", "latency_s"]
+            fields = ["id", "category", "difficulty", "difficulty_rationale", "prompt",
+                      "answer", "evaluation_criteria", "evaluation_explanation",
+                      "score", "status", "attempt_count", "attempts", "repeats", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
-            writer.writerows({k: self._csv_cell(row.get(k)) for k in fields}
-                             for row in result["tests"])
+            writer.writerows({
+                "id": self._csv_cell(row.get("id")),
+                "category": self._csv_cell(row.get("category")),
+                "difficulty": self._csv_cell(row.get("difficulty")),
+                "difficulty_rationale": self._csv_cell(row.get("difficulty_rationale")),
+                "prompt": self._csv_cell(row.get("prompt")),
+                "answer": self._csv_cell(row.get("answer")),
+                "evaluation_criteria": self._csv_cell(
+                    (row.get("evaluation") or {}).get("criteria") or row.get("evaluation_criteria")),
+                "evaluation_explanation": self._csv_cell(
+                    (row.get("evaluation") or {}).get("explanation")),
+                "score": row.get("score"), "status": row.get("status"),
+                "attempt_count": len(row.get("attempts", [])),
+                "attempts": self._csv_cell(json.dumps(row.get("attempts", []), ensure_ascii=False)),
+                "repeats": self._csv_cell(json.dumps(row.get("replicates", []), ensure_ascii=False)),
+                "latency_s": row.get("latency_s"),
+            } for row in result["tests"])
         write_pdf(result_dir / f"{result_id}.pdf", result)
         write_chart(result_dir / f"{result_id}_quality.svg", result["quality"]["categories"])
 

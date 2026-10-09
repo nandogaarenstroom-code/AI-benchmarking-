@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
 from backend.discovery import AdapterError, _get, _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
-from backend.evaluation import evaluate
+from backend.evaluation import evaluate, evaluate_with_details
+from backend.reporting import write_chart, write_pdf
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -187,6 +188,45 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(evaluate(rubric, "soft rain falls gently"))
         self.assertFalse(evaluate(rubric, "soft snow falls"))
 
+    def test_evaluators_explain_observable_pass_and_fail_evidence(self):
+        test = {"evaluation_method": "contains_all", "required_terms": ["amber", "wug"]}
+        passed = evaluate_with_details(test, "The amber wug is here.")
+        failed = evaluate_with_details(test, "The amber item is here.")
+        self.assertTrue(passed["passed"])
+        self.assertIn("All required terms", passed["explanation"])
+        self.assertFalse(failed["passed"])
+        self.assertIn("wug", failed["explanation"])
+        self.assertIn("amber", failed["criteria"])
+        self.assertFalse(evaluate(test, "The amber wuglet is here."))
+        self.assertTrue(evaluate(
+            {"evaluation_method": "contains_all", "required_terms": ["¿Dónde está la estación?"]},
+            "Dónde está la estación"))
+
+    def test_attempt_records_retain_answers_and_explain_each_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "math-1", "category": "Mathematics", "prompt": "Answer 42",
+                    "evaluation_method": "numeric", "expected_answer": "42"}
+            with patch.object(manager, "_answer", side_effect=["41", "42"]):
+                result = manager._execute({"demo": False}, test)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual([item["answer"] for item in result["attempts"]], ["41", "42"])
+        self.assertIn("expected 42", result["attempts"][0]["evaluation"]["explanation"])
+        self.assertTrue(result["attempts"][1]["evaluation"]["passed"])
+
+    def test_all_model_request_errors_are_not_run_not_model_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "math-1", "category": "Mathematics", "prompt": "Answer 42",
+                    "evaluation_method": "numeric", "expected_answer": "42"}
+            with patch.object(manager, "_answer", side_effect=AdapterError("TIMEOUT", "slow")):
+                result = manager._execute({"demo": False}, test)
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["error"], "TIMEOUT")
+        self.assertTrue(all(item["status"] == "ERROR" for item in result["attempts"]))
+        self.assertIn("no model response was available", result["evaluation"]["explanation"].lower())
+
     def test_code_evaluation_fails_closed_without_docker(self):
         with patch("backend.evaluation.shutil.which", return_value=None), \
                 patch("backend.evaluation.subprocess.run") as run:
@@ -202,8 +242,23 @@ class BenchmarkTests(unittest.TestCase):
             with patch.object(manager, "_answer", return_value="def f(): return 1"), \
                     patch("backend.evaluation.shutil.which", return_value=None):
                 result = manager._execute({"demo": False}, test)
-        self.assertFalse(result["passed"])
+        self.assertIsNone(result["passed"])
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["score"])
         self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
+        self.assertIn("not executed", result["evaluation"]["explanation"])
+
+    def test_not_run_checks_do_not_lower_quality_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            results = [
+                {"category": "Coding", "score": None, "status": "NOT RUN"},
+                {"category": "Mathematics", "score": 1, "status": "PASS"},
+            ]
+            scores = manager._scores(results)
+        self.assertIsNone(scores["categories"]["Coding"])
+        self.assertEqual(scores["categories"]["Mathematics"], 10)
+        self.assertEqual(scores["overall"], 10)
 
     def test_code_evaluation_rejects_invalid_or_oversized_tests(self):
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
@@ -214,9 +269,21 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
+        quick = make_tests("QUICK", 7)
+        self.assertEqual({item["difficulty"] for item in quick},
+                         {"Easy", "Medium", "Hard", "Expert"})
         self.assertEqual(len(make_tests("FULL", 7)), 252)
-        prompts = [test["prompt"] for test in make_tests("FULL", 7)]
+        full = make_tests("FULL", 7)
+        prompts = [test["prompt"] for test in full]
         self.assertEqual(len(prompts), len(set(prompts)))
+        for category in {test["category"] for test in full}:
+            self.assertEqual(
+                {test["difficulty"] for test in full if test["category"] == category},
+                {"Easy", "Medium", "Hard", "Expert"})
+        math_tests = [test for test in full if test["category"] == "Mathematics"]
+        self.assertIn("+", next(test["prompt"] for test in math_tests if test["difficulty"] == "Easy"))
+        self.assertIn("×", next(test["prompt"] for test in math_tests if test["difficulty"] == "Medium"))
+        self.assertIn("(", next(test["prompt"] for test in math_tests if test["difficulty"] == "Expert"))
         coding_prompts = [test["prompt"] for test in make_tests("FULL", 7)
                           if test["category"] == "Coding"]
         self.assertGreater(len(set(coding_prompts)), 1)
@@ -240,6 +307,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(any(p.suffix == ".pdf" for p in files))
             data = json.loads(next(p for p in files if p.suffix == ".json").read_text())
             self.assertEqual(data["scores"]["quality"], 100)
+            self.assertEqual(data["summary"]["passed"], 25)
+            self.assertEqual(data["summary"]["failed"], 0)
+            self.assertEqual(data["summary"]["not_run"], 0)
             self.assertTrue(data["demo"])
             self.assertEqual(data["configuration"]["generation_options"]["temperature"], 0.6)
             self.assertTrue(data["configuration"]["context_reset_per_test"])
@@ -257,6 +327,10 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
             self.assertEqual(manager.status()["result_directory"], str(Path(directory).resolve()))
+            self.assertTrue(all(item["evaluation"]["criteria"] for item in data["tests"]))
+            self.assertTrue(all(item["evaluation"]["explanation"] for item in data["tests"]))
+            self.assertTrue(all(item["difficulty_rationale"] for item in data["tests"]))
+            self.assertIn("prompt", (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0])
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -296,6 +370,20 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result["generation_s"], 1.0)
         self.assertEqual(result["latency_mean_s"], 0.6)
         self.assertFalse(result["timing_is_estimated"])
+
+    def test_unavailable_performance_samples_produce_no_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            sample = {"prompt": "x", "id": "test", "evaluation_method": "raw",
+                      "expected_answer": "x", "category": "Mathematics"}
+            with patch.object(manager, "_answer", return_value={"text": "x"}), \
+                    patch.object(manager, "_execute", return_value={
+                        "status": "NOT RUN", "latency_s": 0, "generation_s": 0,
+                        "ttft_s": 0, "output_tokens": 0, "timing_is_estimated": True}):
+                result = manager._performance({"demo": False}, [sample])
+        self.assertIsNone(result["score"])
+        self.assertIsNone(result["tokens_per_second"])
+        self.assertEqual(result["not_run_samples"], 1)
 
     def test_status_returns_a_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -408,6 +496,22 @@ class BenchmarkTests(unittest.TestCase):
             result["id"] = "../escaped"
             with self.assertRaises(ValueError):
                 manager._write_outputs(result)
+
+    def test_reports_label_unscored_tests_and_render_null_categories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chart = root / "chart.svg"
+            write_chart(chart, {"Coding": None, "Mathematics": 100, "overall": None})
+            self.assertIn("N/T", chart.read_text())
+            pdf = root / "result.pdf"
+            write_pdf(pdf, {
+                "model": {"name": "test"}, "timestamp": "now",
+                "scores": {"quality": None, "performance": None, "overall": None},
+                "tests": [{"status": "NOT RUN"}],
+                "failures": [],
+            })
+            self.assertIn(b"0 passed, 0 failed, 1 not run", pdf.read_bytes())
+            self.assertIn(b"Not available", pdf.read_bytes())
 
     def test_result_listing_and_loading_ignore_symlinks_outside_results(self):
         with tempfile.TemporaryDirectory() as directory:

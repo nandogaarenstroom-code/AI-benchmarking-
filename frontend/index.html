@@ -28,6 +28,12 @@ fieldset label{display:block;font-size:14px;color:#dce7f4}
 .toolbar button{margin:0}
 .history-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
 .history-item input{width:auto;margin:0}
+.test-filters{display:flex;flex-wrap:wrap;gap:12px}
+.test-filters label{display:flex;align-items:center;gap:8px}
+.test-record{border:1px solid var(--line);border-radius:9px;padding:12px;margin:10px 0;background:#0e1b2a}
+.test-record summary{color:var(--text)}
+.test-record pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09111d;padding:10px;border-radius:6px}
+.test-label{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 8px;margin-left:6px;font-size:12px}
 .controls{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px}
 .controls label{font-size:14px;color:var(--muted)}
 .controls select{margin-left:8px}
@@ -138,6 +144,26 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <p id="repeat-summary" class="muted"></p>
   <h3>Category scores (authoritative values)</h3>
   <table id="categories"><caption class="sr-only">Exact benchmark category scores</caption></table>
+  <h3>Test-by-test results</h3>
+  <p class="muted">Review every prompt, difficulty, model answer, evaluator check, and retry. This is the observable evidence used for scoring—not private chain-of-thought.</p>
+  <div id="difficulty-summary" class="grid"></div>
+  <div class="test-filters">
+    <label>Difficulty
+      <select id="difficulty-filter">
+        <option value="all">All levels</option><option>Easy</option><option>Medium</option><option>Hard</option><option>Expert</option>
+      </select>
+    </label>
+    <label>Outcome
+      <select id="outcome-filter">
+        <option value="all">All outcomes</option><option value="PASS">Succeeded</option>
+        <option value="FAILED">Failed</option><option value="NOT RUN">Not run</option>
+      </select>
+    </label>
+  </div>
+  <div id="test-records"></div>
+  <h3>Context experiment results</h3>
+  <p class="muted">Fresh and accumulated context probes are separate from the primary quality score. Prompts are loaded only when a record is opened because long-context prompts can be very large.</p>
+  <div id="context-records"></div>
 </section>
 <script>
 let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false;
@@ -211,7 +237,7 @@ async function poll(){
     $('activity').textContent=status.activity||'The local model is working.';
     if(lastPollActivity!==status.activity){lastPollActivity=status.activity;lastActivityAt=Date.now()}
     const stalled=Date.now()-lastActivityAt>20000?' · Waiting for the model; this request may take a while.':'';
-    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed${stalled}`;
+    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed · ${status.not_run||0} not run${stalled}`;
     if(status.result_directory)$('results-directory').textContent=status.result_directory;
     setRunning(true);
     setTimeout(()=>poll().catch(error=>displayError(error.message)),650);
@@ -315,15 +341,18 @@ function moveTower(event){
 }
 function show(result,resultDirectory){
   currentResult=result;$('progress').hidden=true;$('result').hidden=false;
-  $('quality').textContent=result.scores.quality+'/100';$('performance').textContent=result.scores.performance+'/100';$('overall').textContent=result.scores.overall+'/100';
+  const scoreText=score=>Number.isFinite(score)?score+'/100':'Not available';
+  $('quality').textContent=scoreText(result.scores.quality);
+  $('performance').textContent=scoreText(result.scores.performance);
+  $('overall').textContent=scoreText(result.scores.overall);
   const performance=result.performance||{};
   $('performance-detail').textContent=`Measured sample throughput: ${performance.tokens_per_second??'not available'} estimated output tokens/s · median TTFT ${performance.ttft_s??'not available'}s (${performance.timing_is_estimated?'estimated from request timing':'stream-timed'}) · token counts are estimates.`;
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
-  const evaluatorUnavailable=(result.failures||[]).some(item=>item.reason==='EVALUATOR_UNAVAILABLE');
+  const notRun=result.not_run||[];
   $('result-note').textContent=result.demo
     ?'Demo data validates the application flow and must not be interpreted as model performance.'
     :'These are controlled local benchmark measurements, not universal performance guarantees.'+
-      (evaluatorUnavailable?' Coding checks could not run because Docker is unavailable; see the JSON failure details.':'');
+      (notRun.length?` ${notRun.length} test(s) could not be evaluated and were excluded from quality scoring; see the test details for causes.`:'');
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
     ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload],
@@ -346,8 +375,116 @@ function show(result,resultDirectory){
     const row=document.createElement('tr'),meaning=score===null?'Not tested':score>=80?'Strong':score>=50?'Average':'Weak';
     [name,score===null?'Not tested':score+'/100',meaning].forEach(text=>{const cell=document.createElement('td');cell.textContent=text;row.append(cell)});table.append(row);
   });
+  renderTestResults(result);
+  renderContextResults(result);
   drawLab();$('result').scrollIntoView({behavior:'smooth',block:'start'});
 }
+
+function addTestField(container,label,value,preformatted=false){
+  const block=document.createElement('div'),heading=document.createElement('b');
+  heading.textContent=label;block.append(heading);
+  const content=document.createElement(preformatted?'pre':'p');
+  content.textContent=value===undefined||value===null||value===''?'Not available':String(value);
+  block.append(content);container.append(block);
+}
+function renderTestResults(result){
+  const tests=result.tests||[],difficulty=$('difficulty-filter').value,outcome=$('outcome-filter').value;
+  const counts=result.summary?.by_difficulty||{};
+  const summary=$('difficulty-summary');summary.replaceChildren();
+  ['Easy','Medium','Hard','Expert'].forEach(level=>{
+    const levelItems=tests.filter(test=>test.difficulty===level);
+    const passed=levelItems.filter(test=>test.status==='PASS').length;
+    const failed=levelItems.filter(test=>test.status==='FAILED').length;
+    const notRun=levelItems.filter(test=>test.status==='NOT RUN').length;
+    const cell=document.createElement('div'),title=document.createElement('b'),text=document.createElement('p');
+    const stat=counts[level];
+    title.textContent=`${level} · ${levelItems.length} tests`;
+    text.textContent=stat
+      ?`${stat.passed} succeeded · ${stat.failed} failed · ${stat.not_run} not run`
+      :`${passed} succeeded · ${failed} failed · ${notRun} not run`;
+    cell.append(title,text);summary.append(cell);
+  });
+  const container=$('test-records');container.replaceChildren();
+  const filtered=tests.filter(test=>(difficulty==='all'||test.difficulty===difficulty)&&
+    (outcome==='all'||test.status===outcome));
+  if(!filtered.length){container.textContent='No tests match these filters.';return}
+  filtered.forEach(test=>{
+    const record=document.createElement('details'),heading=document.createElement('summary');
+    const outcomeText=test.status==='PASS'?'Succeeded':test.status==='NOT RUN'?'Not run':'Failed';
+    heading.textContent=`${test.id} · ${test.category} · ${test.difficulty||'Unclassified'} · ${outcomeText}`+
+      (test.score===null||test.score===undefined?'':` · ${test.score}/${test.max_score??10}`);
+    record.className='test-record';record.append(heading);
+    addTestField(record,'Why this difficulty',test.difficulty_rationale);
+    addTestField(record,'Prompt',test.prompt,true);
+    addTestField(record,'What the evaluator checked',
+      test.evaluation?.criteria||test.evaluation_criteria);
+    if(test.expected_answer!==undefined)
+      addTestField(record,'Expected answer or target',test.expected_answer);
+    if(test.tests?.length)
+      addTestField(record,'Code assertions',test.tests.join('\n'),true);
+    addTestField(record,test.replicates?.length?'First repeat model answer':'Model answer',test.answer,true);
+    const evaluation=test.evaluation||{};
+    addTestField(record,'Outcome explanation',evaluation.explanation||
+      (test.status==='NOT RUN'?'The evaluator could not run this test.':
+       test.status==='PASS'?'The evaluation criteria passed.':'The evaluation criteria did not pass.'));
+    if(test.error)addTestField(record,'Failure code',test.error);
+    (test.attempts||[]).forEach(attempt=>{
+      const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');
+      attemptHeading.textContent=`Attempt ${attempt.attempt}: ${attempt.status}`;
+      attemptDetails.append(attemptHeading);
+      if(attempt.answer!==undefined)addTestField(attemptDetails,'Answer',attempt.answer,true);
+      if(attempt.answer_truncated)addTestField(attemptDetails,'Note','Attempt answer truncated to 4,000 characters.');
+      if(attempt.error)addTestField(attemptDetails,'Error code',attempt.error);
+      if(attempt.evaluation?.explanation)addTestField(attemptDetails,'Check result',attempt.evaluation.explanation);
+      record.append(attemptDetails);
+    });
+    (test.replicates||[]).forEach((replicate,index)=>{
+      const replicateDetails=document.createElement('details'),replicateHeading=document.createElement('summary');
+      replicateHeading.textContent=`Repeat ${index+1} (seed ${replicate.seed}): ${replicate.status||'recorded'}`;
+      replicateDetails.append(replicateHeading);
+      addTestField(replicateDetails,'Answer',replicate.answer,true);
+      if(replicate.evaluation?.explanation)
+        addTestField(replicateDetails,'Check result',replicate.evaluation.explanation);
+      record.append(replicateDetails);
+    });
+    container.append(record);
+  });
+}
+function renderContextResults(result){
+  const container=$('context-records');container.replaceChildren();
+  const filter=$('outcome-filter').value,scaling=result.context_scaling||{};
+  const records=[
+    ...(scaling.fresh||[]).map(test=>({...test,context_variant:'Fresh context'})),
+    ...(scaling.accumulated||[]).map(test=>({...test,context_variant:'Accumulated context'})),
+  ].filter(test=>filter==='all'||test.status===filter);
+  if(!records.length){container.textContent='No context tests match this outcome filter.';return}
+  records.forEach(test=>{
+    const detail=document.createElement('details'),heading=document.createElement('summary');
+    heading.textContent=`${test.context_variant} · ${test.context_size?.toLocaleString()||'Unknown'} target tokens · ${test.context_position||'position unknown'} · ${test.status||'unknown'}`;
+    detail.className='test-record';detail.append(heading);
+    addTestField(detail,'Marker expected',test.expected_answer);
+    addTestField(detail,'Model answer',test.answer,true);
+    addTestField(detail,'Outcome explanation',test.evaluation?.explanation||
+      (test.status==='PASS'?'The required marker was found.':'The required marker was not found.'));
+    (test.attempts||[]).forEach(attempt=>{
+      const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');
+      attemptHeading.textContent=`Attempt ${attempt.attempt}: ${attempt.status}`;
+      attemptDetails.append(attemptHeading);
+      if(attempt.answer!==undefined)addTestField(attemptDetails,'Answer',attempt.answer,true);
+      if(attempt.error)addTestField(attemptDetails,'Error code',attempt.error);
+      if(attempt.evaluation?.explanation)addTestField(attemptDetails,'Check result',attempt.evaluation.explanation);
+      detail.append(attemptDetails);
+    });
+    detail.addEventListener('toggle',()=>{
+      if(!detail.open||detail.dataset.promptLoaded)return;
+      detail.dataset.promptLoaded='true';
+      addTestField(detail,'Prompt',test.prompt,true);
+    });
+    container.append(detail);
+  });
+}
+$('difficulty-filter').onchange=()=>currentResult&&renderTestResults(currentResult);
+$('outcome-filter').onchange=()=>{if(currentResult){renderTestResults(currentResult);renderContextResults(currentResult)}};
 
 $('voxel-lab').addEventListener('pointermove',inspectAt);
 $('voxel-lab').addEventListener('pointerdown',inspectAt);
@@ -392,9 +529,11 @@ $('compare-results').onclick=async()=>{
     const header=document.createElement('tr');
     ['Model','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
     table.append(header);
+    const comparable=data.results.filter(item=>Number.isFinite(item.overall));
+    const best=comparable.length?comparable.reduce((current,item)=>item.overall>current.overall?item:current).id:null;
     data.results.forEach(item=>{
       const row=document.createElement('tr');
-      [item.model,item.quality,item.performance,item.overall,item.id===data.best_overall?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
+      [item.model,item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
       table.append(row);
     });
     $('comparison').replaceChildren(table);

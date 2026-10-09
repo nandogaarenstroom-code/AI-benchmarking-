@@ -31,7 +31,10 @@ Streaming adapter tests cover first-content TTFT measurement, timeout error mapp
 handling, and size-bounded discovery responses. Evaluator checks cover JSON value types and exact
 word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
 samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
-cancellation during context tests.
+cancellation during context tests. Difficulty-generation coverage checks that all four tiers appear
+in QUICK and that every primary category spans all tiers in FULL. Test-result coverage verifies
+prompt/evaluator explanations, answer traces, and that unavailable evaluators produce unscored
+NOT RUN outcomes.
 
 ### `test_domain_evaluators`
 

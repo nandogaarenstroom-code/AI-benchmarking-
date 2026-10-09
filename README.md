@@ -62,6 +62,13 @@ dashboard shows the results folder, saved-run history, and download links. Every
 retained in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
 Select a model deliberately before the run control is enabled; the demo model is never selected
 automatically. Active runs can be cancelled and resumed from their most recently checkpointed phase.
+Completed results include a **Test-by-test results** section with difficulty and outcome filters,
+the exact prompt, model answer, evaluation rule, reason for the result, and retry/repeat records.
+Checks that could not run (for example, unavailable Docker or a model-server timeout) are
+distinguished from incorrect answers and excluded from quality scoring. If there are no valid
+measurements, the affected score is shown as unavailable rather than as zero.
+The interface reports observable answers and evaluator evidence; it does not ask models to disclose
+hidden chain-of-thought.
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
@@ -141,18 +148,26 @@ Tests are distributed through four difficulty labels: **Easy**, **Medium**, **Ha
 | CODING | 40 |
 | LONG CONTEXT | 30 |
 
-The current implementation deliberately uses deterministic arithmetic-style prompts across these
-categories. Therefore, the category framework and scoring pipeline are present, but this is not
-yet a deep domain-specific coding, tool-use, or long-context evaluation. The README describes
-what is actually run rather than implying unsupported coverage.
+Difficulty tiers appear in every profile, including `QUICK`. The labels reflect explicit task
+construction (for example, grouped multi-step arithmetic, chained deductions, and coding edge cases),
+not a universal or externally calibrated measure of difficulty. Each test records its tier rationale
+and exact evaluator criteria. Compare difficulty primarily within the same category: an Expert
+knowledge-recall item is not necessarily as hard as an Expert coding item.
+
+The current implementation still uses a compact set of deterministic task families. The category
+framework and scoring pipeline do not yet amount to deep domain-specific coding, tool-use, or
+long-context evaluation. The README describes what is actually run rather than implying unsupported
+coverage.
 
 ## Automatic scoring
 
-Yes. No manual grading is required. Each answer is compared with its generated expected answer
-using objective exact matching:
+Yes. No manual grading is required. Each answer is evaluated with the applicable objective check
+(such as numeric matching, required terms, JSON keys and types, word count, or sandboxed assertions).
+The test details show the exact criterion and the reason the observed response passed or failed.
 
 - Correct answer: 10/10
-- Incorrect, empty, or unavailable answer: 0/10
+- Incorrect answer: 0/10
+- Unavailable evaluator or model response: `NOT RUN`, excluded from quality scoring
 - Category score: percentage of points earned in that category
 - Quality score: average across completed test scores, normalized to 0–100
 - Performance score: derived from measured request throughput
@@ -160,6 +175,9 @@ using objective exact matching:
 
 Every answer, score, status, and failure is retained in the JSON result. Demo results are clearly
 marked with `demo: true` and `DEMO DATA`; they must not be interpreted as model performance.
+The dashboard and CSV export also include per-test prompts, answers, evaluator criteria, and outcome
+explanations. “How it did it” means the observable response and checks; private chain-of-thought is
+not requested or treated as evidence.
 
 ## Context handling and fairness
 

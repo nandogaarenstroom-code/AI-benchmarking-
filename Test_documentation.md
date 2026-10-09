@@ -18,8 +18,15 @@ Every generated test contains:
 - `max_score` (`10`)
 
 Tests are generated deterministically from a seed. Prompt fingerprints are checked so duplicate
-prompts are avoided. The difficulty labels cycle through **Easy**, **Medium**, **Hard**, and
-**Expert**.
+prompts are avoided. Every profile includes **Easy**, **Medium**, **Hard**, and **Expert** tiers,
+including `QUICK`. Tiers are operational descriptions of task construction, not a standardized,
+independently calibrated difficulty scale. Mathematics progresses from single-digit addition to
+grouped multi-step arithmetic. Coding progresses from a basic operation to preserving order while
+deduplicating values with edge-case checks.
+
+Each result records the rationale for an individual test's tier. Compare difficulty primarily within
+the same category: task types vary, so an Expert knowledge-recall item is not necessarily as hard as
+an Expert coding item.
 
 ## Profiles
 
@@ -43,106 +50,112 @@ are documented exactly below.
 
 ### Mathematics
 
-**Prompt:** A parameterized multiplication problem such as:
+**Prompt:** Seeded arithmetic varies by tier: single-digit addition (Easy), two-digit
+multiplication (Medium), multiplication plus addition (Hard), and grouped multi-operation
+arithmetic (Expert).
 
-> Calculate `a × b`. Return only the number.
-
-`a` and `b` are seeded random integers from 2 through 99.
-
-**Evaluation:** Extract the first numeric value from the response and compare it with the expected
-product. The current multiplication tests use zero numeric tolerance.
+**Evaluation:** Extract the first numeric value from the response and compare it with the generated
+answer using zero tolerance.
 
 ### Reasoning
 
-**Prompt:** A simple categorical deduction such as:
+**Prompt:** Easy items apply one rule; higher tiers chain category rules and exclusions.
 
-> If all zibs are blue and item `a` is a zib, what color is item `a`?
-
-**Evaluation:** The response must contain the required answer term, currently `blue`.
+**Evaluation:** The response must contain every displayed required term. This checks the stated
+conclusion words, not a free-form proof.
 
 ### Coding
 
-**Prompt:** Ask the model to write Python defining `add(a, b)` and return code only.
+**Prompt:** Tasks progress from a basic arithmetic function to collection processing and stable
+deduplication.
 
-**Evaluation:** The returned source is combined with assertions such as:
+**Evaluation:** The returned source is combined with the test's displayed sandbox assertions. For
+example:
 
 ```python
 assert add(2, 3) == 5
 assert add(-1, 1) == 0
 ```
 
-The code evaluator returns a pass only when the assertions complete successfully. Code execution
-is bounded by source length and timeout. If Docker is available and enabled, execution prefers a
-network-disabled, read-only container with CPU, memory, process, and timeout limits. This is a
-defense-in-depth measure; generated code should not be treated as safe for hostile workloads
-unless Docker isolation is available and verified.
+The code evaluator returns a pass only when all assertions complete successfully. A failed run says
+one or more assertions failed; process output is suppressed, so the UI does not claim to identify
+which assertion failed. Code execution is bounded by source length and timeout and occurs only in a
+network-disabled, read-only Docker container with CPU, memory, and process limits. If Docker is
+unavailable, the test is marked **NOT RUN**, not a model failure. Generated code should not be treated
+as safe for hostile workloads unless container isolation is available and verified.
 
 ### Structured Output
 
-**Prompt:** Ask for JSON with the keys `answer` and `valid`.
+**Prompt:** Ask for JSON with required keys and value types; higher tiers require more fields.
 
-**Evaluation:** Parse the response as JSON, require a JSON object, and verify that all required
-keys exist. Values are not currently validated against a full JSON Schema.
+**Evaluation:** Parse the response as JSON, require an object, and verify required keys and primitive
+value types. This is not full JSON Schema validation.
 
 ### Knowledge
 
-**Prompt:** Ask:
+**Prompt:** Seeded fact recall varies by tier and includes questions such as:
 
 > What is the capital of France? Answer concisely.
 
-**Evaluation:** The response must contain `Paris`.
+**Evaluation:** The response must contain the expected fact. This small question set is not a
+calibrated measure of broad knowledge or category-wide difficulty.
 
 ### Hallucination Resistance
 
-**Prompt:** Ask about the fictional country Zorbland and instruct the model to say it is unknown.
+**Prompt:** Ask about a seeded fictional country and request an explicit uncertainty response.
 
-**Evaluation:** The response must contain `unknown`. This is a controlled refusal/factuality probe,
-not a general hallucination score.
+**Evaluation:** The response must contain `unknown`; higher tiers also require words indicating the
+premise is fictional and cannot be verified. This is a controlled probe, not a general hallucination
+score.
 
 ### Multilingual
 
-**Prompt:** Translate `good morning` into Spanish.
+**Prompt:** Translate seeded words or sentences into Spanish; higher tiers include clauses and
+conditional grammar.
 
-**Evaluation:** The response must contain both `buenos` and `días`.
+**Evaluation:** The response must contain the configured target translation phrase. Other valid
+translations may be rejected; this evaluator is not a human language-quality judgment.
 
 ### Instruction Following
 
-**Prompt:** Ask for exactly three words describing rain.
+**Prompt:** Describe a seeded subject using an exact word count (3–6 words); Expert tasks also have
+an additional required term.
 
-**Evaluation:** The current rubric checks only that the response has at least the configured
-minimum number of words. It does not yet enforce exactly three words or semantic relevance.
+**Evaluation:** Check exact word count and required terms. Semantic relevance is not evaluated.
 
 ### Summarization
 
-**Prompt:** Summarize a statement about local systems and mention local privacy.
+**Prompt:** Summarize a seeded statement; harder tiers require preserving additional keywords.
 
-**Evaluation:** The response must contain both `local` and `privacy`. This checks required facts,
-not semantic summary quality.
+**Evaluation:** Check required keywords only. This does not evaluate whether the summary is
+semantically correct or complete.
 
 ### Creative Generation
 
-**Prompt:** Ask for a four-word slogan about careful testing.
+**Prompt:** Write a slogan with an exact word count and required term(s).
 
-**Evaluation:** The current rubric checks only a minimum word count. It does not objectively score
-originality, quality, or relevance.
+**Evaluation:** Check exact word count and required term(s), not originality, quality, or relevance.
 
 ### Consistency
 
-**Prompt:** Ask whether `2 + 2` equals `4`.
+**Prompt:** Verify seeded addition, multiplication, or multi-operation expressions and answer yes/no.
 
-**Evaluation:** The response must contain `yes`.
+**Evaluation:** The first answer token must be the expected `yes` or `no`.
 
 ### Context Retrieval
 
-**Prompt:** Include a seeded marker such as `BLUE-1234` and ask the model to return it.
+**Prompt:** Retrieve seeded markers among distractors; harder items request multiple values by
+attribute.
 
-**Evaluation:** The response must contain the exact marker.
+**Evaluation:** Check that all requested marker strings occur in the answer. This does not validate
+their order.
 
 ## Automatic scoring
 
-Each passing primary test receives `10/10`; each failed, empty, invalid, or unavailable response
-receives `0/10`. Category scores are normalized to 0–100. Categories without applicable tests
-are recorded as `null`/not tested rather than zero.
+Each passing primary test receives `10/10`; a completed failed test receives `0/10`. A test whose
+required evaluator cannot run or whose model never returns an answer is **NOT RUN**, receives no
+score, and is excluded from quality averages. Categories without completed applicable tests are
+recorded as `null`/not tested rather than zero.
 
 The result also records:
 
@@ -155,6 +168,13 @@ The result also records:
 - output-token count
 - latency
 - whether the test used a fresh context
+- difficulty rationale, prompt, and evaluation criteria
+- an explanation of the observable pass/fail check and each attempt's answer
+
+The dashboard exposes these records with difficulty and outcome filters. It shows model outputs and
+deterministic evaluator evidence, not hidden chain-of-thought. If a required evaluator is unavailable
+or all model requests fail, the test is marked **NOT RUN** and excluded from quality scoring rather
+than counted as an incorrect answer.
 
 The fresh-context quality score is separate from context-behavior and performance measurements.
 Demo results are marked `demo: true` and are not real model measurements.
