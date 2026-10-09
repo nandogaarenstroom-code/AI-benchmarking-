@@ -29,7 +29,15 @@ def evaluate(test, answer):
     if method == "json_schema":
         try:
             value = json.loads(answer)
-            return isinstance(value, dict) and all(key in value for key in test.get("required_keys", []))
+            if not isinstance(value, dict) or not all(
+                    key in value for key in test.get("required_keys", [])):
+                return False
+            return all(
+                isinstance(value.get(key), {"string": str, "boolean": bool, "number": (int, float),
+                                            "integer": int, "object": dict, "array": list}.get(kind, object))
+                and not (kind in ("number", "integer") and isinstance(value.get(key), bool))
+                for key, kind in test.get("required_types", {}).items()
+            )
         except (json.JSONDecodeError, TypeError):
             return False
     if method == "contains_all":
@@ -37,7 +45,10 @@ def evaluate(test, answer):
     if method == "code":
         return _run_code(answer, test.get("tests", []))
     if method == "rubric":
-        return len(answer.split()) >= test.get("minimum_words", 1)
+        words = answer.split()
+        if "exact_words" in test:
+            return len(words) == test["exact_words"]
+        return len(words) >= test.get("minimum_words", 1)
     return answer == str(expected)
 
 

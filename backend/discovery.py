@@ -10,6 +10,7 @@ import math
 from datetime import datetime, timezone
 
 MAX_MODEL_RESPONSE_BYTES = 1_048_576
+MAX_DISCOVERY_RESPONSE_BYTES = 1_048_576
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -65,7 +66,11 @@ def _estimate_tokens(text):
 def _get(url, timeout=0.7):
     try:
         with _open(url, timeout=timeout) as response:
-            return json.loads(response.read())
+            body = response.read(MAX_DISCOVERY_RESPONSE_BYTES + 1)
+            if len(body) > MAX_DISCOVERY_RESPONSE_BYTES:
+                return None
+            value = json.loads(body)
+            return value if isinstance(value, dict) else None
     except Exception:
         return None
 
