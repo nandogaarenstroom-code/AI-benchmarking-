@@ -5,7 +5,9 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from backend.benchmark import BenchmarkManager, make_context_tests, make_tests
+from backend.benchmark import (
+    EVALUATOR_VERSION, TASK_SET_VERSION, BenchmarkManager, make_context_tests, make_tests,
+)
 from backend.discovery import AdapterError, _get, _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
 from backend.evaluation import evaluate, evaluate_with_details
 from backend.reporting import write_chart, write_pdf
@@ -271,7 +273,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
         quick = make_tests("QUICK", 7)
         self.assertEqual({item["difficulty"] for item in quick},
-                         {"Easy", "Medium", "Hard", "Expert"})
+                         {"Easy", "Medium", "Hard", "Uncalibrated"})
         self.assertEqual(len(make_tests("FULL", 7)), 252)
         full = make_tests("FULL", 7)
         prompts = [test["prompt"] for test in full]
@@ -279,18 +281,75 @@ class BenchmarkTests(unittest.TestCase):
         for category in {test["category"] for test in full}:
             self.assertEqual(
                 {test["difficulty"] for test in full if test["category"] == category},
-                {"Easy", "Medium", "Hard", "Expert"})
+                {"Easy", "Medium", "Hard", "Uncalibrated"})
         math_tests = [test for test in full if test["category"] == "Mathematics"]
         self.assertIn("+", next(test["prompt"] for test in math_tests if test["difficulty"] == "Easy"))
         self.assertIn("×", next(test["prompt"] for test in math_tests if test["difficulty"] == "Medium"))
-        self.assertIn("(", next(test["prompt"] for test in math_tests if test["difficulty"] == "Expert"))
+        self.assertIn("(", next(test["prompt"] for test in math_tests
+                                if test["difficulty"] == "Uncalibrated"))
+        self.assertTrue(all(test["difficulty_calibration_status"] ==
+                            "not empirically calibrated" for test in quick))
+        self.assertTrue(all(test["task_set_version"] == TASK_SET_VERSION and
+                            test["evaluator_version"] == EVALUATOR_VERSION for test in quick))
         coding_prompts = [test["prompt"] for test in make_tests("FULL", 7)
                           if test["category"] == "Coding"]
         self.assertGreater(len(set(coding_prompts)), 1)
+        pilot_tests = [test for test in full if test["category"] in
+                       ("Reasoning", "Coding", "Summarization")]
+        self.assertFalse(any("Use independent test variant" in test["prompt"]
+                             for test in pilot_tests))
         self.assertEqual([x["context_size"] for x in make_context_tests(7)],
                          [4096, 8192, 16384, 32768, 65536, 131072])
         self.assertEqual([x["context_size"] for x in make_context_tests(7, 32768)],
                          [4096, 8192, 16384, 32768])
+
+    def test_original_pilot_evaluators_explain_partial_and_full_results(self):
+        tests = make_tests("FULL", 123)
+        reasoning = next(test for test in tests
+                         if test["category"] == "Reasoning" and
+                         test["difficulty"] == "Uncalibrated")
+        summarization = next(test for test in tests
+                             if test["category"] == "Summarization" and
+                             test["difficulty"] == "Uncalibrated")
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            route_answer = manager._answer({"demo": True}, reasoning)
+            summary_answer = manager._answer({"demo": True}, summarization)
+        route_result = evaluate_with_details(reasoning, route_answer)
+        self.assertTrue(route_result["passed"])
+        self.assertEqual(route_result["score"], 10)
+        self.assertGreater(len(route_result["checks"]), 3)
+        wrong_route_decision = json.loads(route_answer)
+        wrong_route_decision["possible"] = not wrong_route_decision["possible"]
+        partial_route = evaluate_with_details(reasoning, json.dumps(wrong_route_decision))
+        self.assertFalse(partial_route["passed"])
+        self.assertGreater(partial_route["score"], 0)
+        self.assertLess(partial_route["score"], 10)
+
+        summary_result = evaluate_with_details(summarization, summary_answer)
+        self.assertTrue(summary_result["passed"])
+        self.assertEqual(summary_result["score"], 10)
+        incorrect_summary = json.loads(summary_answer)
+        incorrect_summary["cause"] = "the network failed"
+        partial_summary = evaluate_with_details(summarization, json.dumps(incorrect_summary))
+        self.assertFalse(partial_summary["passed"])
+        self.assertGreater(partial_summary["score"], 0)
+        self.assertLess(partial_summary["score"], 10)
+        self.assertTrue(any(not check["passed"] and check["name"] == "cause"
+                            for check in partial_summary["checks"]))
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            with patch.object(manager, "_answer", return_value=json.dumps(incorrect_summary)):
+                recorded = manager._execute({"demo": False}, summarization)
+        self.assertEqual(recorded["status"], "FAILED")
+        self.assertEqual(recorded["score"], partial_summary["score"])
+        self.assertEqual(recorded["evaluation"]["checks"], partial_summary["checks"])
+
+        coding = next(test for test in tests
+                      if test["category"] == "Coding" and
+                      test["difficulty"] == "Uncalibrated")
+        self.assertIn("first valid record", coding["prompt"].lower())
+        self.assertGreaterEqual(len(coding["tests"]), 5)
 
     def test_demo_run_exports_json_csv_pdf(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -312,6 +371,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(data["summary"]["not_run"], 0)
             self.assertTrue(data["demo"])
             self.assertEqual(data["configuration"]["generation_options"]["temperature"], 0.6)
+            self.assertEqual(data["task_set_version"], TASK_SET_VERSION)
+            self.assertEqual(data["evaluator_version"], EVALUATOR_VERSION)
+            self.assertEqual(data["difficulty_calibration_status"], "not empirically calibrated")
             self.assertTrue(data["configuration"]["context_reset_per_test"])
             self.assertTrue(all(item["context_reset"] for item in data["tests"]))
             self.assertIn("fresh", data["context_scaling"])
@@ -391,6 +453,17 @@ class BenchmarkTests(unittest.TestCase):
             snapshot = manager.status()
             snapshot["state"] = "corrupted"
             self.assertEqual(manager.status()["state"], "idle")
+
+    def test_resume_refuses_a_checkpoint_from_another_task_or_evaluator_version(self):
+            with tempfile.TemporaryDirectory() as directory:
+                manager = BenchmarkManager(Path(directory))
+                manager.state_file.write_text(json.dumps({
+                    "task_set_version": "older-task-set",
+                    "evaluator_version": EVALUATOR_VERSION,
+                    "profile": "QUICK",
+                }))
+                self.assertFalse(manager.resume())
+                self.assertIn("version changed", manager.status()["activity"])
 
     def test_cancelled_context_phase_checkpoints_and_resumes(self):
         with tempfile.TemporaryDirectory() as directory:

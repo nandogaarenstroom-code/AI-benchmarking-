@@ -134,8 +134,10 @@ evaluation method, and maximum score. The current categories are:
 - Context retrieval
 - Tool calling
 
-Tests are distributed through four difficulty labels: **Easy**, **Medium**, **Hard**, and
-**Expert**. Profiles select the number of generated tests:
+Tests are distributed through **Easy**, **Medium**, **Hard**, and **Uncalibrated** task-construction
+tiers. The final label is explicit: the tasks have not been piloted against a human panel or a
+representative model cohort, so we do not claim that they are empirically expert-hard. Profiles select
+the number of generated tests:
 
 | Profile | Tests |
 | --- | ---: |
@@ -148,25 +150,29 @@ Tests are distributed through four difficulty labels: **Easy**, **Medium**, **Ha
 | CODING | 40 |
 | LONG CONTEXT | 30 |
 
-Difficulty tiers appear in every profile, including `QUICK`. The labels reflect explicit task
-construction (for example, grouped multi-step arithmetic, chained deductions, and coding edge cases),
-not a universal or externally calibrated measure of difficulty. Each test records its tier rationale
-and exact evaluator criteria. Compare difficulty primarily within the same category: an Expert
-knowledge-recall item is not necessarily as hard as an Expert coding item.
+Difficulty tiers appear in every profile, including `QUICK`. Every saved test and result records the
+task-set version, evaluator version, tier rationale, and calibration status. Compare results only
+within the same category and task-set version; these difficulty tiers are not calibrated estimates.
 
-The current implementation still uses a compact set of deterministic task families. The category
-framework and scoring pipeline do not yet amount to deep domain-specific coding, tool-use, or
-long-context evaluation. The README describes what is actually run rather than implying unsupported
-coverage.
+The Reasoning, Coding, and Summarization categories now include original pilot tasks: constraint-based
+route planning with impossible cases, inventory-ledger reconciliation with malformed and duplicate
+events, and incident handoffs that distinguish confirmed facts from early guesses and unknowns.
+Reasoning and summarization expose per-criterion checks and partial scores; code runs in the existing
+resource-limited Docker evaluator. These focused pilots do not establish general reasoning, software
+engineering, or summarization ability. The category framework and scoring pipeline also do not yet
+amount to deep tool-use or long-context evaluation.
 
 ## Automatic scoring
 
-Yes. No manual grading is required. Each answer is evaluated with the applicable objective check
-(such as numeric matching, required terms, JSON keys and types, word count, or sandboxed assertions).
-The test details show the exact criterion and the reason the observed response passed or failed.
+No manual grading is required for the current deterministic checks. Each answer is evaluated with the
+applicable check (such as numeric matching, required terms, JSON keys and types, fact fields,
+constraint satisfaction, or sandboxed assertions). The test details show the criteria and observable
+evidence. These automatic checks are proxies for specified task behavior, not universal judgments of
+answer quality.
 
-- Correct answer: 10/10
-- Incorrect answer: 0/10
+- Fully correct answer: 10/10
+- Incorrect answer: 0/10, except the reasoning and summarization pilots award proportional credit
+  across their disclosed criteria
 - Unavailable evaluator or model response: `NOT RUN`, excluded from quality scoring
 - Category score: percentage of points earned in that category
 - Quality score: average across completed test scores, normalized to 0–100

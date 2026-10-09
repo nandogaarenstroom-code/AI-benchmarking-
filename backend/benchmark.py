@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import itertools
 import json
 import math
 import random
@@ -27,13 +28,38 @@ CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
               "Consistency", "Context Retrieval"]
 COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
-DIFFICULTIES = ("Easy", "Medium", "Hard", "Expert")
+DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
+TASK_SET_VERSION = "pilot-1"
+EVALUATOR_VERSION = "pilot-1"
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
     "Medium": "A routine task with a larger input or an additional constraint.",
     "Hard": "A multi-step task or one that combines several constraints.",
-    "Expert": "A more demanding task that requires careful composition or edge-case handling.",
+    "Uncalibrated": "A pilot task with higher constructed complexity; difficulty has not been calibrated.",
 }
+
+
+def _valid_schedule(route, items, constraints):
+    if (not isinstance(route, (list, tuple)) or len(route) != len(items) or
+            any(not isinstance(item, str) for item in route) or set(route) != set(items)):
+        return False
+    position = {item: index for index, item in enumerate(route)}
+    for rule in constraints:
+        kind = rule["kind"]
+        if kind == "before" and position[rule["first"]] >= position[rule["second"]]:
+            return False
+        if kind == "immediately_before" and position[rule["second"]] != position[rule["first"]] + 1:
+            return False
+        if kind == "not_adjacent" and abs(position[rule["first"]] - position[rule["second"]]) == 1:
+            return False
+        if kind == "fixed_position" and position[rule["item"]] != rule["position"]:
+            return False
+    return True
+
+
+def _schedule_has_solution(items, constraints):
+    return any(_valid_schedule(route, items, constraints)
+               for route in itertools.permutations(items))
 
 
 def _test(category, i, rng, difficulty=None):
@@ -42,6 +68,8 @@ def _test(category, i, rng, difficulty=None):
     common = {"id": f"{category.lower().replace(' ', '-')}-{i+1:03d}",
               "category": category, "subcategory": category, "difficulty": difficulty,
               "difficulty_rationale": DIFFICULTY_DESCRIPTIONS[difficulty],
+              "difficulty_calibration_status": "not empirically calibrated",
+              "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
               "max_score": 10}
     if category == "Mathematics":
         if difficulty == "Easy":
@@ -63,64 +91,130 @@ def _test(category, i, rng, difficulty=None):
                 "prompt": f"Calculate {operation}. Return only the number.",
                 "expected_answer": str(answer), "evaluation_method": "numeric", "tolerance": 0}
     if category == "Reasoning":
-        color = rng.choice(("blue", "green", "amber", "violet"))
-        item = f"item-{a}"
-        if difficulty == "Easy":
-            prompt = f"Every dax is {color}. {item} is a dax. What color is {item}?"
-            expected, rationale = color, "Apply one stated rule to one item."
-        elif difficulty == "Medium":
-            prompt = (f"Every dax is a wug. Every wug is {color}. {item} is a dax. "
-                      f"What color is {item}?")
-            expected, rationale = color, "Chain two rules before answering."
-        elif difficulty == "Hard":
-            prompt = (f"Every dax is a wug. No wugs are red. {item} is a dax. "
-                      "Can the item be red? Answer yes or no.")
-            expected, rationale = "no", "Combine a category chain with a negative constraint."
-        else:
-            prompt = (f"Every dax is a wug. No wugs are red. {item} is a dax. "
-                      f"State its category and whether it can be red, in the format "
-                      "'wug; no'.")
-            expected, rationale = "wug", "Track a positive implication and an exclusion together."
+        items = rng.sample(["Depot", "Clinic", "Market", "Library", "Archive",
+                            "Harbor", "Gallery", "Workshop", "Station"], {
+            "Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 5}[difficulty])
+        constraints = [{"kind": "before", "first": items[0], "second": items[1]}]
+        if difficulty in ("Medium", "Hard", "Uncalibrated"):
+            constraints.append({"kind": "immediately_before",
+                                "first": items[2], "second": items[3]})
+        if difficulty in ("Hard", "Uncalibrated"):
+            constraints.append({"kind": "not_adjacent",
+                                "first": items[0], "second": items[4]})
+        if difficulty == "Uncalibrated":
+            if rng.choice((True, False)):
+                constraints.append({"kind": "fixed_position", "item": items[2],
+                                    "position": len(items) - 1})
+            else:
+                constraints.append({"kind": "fixed_position", "item": items[0],
+                                    "position": 0})
+        descriptions = {
+            "before": lambda rule: f"{rule['first']} must be visited before {rule['second']}",
+            "immediately_before": lambda rule: (
+                f"{rule['first']} must be immediately followed by {rule['second']}"),
+            "not_adjacent": lambda rule: f"{rule['first']} and {rule['second']} cannot be adjacent",
+            "fixed_position": lambda rule: (
+                f"{rule['item']} must be stop number {rule['position'] + 1}"),
+        }
+        prompt = (f"A courier must visit each stop exactly once: {', '.join(items)}. "
+                  "Follow every route rule:\n- " + "\n- ".join(
+                      descriptions[rule["kind"]](rule) for rule in constraints) +
+                  '\nReturn only JSON: {"possible": true/false, "route": ["stop", ...]}. '
+                  'If no route can satisfy all rules, use "possible": false and an empty route.')
+        rationale = {
+            "Easy": "Construct a route that satisfies a precedence rule.",
+            "Medium": "Combine precedence with an immediate-adjacency constraint.",
+            "Hard": "Plan a five-stop route under precedence, adjacency, and exclusion rules.",
+            "Uncalibrated": "Resolve interacting route constraints and detect an unsatisfiable case.",
+        }[difficulty]
         return {**common, "difficulty_rationale": rationale, "prompt": prompt,
-                "expected_answer": expected, "evaluation_method": "contains_all",
-                "required_terms": (["wug", "no"] if difficulty == "Expert" else
-                                   ["no"] if difficulty == "Hard" else [expected])}
+                "expected_answer": "A JSON route satisfying all rules, or impossible if none exists.",
+                "evaluation_method": "constraint_schedule", "schedule_items": items,
+                "schedule_constraints": constraints,
+                "schedule_possible": _schedule_has_solution(items, constraints)}
     if category == "Coding":
-        if difficulty == "Easy":
-            function, description = "add", "return the sum of a and b"
-            source = "def add(a, b):\n    return a + b"
-            checks = [f"assert add({a}, {b}) == {a + b}"]
-            rationale = "Implement one basic operation and pass a direct example."
-        elif difficulty == "Medium":
-            function, description = "multiply", "return the product of a and b"
-            source = "def multiply(a, b):\n    return a * b"
-            checks = [f"assert multiply({a}, {b}) == {a * b}",
-                      "assert multiply(-2, 3) == -6"]
-            rationale = "Implement multiplication and handle a signed input."
-        elif difficulty == "Hard":
-            function, description = "count_even", "count the even integers in a list"
-            source = ("def count_even(values):\n"
-                      "    return sum(1 for value in values if value % 2 == 0)")
-            checks = [f"assert count_even([{a}, {b}, -2, 3]) == "
-                      f"{sum(value % 2 == 0 for value in (a, b, -2, 3))}",
-                      "assert count_even([]) == 0",
-                      "assert count_even([-3, -1, 1]) == 0"]
-            rationale = "Filter a collection, count matches, and handle empty and negative inputs."
-        else:
-            function, description = "deduplicate", "remove repeated values while preserving order"
-            source = ("def deduplicate(values):\n"
-                      "    result = []\n"
-                      "    for value in values:\n"
-                      "        if value not in result:\n"
-                      "            result.append(value)\n"
-                      "    return result")
-            checks = [f"assert deduplicate([{a}, {b}, {a}, -1]) == [{a}, {b}, -1]",
-                      "assert deduplicate([]) == []",
-                      "assert deduplicate([3, 2, 3, 2, 1]) == [3, 2, 1]"]
-            rationale = "Preserve first-seen order while handling duplicates and boundary inputs."
-        return {**common, "prompt": f"Write Python defining {function} that will {description}. Output code only.",
-                "expected_answer": "code", "evaluation_method": "code", "tests": checks,
-                "demo_answer": source, "difficulty_rationale": rationale}
+        function = "reconcile_stock_events"
+        rules = [
+            "Each valid record is a dictionary with a non-empty event_id, a non-empty string sku, "
+            "and an integer delta.",
+            "Positive delta means stock received; negative delta means stock shipped.",
+        ]
+        checks = [
+            "assert reconcile_stock_events([]) == {}",
+            f"assert reconcile_stock_events([{{'event_id': 'a', 'sku': 'PEN', 'delta': {a}}}, "
+            f"{{'event_id': 'b', 'sku': 'PEN', 'delta': {-b}}}]) == "
+            f"{{'PEN': {a - b}}}",
+        ]
+        rationale = "Aggregate signed inventory changes by SKU."
+        if difficulty in ("Medium", "Hard", "Uncalibrated"):
+            rules.append("Each record has an event_id; count only the first valid record for each event_id.")
+            checks.append(
+                f"assert reconcile_stock_events([{{'event_id': 'a', 'sku': 'PEN', 'delta': {a}}}, "
+                f"{{'event_id': 'a', 'sku': 'PEN', 'delta': 9}}, "
+                f"{{'event_id': 'b', 'sku': 'PEN', 'delta': {-b}}}]) == "
+                f"{{'PEN': {a - b}}}")
+            rationale += " Ignore duplicate event IDs after the first valid event."
+        if difficulty in ("Hard", "Uncalibrated"):
+            rules.extend([
+                "Ignore records with missing/empty IDs or SKUs, non-integer deltas, or boolean deltas.",
+                "A malformed record does not reserve its event_id; a valid zero-net SKU remains in the result.",
+            ])
+            checks.extend([
+                f"assert reconcile_stock_events([{{'event_id': 'bad', 'sku': '', 'delta': 8}}, "
+                f"{{'event_id': 'bad', 'sku': 'PEN', 'delta': {a}}}, "
+                f"{{'event_id': 'bool', 'sku': 'PEN', 'delta': True}}, "
+                f"{{'event_id': 'return', 'sku': 'PEN', 'delta': {-a}}}]) == {{'PEN': 0}}",
+                f"assert reconcile_stock_events([{{'event_id': 'x', 'sku': 'PEN', 'delta': {a}}}, "
+                f"{{'event_id': 'y', 'sku': 'BOOK', 'delta': {b}}}, "
+                f"{{'event_id': 'z', 'sku': 'PEN', 'delta': {-a}}}]) == "
+                f"{{'PEN': 0, 'BOOK': {b}}}",
+            ])
+            rationale += " Handle invalid records, duplicate-ID edge cases, and net-zero totals."
+        if difficulty == "Uncalibrated":
+            checks.append(
+                f"assert reconcile_stock_events([{{'event_id': 'r1', 'sku': 'BOOK', 'delta': {a}}}, "
+                f"{{'event_id': 'r2', 'sku': 'PEN', 'delta': {-b}}}, "
+                f"{{'event_id': 'r2', 'sku': 'BOOK', 'delta': 7}}, "
+                f"{{'event_id': 'r3', 'sku': 'PEN', 'delta': {b}}}, "
+                f"{{'event_id': 'r4', 'sku': 'BOOK', 'delta': {-a}}}]) == "
+                "{'BOOK': 0, 'PEN': 0}")
+            rationale += " Reconcile cross-SKU duplicate IDs without double-counting."
+        rules_text = "\n".join(f"- {rule}" for rule in rules)
+        source = (
+            "def reconcile_stock_events(events):\n"
+            "    totals = {}\n"
+            "    seen = set()\n"
+            "    for event in events:\n"
+            "        if not isinstance(event, dict):\n"
+            "            continue\n"
+            "        event_id = event.get('event_id')\n"
+            "        sku = event.get('sku')\n"
+            "        delta = event.get('delta')\n"
+            "        if not isinstance(event_id, str) or not event_id.strip():\n"
+            "            continue\n"
+            "        if not isinstance(sku, str) or not sku.strip():\n"
+            "            continue\n"
+            "        if not isinstance(delta, int) or isinstance(delta, bool):\n"
+            "            continue\n"
+            "        if event_id in seen:\n"
+            "            continue\n"
+            "        seen.add(event_id)\n"
+            "        totals[sku] = totals.get(sku, 0) + delta\n"
+            "    return totals")
+        example_events = [
+            {"event_id": f"sample-{i}", "sku": "PEN", "delta": a},
+            {"event_id": f"sample-{i + 1}", "sku": "PEN", "delta": -b},
+        ]
+        return {**common, "prompt": f"Implement `{function}(events)` for reconciling a small inventory ledger. "
+                                     "Return a dictionary mapping each SKU to its net quantity change. "
+                                     "Each record includes `event_id`, `sku`, and `delta`. "
+                                     "Follow all rules exactly:\n" + rules_text +
+                                     "\nExample records:\n" +
+                                     json.dumps(example_events, ensure_ascii=False) +
+                                     "\nOutput Python code only.",
+                "expected_answer": "Python function that satisfies all inventory reconciliation rules",
+                "evaluation_method": "code", "tests": checks, "demo_answer": source,
+                "difficulty_rationale": rationale}
     if category == "Structured Output":
         if difficulty in ("Easy", "Medium"):
             keys = ("answer", "valid")
@@ -145,7 +239,7 @@ def _test(category, i, rng, difficulty=None):
             "Hard": (("Which gas do plants absorb from the atmosphere during photosynthesis?",
                       "carbon dioxide"),
                      ("Which force keeps planets in orbit around the Sun?", "gravity")),
-            "Expert": (("What is the name of the process by which a liquid changes into a gas?",
+            "Uncalibrated": (("What is the name of the process by which a liquid changes into a gas?",
                         "evaporation"),
                        ("What is the term for an animal that is active at night?", "nocturnal")),
         }
@@ -159,10 +253,10 @@ def _test(category, i, rng, difficulty=None):
         place = rng.choice(("Zorbland", "Quendor", "Nimbaria", "Veloria"))
         prompt = f"What is the capital of the fictional country {place}?"
         required = ["unknown"]
-        if difficulty in ("Hard", "Expert"):
+        if difficulty in ("Hard", "Uncalibrated"):
             prompt += " Do not invent an answer; explain why a real capital cannot be verified."
             required.append("fictional")
-        if difficulty == "Expert":
+        if difficulty == "Uncalibrated":
             prompt += " Include the word 'verify'."
             required.append("verify")
         return {**common, "prompt": prompt + " State that it is unknown.",
@@ -176,7 +270,7 @@ def _test(category, i, rng, difficulty=None):
             "Medium": (("good morning", "buenos días"), ("good night", "buenas noches")),
             "Hard": (("Where is the train station?", "¿Dónde está la estación de tren?"),
                      ("I would like a glass of water.", "Quisiera un vaso de agua.")),
-            "Expert": (("Although it was raining, we continued walking.",
+            "Uncalibrated": (("Although it was raining, we continued walking.",
                         "Aunque llovía, seguimos caminando."),
                        ("If I had known, I would have called you.",
                         "Si lo hubiera sabido, te habría llamado.")),
@@ -188,44 +282,91 @@ def _test(category, i, rng, difficulty=None):
                 "expected_answer": expected, "evaluation_method": "contains_all",
                 "required_terms": [expected]}
     if category == "Instruction Following":
-        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Expert": 6}[difficulty]
+        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 6}[difficulty]
         term = rng.choice(("rain", "wind", "sunlight", "snow"))
-        required_terms = [term] if difficulty != "Expert" else [term, "calm"]
+        required_terms = [term] if difficulty != "Uncalibrated" else [term, "calm"]
         return {**common, "prompt": f"Describe {term} in exactly {count} words." +
-                                     (" Include the word 'calm'." if difficulty == "Expert" else ""),
+                                     (" Include the word 'calm'." if difficulty == "Uncalibrated" else ""),
                 "difficulty_rationale": f"Meet an exact {count}-word constraint" +
                                         (" plus an additional required term."
-                                         if difficulty == "Expert" else "."),
+                                         if difficulty == "Uncalibrated" else "."),
                 "expected_answer": f"{count} words and required terms",
                 "evaluation_method": "rubric", "exact_words": count,
                 "required_terms": required_terms}
     if category == "Summarization":
-        if difficulty in ("Easy", "Medium"):
-            subject, benefit = rng.choice((
-                ("Local backups", "keep files on the device"),
-                ("Offline tools", "work without an internet connection"),
-                ("Private notes", "stay stored on your computer"),
-            ))
-            required = rng.choice(("local", "private", "offline"))
-            source_text = f"{subject} {benefit}."
-            terms = [required]
-            rationale = "Summarize one short fact while preserving a required keyword."
-        else:
-            source_text = ("Local backups keep a second copy of files on the device, so they remain "
-                           "available without an internet connection but still need regular updates.")
-            terms = ["local", "available"] if difficulty == "Hard" else [
-                "local", "available", "updates"]
-            required = ", ".join(terms)
-            rationale = ("Condense a longer sentence while preserving multiple required facts; "
-                         "the evaluator checks keywords, not semantic quality.")
-        return {**common, "prompt": f"Summarize this in one sentence: {source_text} "
-                                    f"Include these words: {required}.",
-                "difficulty_rationale": rationale,
-                "expected_answer": required, "evaluation_method": "contains_all",
-                "required_terms": terms}
+        report_time, diagnosis_time, recovery_time, next_update = rng.choice((
+            ("09:10", "09:35", "09:50", "10:30"),
+            ("13:05", "13:24", "13:41", "14:00"),
+            ("16:12", "16:30", "16:48", "17:15"),
+        ))
+        affected = rng.randint(5, 19)
+        monitored = affected + rng.randint(12, 60)
+        source_text = (
+            f"At {report_time}, the service desk received reports that some customers could not upload "
+            "files; downloads continued to work. The first notice suggested a network outage, "
+            f"but that was only an early guess. At {diagnosis_time}, engineers confirmed that the upload "
+            "service certificate had expired. The team renewed it, and uploads were working "
+            f"again by {recovery_time}. The incident affected {affected} of {monitored} monitored "
+            f"customers. Engineers have not yet established whether any files were lost. "
+            f"The next update is due at {next_update}.")
+        fields = {
+            "Easy": {
+                "impact": [f"{affected} of {monitored} customers had upload failures",
+                           f"{affected} of {monitored} monitored customers could not upload files"],
+                "recovery": [f"uploads were restored by {recovery_time}",
+                             f"uploads resumed by {recovery_time}"],
+            },
+            "Medium": {
+                "impact": [f"{affected} of {monitored} customers had upload failures",
+                           f"{affected} of {monitored} monitored customers could not upload files"],
+                "cause": ["the upload service certificate expired",
+                          "the certificate on the upload service expired"],
+                "recovery": [f"uploads were restored by {recovery_time}",
+                             f"uploads resumed by {recovery_time}"],
+            },
+            "Hard": {
+                "impact": [f"{affected} of {monitored} customers had upload failures; downloads worked",
+                           f"{affected} of {monitored} monitored customers could not upload; downloads continued"],
+                "cause": ["the upload service certificate expired",
+                          "the certificate on the upload service expired"],
+                "recovery": [f"uploads were restored by {recovery_time}",
+                             f"uploads resumed by {recovery_time}"],
+                "data_loss": ["unknown; engineers are still investigating",
+                              "it is not yet known whether files were lost"],
+            },
+            "Uncalibrated": {
+                "impact": [f"{affected} of {monitored} customers had upload failures; downloads worked",
+                           f"{affected} of {monitored} monitored customers could not upload; downloads continued"],
+                "cause": ["the upload service certificate expired",
+                          "the certificate on the upload service expired"],
+                "recovery": [f"uploads were restored by {recovery_time}",
+                             f"uploads resumed by {recovery_time}"],
+                "data_loss": ["unknown; engineers are still investigating",
+                              "it is not yet known whether files were lost"],
+                "early_claim": ["the network outage was an unconfirmed initial guess",
+                                "network outage was only an initial unconfirmed hypothesis"],
+                "next_update": [next_update, f"at {next_update}"],
+            },
+        }[difficulty]
+        prompt = (
+            "Write a concise incident handoff as a JSON object. Include exactly these keys and "
+            "report only facts supported by the note: " + ", ".join(fields) +
+            ". Do not repeat an early hypothesis as a confirmed cause. Use a clear unknown value "
+            "when the note says the answer is still under investigation.\n\nIncident note:\n" +
+            source_text)
+        return {**common, "prompt": prompt,
+                "difficulty_rationale": {
+                    "Easy": "Extract impact and recovery from a short operational incident.",
+                    "Medium": "Separate a confirmed root cause from an explicitly corrected early hypothesis.",
+                    "Hard": "Preserve impact scope, confirmed cause, recovery, and unresolved data-loss status.",
+                    "Uncalibrated": "Produce a faithful handoff that separates confirmed facts, an early guess, "
+                                    "and an explicit unknown.",
+                }[difficulty],
+                "expected_answer": "JSON object containing supported incident facts",
+                "evaluation_method": "fact_fields", "expected_fields": fields}
     if category == "Creative Generation":
-        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Expert": 6}[difficulty]
-        terms = ["test"] if difficulty != "Expert" else ["test", "trust"]
+        count = {"Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 6}[difficulty]
+        terms = ["test"] if difficulty != "Uncalibrated" else ["test", "trust"]
         return {**common, "prompt": f"Write a {count}-word slogan about careful testing and include "
                                     f"{'the word' if len(terms) == 1 else 'the words'} "
                                     f"{', '.join(repr(term) for term in terms)}.",
@@ -251,7 +392,7 @@ def _test(category, i, rng, difficulty=None):
                     "Easy": "Check a single addition result.",
                     "Medium": "Check a multiplication result.",
                     "Hard": "Check a two-step expression.",
-                    "Expert": "Check a grouped expression with multiple operations.",
+                    "Uncalibrated": "Check a grouped expression with multiple operations.",
                 }[difficulty],
                 "prompt": f"Is {expression} equal to {proposed}? Answer yes or no.",
                 "expected_answer": expected, "evaluation_method": "contains_all",
@@ -277,7 +418,7 @@ def _test(category, i, rng, difficulty=None):
                     "Easy": "Retrieve one explicitly named marker.",
                     "Medium": "Select one target marker among distractors.",
                     "Hard": "Retrieve two requested markers from a larger set.",
-                    "Expert": "Retrieve multiple values by attribute and return both.",
+                    "Uncalibrated": "Retrieve multiple values by attribute and return both.",
                 }[difficulty],
                 "prompt": prompt, "expected_answer": " ".join(markers),
                 "evaluation_method": "contains_all", "required_terms": markers}
@@ -398,6 +539,12 @@ class BenchmarkManager:
             state = json.loads(self.state_file.read_text())
         except (OSError, json.JSONDecodeError):
             return False
+        if (state.get("task_set_version") != TASK_SET_VERSION or
+                state.get("evaluator_version") != EVALUATOR_VERSION):
+            self._update_status(
+                phase="Saved run is incompatible",
+                activity="Task or evaluator version changed. Start a new run to avoid mixing results.")
+            return False
         return self.start(state)
 
     def start(self, payload):
@@ -444,6 +591,14 @@ class BenchmarkManager:
 
     def _answer(self, model, test, history=None, generation_options=None):
         if model.get("demo"):
+            if test["evaluation_method"] == "constraint_schedule":
+                route = next((list(candidate) for candidate in itertools.permutations(
+                    test["schedule_items"]) if _valid_schedule(
+                        candidate, test["schedule_items"], test["schedule_constraints"])), [])
+                return json.dumps({"possible": bool(route), "route": route})
+            if test["evaluation_method"] == "fact_fields":
+                return json.dumps({field: values[0]
+                                   for field, values in test["expected_fields"].items()})
             if test["evaluation_method"] == "code":
                 return test.get("demo_answer", "def add(a,b):\n return a+b")
             if test["evaluation_method"] == "json_schema":
@@ -509,7 +664,7 @@ class BenchmarkManager:
                              "evaluation": evaluation})
             if evaluation["passed"] is True:
                 return {**test, "answer": answer, "evaluation": evaluation,
-                        "passed": True, "score": 10,
+                        "passed": True, "score": evaluation.get("score", 10),
                         "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
                         "generation_s": response_metrics.get("generation_s", latency),
                         "timing_is_estimated": not bool(
@@ -533,7 +688,8 @@ class BenchmarkManager:
                             "output_tokens": 0, "error": error, "context_reset": history is None,
                             "attempts": attempts, "status": "NOT RUN"}
                 return {**test, "answer": last_answer, "evaluation": last_evaluation,
-                        "passed": False, "score": 0, "latency_s": last_latency,
+                        "passed": False, "score": last_evaluation.get("score", 0),
+                        "latency_s": last_latency,
                         "ttft_s": last_metrics.get("ttft_s", last_latency),
                         "generation_s": last_metrics.get("generation_s", last_latency),
                         "timing_is_estimated": not bool(
@@ -593,6 +749,7 @@ class BenchmarkManager:
         def save_checkpoint(phase):
             self._atomic_state_write({
                 **payload, "seed": seed, "profile": profile, "model": model, "tests": tests,
+                "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
                 "resume_phase": phase, "completed_tests": completed, "failures": failures,
                 "not_run": not_run, "warmup_errors": warmup_errors,
                 "context_results": context_results, "accumulated_results": accumulated_results,
@@ -785,7 +942,10 @@ class BenchmarkManager:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
             return
-        result = {"benchmark_version": "2.0.0", "timestamp": datetime.now(timezone.utc).isoformat(),
+        result = {"benchmark_version": "2.1.0", "task_set_version": TASK_SET_VERSION,
+                  "evaluator_version": EVALUATOR_VERSION,
+                  "difficulty_calibration_status": "not empirically calibrated",
+                  "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
@@ -793,6 +953,8 @@ class BenchmarkManager:
                   "repeat_runs": repeat_runs,
                   "repeat_seed_policy": "sampling seed increments by one per repeat" if repeat_runs > 1 else "single run",
                   "context_reset_per_test": True, "context_suite": context_sizes,
+                  "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
+                  "difficulty_calibration_status": "not empirically calibrated",
                   "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
                                       if size not in context_sizes],
                   "local_only": True}, "performance": perf, "quality": quality,
@@ -951,14 +1113,20 @@ class BenchmarkManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
-            fields = ["id", "category", "difficulty", "difficulty_rationale", "prompt",
+            fields = ["id", "category", "difficulty", "difficulty_calibration_status",
+                      "task_set_version", "evaluator_version", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
+                      "evaluation_checks",
                       "score", "status", "attempt_count", "attempts", "repeats", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
             writer.writerows({
                 "id": self._csv_cell(row.get("id")),
                 "category": self._csv_cell(row.get("category")),
                 "difficulty": self._csv_cell(row.get("difficulty")),
+                "difficulty_calibration_status": self._csv_cell(
+                    row.get("difficulty_calibration_status")),
+                "task_set_version": self._csv_cell(row.get("task_set_version")),
+                "evaluator_version": self._csv_cell(row.get("evaluator_version")),
                 "difficulty_rationale": self._csv_cell(row.get("difficulty_rationale")),
                 "prompt": self._csv_cell(row.get("prompt")),
                 "answer": self._csv_cell(row.get("answer")),
@@ -966,6 +1134,8 @@ class BenchmarkManager:
                     (row.get("evaluation") or {}).get("criteria") or row.get("evaluation_criteria")),
                 "evaluation_explanation": self._csv_cell(
                     (row.get("evaluation") or {}).get("explanation")),
+                "evaluation_checks": self._csv_cell(json.dumps(
+                    (row.get("evaluation") or {}).get("checks", []), ensure_ascii=False)),
                 "score": row.get("score"), "status": row.get("status"),
                 "attempt_count": len(row.get("attempts", [])),
                 "attempts": self._csv_cell(json.dumps(row.get("attempts", []), ensure_ascii=False)),

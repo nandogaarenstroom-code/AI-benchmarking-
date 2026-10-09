@@ -29,6 +29,29 @@ def _contains_term(text, term):
     )
 
 
+def _normalized_value(value):
+    return " ".join(re.findall(r"\w+", str(value).casefold(), flags=re.UNICODE))
+
+
+def _schedule_is_valid(route, items, constraints):
+    if (not isinstance(route, list) or len(route) != len(items) or
+            any(not isinstance(item, str) for item in route) or
+            len(set(route)) != len(items) or set(route) != set(items)):
+        return False
+    position = {item: index for index, item in enumerate(route)}
+    for rule in constraints:
+        kind = rule.get("kind")
+        if kind == "before" and position[rule["first"]] >= position[rule["second"]]:
+            return False
+        if kind == "immediately_before" and position[rule["second"]] != position[rule["first"]] + 1:
+            return False
+        if kind == "not_adjacent" and abs(position[rule["first"]] - position[rule["second"]]) == 1:
+            return False
+        if kind == "fixed_position" and position[rule["item"]] != rule["position"]:
+            return False
+    return True
+
+
 def evaluation_criteria(test):
     method = test.get("evaluation_method")
     if method in ("numeric_exact", "numeric"):
@@ -40,6 +63,12 @@ def evaluation_criteria(test):
         return "Valid JSON object must contain " + ", ".join(
             f"{key} ({types[key]})" if key in types else key
             for key in test.get("required_keys", [])) + "."
+    if method == "constraint_schedule":
+        return ("Return a JSON object with the correct possible flag and a route that visits every "
+                "stop exactly once while satisfying all listed constraints.")
+    if method == "fact_fields":
+        return ("Return a JSON object with exactly the requested factual fields; each field must "
+                "match one of its documented acceptable summaries.")
     if method == "contains_all":
         return "Response must contain all required terms: " + ", ".join(
             str(term) for term in test.get("required_terms", [])) + "."
@@ -115,6 +144,66 @@ def evaluate_with_details(test, answer):
         passed = not missing
         explanation = ("All required terms were found." if passed else
                        "Missing required term(s): " + ", ".join(missing) + ".")
+    elif method == "constraint_schedule":
+        items = test.get("schedule_items", [])
+        constraints = test.get("schedule_constraints", [])
+        try:
+            value = json.loads(answer)
+            valid_object = isinstance(value, dict)
+        except (json.JSONDecodeError, TypeError):
+            value, valid_object = {}, False
+        possible = value.get("possible") if valid_object else None
+        route = value.get("route") if valid_object else None
+        checks = [
+            {"name": "JSON object", "passed": valid_object},
+            {"name": "Possible flag", "passed": isinstance(possible, bool) and
+             possible == test.get("schedule_possible"),
+             "expected": test.get("schedule_possible"), "actual": possible},
+        ]
+        if test.get("schedule_possible"):
+            route_shape = (isinstance(route, list) and len(route) == len(items) and
+                           all(isinstance(item, str) for item in route) and
+                           len(set(route)) == len(items) and set(route) == set(items))
+            checks.append({"name": "Every stop used exactly once", "passed": route_shape})
+            for rule in constraints:
+                try:
+                    rule_passed = route_shape and _schedule_is_valid(route, items, [rule])
+                except (KeyError, TypeError, ValueError):
+                    rule_passed = False
+                checks.append({"name": f"Constraint: {rule.get('kind')}", "passed": rule_passed})
+        else:
+            checks.append({"name": "No route returned for impossible case",
+                           "passed": route == []})
+        successes = sum(check["passed"] for check in checks)
+        score = round(10 * successes / len(checks), 2)
+        passed = successes == len(checks)
+        explanation = (f"{successes} of {len(checks)} route checks passed." if valid_object else
+                       "The response is not a valid JSON object.")
+    elif method == "fact_fields":
+        expected_fields = test.get("expected_fields", {})
+        try:
+            value = json.loads(answer)
+            valid_object = isinstance(value, dict)
+        except (json.JSONDecodeError, TypeError):
+            value, valid_object = {}, False
+        checks = [
+            {"name": "JSON object", "passed": valid_object},
+            {"name": "Exact requested keys",
+             "passed": valid_object and set(value) == set(expected_fields),
+             "expected": sorted(expected_fields),
+             "actual": sorted(value) if valid_object else None},
+        ]
+        for field, acceptable in expected_fields.items():
+            actual = value.get(field) if valid_object else None
+            accepted = {_normalized_value(item) for item in acceptable}
+            checks.append({"name": field,
+                           "passed": valid_object and _normalized_value(actual) in accepted,
+                           "expected": acceptable, "actual": actual})
+        successes = sum(check["passed"] for check in checks)
+        score = round(10 * successes / len(checks), 2)
+        passed = successes == len(checks)
+        explanation = (f"{successes} of {len(checks)} format and factual checks passed." if valid_object else
+                       "The response is not a valid JSON object.")
     elif method == "code":
         if not code_evaluator_available():
             return {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -143,8 +232,12 @@ def evaluate_with_details(test, answer):
         passed = answer == str(expected)
         explanation = "Response exactly matches the expected answer." if passed else (
             f"Response did not exactly match expected answer {expected!r}.")
-    return {"passed": passed, "status": "PASS" if passed else "FAILED",
-            "criteria": criteria, "explanation": explanation}
+    result = {"passed": passed, "status": "PASS" if passed else "FAILED",
+              "criteria": criteria, "explanation": explanation}
+    if method in ("constraint_schedule", "fact_fields"):
+        result["score"] = score
+        result["checks"] = checks
+    return result
 
 
 def evaluate(test, answer):

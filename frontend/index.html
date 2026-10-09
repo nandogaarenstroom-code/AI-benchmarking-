@@ -146,11 +146,12 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <table id="categories"><caption class="sr-only">Exact benchmark category scores</caption></table>
   <h3>Test-by-test results</h3>
   <p class="muted">Review every prompt, difficulty, model answer, evaluator check, and retry. This is the observable evidence used for scoring—not private chain-of-thought.</p>
+  <p class="muted">Difficulty labels are task-construction tiers, not calibrated estimates of human or model difficulty. The top pilot tier is labeled Uncalibrated.</p>
   <div id="difficulty-summary" class="grid"></div>
   <div class="test-filters">
     <label>Difficulty
       <select id="difficulty-filter">
-        <option value="all">All levels</option><option>Easy</option><option>Medium</option><option>Hard</option><option>Expert</option>
+        <option value="all">All levels</option><option>Easy</option><option>Medium</option><option>Hard</option><option>Uncalibrated</option>
       </select>
     </label>
     <label>Outcome
@@ -391,7 +392,7 @@ function renderTestResults(result){
   const tests=result.tests||[],difficulty=$('difficulty-filter').value,outcome=$('outcome-filter').value;
   const counts=result.summary?.by_difficulty||{};
   const summary=$('difficulty-summary');summary.replaceChildren();
-  ['Easy','Medium','Hard','Expert'].forEach(level=>{
+  ['Easy','Medium','Hard','Uncalibrated'].forEach(level=>{
     const levelItems=tests.filter(test=>test.difficulty===level);
     const passed=levelItems.filter(test=>test.status==='PASS').length;
     const failed=levelItems.filter(test=>test.status==='FAILED').length;
@@ -415,6 +416,8 @@ function renderTestResults(result){
       (test.score===null||test.score===undefined?'':` · ${test.score}/${test.max_score??10}`);
     record.className='test-record';record.append(heading);
     addTestField(record,'Why this difficulty',test.difficulty_rationale);
+    if(test.difficulty_calibration_status)
+      addTestField(record,'Difficulty calibration',test.difficulty_calibration_status);
     addTestField(record,'Prompt',test.prompt,true);
     addTestField(record,'What the evaluator checked',
       test.evaluation?.criteria||test.evaluation_criteria);
@@ -424,6 +427,8 @@ function renderTestResults(result){
       addTestField(record,'Code assertions',test.tests.join('\n'),true);
     addTestField(record,test.replicates?.length?'First repeat model answer':'Model answer',test.answer,true);
     const evaluation=test.evaluation||{};
+    if(evaluation.checks?.length)
+      addTestField(record,'Criterion-level evidence',JSON.stringify(evaluation.checks,null,2),true);
     addTestField(record,'Outcome explanation',evaluation.explanation||
       (test.status==='NOT RUN'?'The evaluator could not run this test.':
        test.status==='PASS'?'The evaluation criteria passed.':'The evaluation criteria did not pass.'));

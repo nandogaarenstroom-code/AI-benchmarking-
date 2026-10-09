@@ -31,7 +31,11 @@ def write_pdf(path, result):
              f"Date: {result['timestamp']}", f"Quality: {score('quality')}",
              f"Performance: {score('performance')}",
              f"Overall: {score('overall')}",
+             f"Task set / evaluator: {result.get('task_set_version', 'unknown')} / "
+             f"{result.get('evaluator_version', 'unknown')}",
              f"Tests: {passed} passed, {failed} failed, {not_run} not run",
+             "Difficulty tiers are not empirically calibrated.",
+             "Pilot coverage: constraint reasoning, inventory code, incident handoff.",
              "", "Methodology: deterministic generated tasks with documented rule-based checks.",
              "Measurements are controlled benchmark results, not universal guarantees."]
     text = "BT /F1 12 Tf 48 760 Td " + " ".join(f"({line.replace('(', '[').replace(')', ']')}) Tj 0 -20 Td" for line in lines) + " ET"

@@ -16,17 +16,18 @@ Every generated test contains:
 - `expected_answer` or expected terms/schema
 - `evaluation_method`
 - `max_score` (`10`)
+- `task_set_version` and `evaluator_version`
+- `difficulty_calibration_status`
 
 Tests are generated deterministically from a seed. Prompt fingerprints are checked so duplicate
-prompts are avoided. Every profile includes **Easy**, **Medium**, **Hard**, and **Expert** tiers,
-including `QUICK`. Tiers are operational descriptions of task construction, not a standardized,
-independently calibrated difficulty scale. Mathematics progresses from single-digit addition to
-grouped multi-step arithmetic. Coding progresses from a basic operation to preserving order while
-deduplicating values with edge-case checks.
+prompts are avoided. Every profile includes **Easy**, **Medium**, **Hard**, and **Uncalibrated** tiers,
+including `QUICK`. These are task-construction tiers, not empirically measured difficulty. The
+Uncalibrated label is deliberate: no human study or representative model cohort has been run to
+establish how difficult these items are. Results record task-set and evaluator versions so a future
+revision can be distinguished from this pilot.
 
-Each result records the rationale for an individual test's tier. Compare difficulty primarily within
-the same category: task types vary, so an Expert knowledge-recall item is not necessarily as hard as
-an Expert coding item.
+Each result records the rationale for an individual test's tier. Comparisons should be made within
+the same category and task-set version, and are still not difficulty-calibrated.
 
 ## Profiles
 
@@ -52,32 +53,40 @@ are documented exactly below.
 
 **Prompt:** Seeded arithmetic varies by tier: single-digit addition (Easy), two-digit
 multiplication (Medium), multiplication plus addition (Hard), and grouped multi-operation
-arithmetic (Expert).
+arithmetic (Uncalibrated).
 
 **Evaluation:** Extract the first numeric value from the response and compare it with the generated
 answer using zero tolerance.
 
 ### Reasoning
 
-**Prompt:** Easy items apply one rule; higher tiers chain category rules and exclusions.
+**Prompt:** The original courier-route pilot requires a valid ordering of stops. Progression adds
+precedence, immediate adjacency, non-adjacency, and fixed-position constraints. Some Uncalibrated
+items deliberately contain incompatible constraints and require the model to report that no route
+exists.
 
-**Evaluation:** The response must contain every displayed required term. This checks the stated
-conclusion words, not a free-form proof.
+**Evaluation:** Parse JSON, check the possible/impossible decision, route membership and uniqueness,
+and each route constraint separately. The score is proportional to checks passed, so a partially
+valid proposed route earns partial credit. This is an original synthetic constraint-planning pilot,
+not a calibrated general reasoning measure.
 
 ### Coding
 
-**Prompt:** Tasks progress from a basic arithmetic function to collection processing and stable
-deduplication.
+**Prompt:** The original inventory-ledger pilot asks for `reconcile_stock_events(events)`, which
+aggregates signed stock changes by SKU. Higher construction tiers introduce duplicate event IDs,
+invalid records, boolean-vs-integer handling, zero-net totals, and duplicate IDs that cross SKUs.
 
-**Evaluation:** The returned source is combined with the test's displayed sandbox assertions. For
-example:
+**Evaluation:** The returned source is combined with generated sandbox assertions. For example:
 
 ```python
-assert add(2, 3) == 5
-assert add(-1, 1) == 0
+assert reconcile_stock_events([
+    {"event_id": "a", "sku": "PEN", "delta": 4},
+    {"event_id": "b", "sku": "PEN", "delta": -1},
+]) == {"PEN": 3}
 ```
 
-The code evaluator returns a pass only when all assertions complete successfully. A failed run says
+The generated inventory tests exercise valid aggregation, duplicate suppression, malformed records,
+and reconciliation edge cases. The code evaluator returns a pass only when all assertions complete successfully. A failed run says
 one or more assertions failed; process output is suppressed, so the UI does not claim to identify
 which assertion failed. Code execution is bounded by source length and timeout and occurs only in a
 network-disabled, read-only Docker container with CPU, memory, and process limits. If Docker is
@@ -118,17 +127,22 @@ translations may be rejected; this evaluator is not a human language-quality jud
 
 ### Instruction Following
 
-**Prompt:** Describe a seeded subject using an exact word count (3–6 words); Expert tasks also have
+**Prompt:** Describe a seeded subject using an exact word count (3–6 words); Uncalibrated tasks also have
 an additional required term.
 
 **Evaluation:** Check exact word count and required terms. Semantic relevance is not evaluated.
 
 ### Summarization
 
-**Prompt:** Summarize a seeded statement; harder tiers require preserving additional keywords.
+**Prompt:** The original incident-handoff pilot summarizes an operations incident with a preliminary
+but unconfirmed hypothesis, a later confirmed cause, affected scope, recovery time, unresolved data
+loss, and a promised update. Higher tiers request more of these distinctions in JSON.
 
-**Evaluation:** Check required keywords only. This does not evaluate whether the summary is
-semantically correct or complete.
+**Evaluation:** Parse a JSON object, require exactly the requested keys, and compare each field
+against its declared acceptable factual summaries. Every format/key/fact check is shown in the result
+and contributes to proportional partial credit. This tests selected fact retention and contradiction
+handling, not open-ended summary quality; paraphrases outside the declared alternatives may be
+rejected, so evaluators require review before broader use.
 
 ### Creative Generation
 
@@ -152,10 +166,15 @@ their order.
 
 ## Automatic scoring
 
-Each passing primary test receives `10/10`; a completed failed test receives `0/10`. A test whose
-required evaluator cannot run or whose model never returns an answer is **NOT RUN**, receives no
-score, and is excluded from quality averages. Categories without completed applicable tests are
+A fully passing primary test receives `10/10`; a completed failing test receives `0/10` unless its
+evaluator supports partial credit. The reasoning and summarization pilots award proportional credit
+across their disclosed checks. Coding remains all-or-nothing across its sandbox assertions. A test
+whose required evaluator cannot run or whose model never returns an answer is **NOT RUN**, receives
+no score, and is excluded from quality averages. Categories without completed applicable tests are
 recorded as `null`/not tested rather than zero.
+
+Task and evaluator revisions increment their respective recorded version identifiers; scores from
+different versions should not be treated as directly comparable without reviewing the changes.
 
 The result also records:
 
