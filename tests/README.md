@@ -77,15 +77,15 @@ The automated suite does not currently verify:
 
 - live Ollama, LM Studio, or OpenAI-compatible servers
 - live streaming behavior across real servers or every adapter failure mode
-- HTTP routes and status codes
+- all HTTP routes and status codes (the suite covers representative security, validation, and cancel cases)
 - browser rendering and user interactions
-- cancellation during every phase or corrupt state handling
+- cancellation responsiveness during every model request or every phase, and corrupted resume-state recovery
 - retry behavior and all evaluator edge cases
-- performance metric accuracy or concurrency behavior
+- accuracy of real-server performance metrics or concurrency behavior
 - output report contents beyond selected JSON fields
 - Docker isolation or adversarial generated code
 - cross-platform behavior
-- browser rendering, saved-history interactions, keyboard chart navigation, or live model-server compatibility
+- saved-history interactions, keyboard chart navigation, or live model-server compatibility
 
 Accordingly, a passing suite shows that the covered core paths still behave as expected. It does not
 prove model quality, benchmark validity, security against hostile code, real-server compatibility,
