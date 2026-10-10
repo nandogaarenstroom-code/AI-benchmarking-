@@ -50,12 +50,14 @@ class CalibrationTests(unittest.TestCase):
                      reviewer1_pass="false", reviewer2_pass="false"),
             response(cohort_type="model", cohort_label="model-a@v1", respondent_id="m1"),
             response(task_set_version="pilot-2", respondent_id="h3"),
+            response(run_config_id="model-config-2", cohort_type="model",
+                     cohort_label="model-a@v1", respondent_id="m1"),
             response(category="Coding", item_id="code-1", item_instance_id="code-1@seed1",
                      item_fingerprint="def456", respondent_id="h4"),
         ]
         report = analyze(load_responses(self.write_csv(rows)))
         groups = report["groups"]
-        self.assertEqual(len(groups), 4)
+        self.assertEqual(len(groups), 5)
         self.assertEqual({group["cohort_type"] for group in groups}, {"human", "model"})
         self.assertEqual({group["task_set_version"] for group in groups}, {"pilot-1", "pilot-2"})
         hard = next(group for group in groups if group["task_set_version"] == "pilot-1" and
@@ -63,6 +65,7 @@ class CalibrationTests(unittest.TestCase):
         tier = next(item for item in hard["tier_results"] if item["tier"] == "Hard")
         self.assertEqual(tier["pass_rate"], 0.5)
         self.assertEqual(tier["mean_score_fraction"], 0.5)
+        self.assertGreater(tier["pass_rate_interval"]["low"], 0)
         self.assertEqual(tier["respondent_count"], 2)
         self.assertEqual(tier["pass_rate_interval"]["method"],
                          "95% respondent-cluster bootstrap (2000 resamples)")
@@ -83,6 +86,9 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(report["reviewer_agreement"]["paired_reviews"], 2)
         self.assertEqual(report["reviewer_agreement"]["exact_agreement"], 1)
         self.assertEqual(report["reviewer_agreement"]["evaluator_vs_unanimous_review"], 1)
+        item = report["item_results"][0]
+        self.assertEqual(item["repeat_pairs"], 1)
+        self.assertEqual(item["repeat_agreement"], 0)
 
     def test_unscored_responses_and_undefined_intervals_are_not_zero(self):
         report = analyze(load_responses(self.write_csv([
@@ -104,6 +110,32 @@ class CalibrationTests(unittest.TestCase):
             load_responses(self.write_csv([response(evaluator_pass="maybe")]))
         records = load_responses(self.write_csv([response(evaluator_pass="", score="")]))
         self.assertTrue(records[0]["unscored"])
+
+    def test_item_instances_are_not_merged_and_discrimination_is_reported(self):
+        rows = []
+        for index, result in enumerate((True, True, False, False)):
+            rows.append(response(
+                respondent_id=f"person-{index}",
+                evaluator_pass=str(result).lower(),
+                score="10" if result else "0",
+                reviewer1_pass=str(result).lower(), reviewer2_pass=str(result).lower(),
+            ))
+        for index, result in enumerate((True, False, True, False)):
+            rows.append(response(
+                item_instance_id="route-family-1@seed2", item_fingerprint="xyz987",
+                respondent_id=f"person-{index}",
+                evaluator_pass=str(result).lower(),
+                score="10" if result else "0",
+                reviewer1_pass=str(result).lower(), reviewer2_pass=str(result).lower(),
+            ))
+        report = analyze(load_responses(self.write_csv(rows)))["groups"][0]
+        self.assertEqual(len(report["item_results"]), 2)
+        self.assertEqual({item["item_instance_id"] for item in report["item_results"]},
+                         {"route-family-1@seed1", "route-family-1@seed2"})
+        self.assertTrue(all(item["pass_rate_interval"]["method"].startswith("95% Wilson")
+                            for item in report["item_results"]))
+        self.assertTrue(all(item["item_rest_correlation"] is not None
+                            for item in report["item_rest_discrimination"]))
 
 
 if __name__ == "__main__":

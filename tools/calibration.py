@@ -24,6 +24,7 @@ BOOLEAN_FIELDS = (
     "reviewer1_ambiguous", "reviewer2_ambiguous",
 )
 BOOTSTRAP_SAMPLES = 2000
+WILSON_Z = 1.959963984540054
 
 
 class CalibrationDataError(ValueError):
@@ -124,6 +125,21 @@ def _cluster_interval(respondent_values, seed_text):
             "method": f"95% respondent-cluster bootstrap ({BOOTSTRAP_SAMPLES} resamples)"}
 
 
+def _wilson_interval(successes, total):
+    """Wilson score interval for a binary proportion; None for no scored responses."""
+    if not total:
+        return None
+    z2 = WILSON_Z ** 2
+    proportion = successes / total
+    denominator = 1 + z2 / total
+    center = (proportion + z2 / (2 * total)) / denominator
+    margin = WILSON_Z * math.sqrt(
+        proportion * (1 - proportion) / total + z2 / (4 * total ** 2)) / denominator
+    return {"low": round(max(0, center - margin), 4),
+            "high": round(min(1, center + margin), 4),
+            "method": "95% Wilson score interval; item respondents only"}
+
+
 def _cohen_kappa(pairs):
     if not pairs:
         return None
@@ -171,13 +187,22 @@ def analyze(records):
         for row in group:
             all_by_identity[(row["tier"], row["item_instance_id"],
                              row["respondent_id"])].append(row)
-            if row["reviewer1_pass"] is not None and row["reviewer2_pass"] is not None:
+            if (row["repeat_index"] == 1 and row["reviewer1_pass"] is not None and
+                    row["reviewer2_pass"] is not None):
                 pair = (row["reviewer1_pass"], row["reviewer2_pass"])
                 reviewers.append(pair)
                 if row["repeat_index"] == 1 and row["evaluator_pass"] is not None:
                     consensus = pair[0] if pair[0] == pair[1] else None
                     if consensus is not None:
                         evaluator_consensus.append((row["evaluator_pass"], consensus))
+
+        item_repeatability = defaultdict(list)
+        for (tier, instance_id, _respondent), rows in all_by_identity.items():
+            ordered = sorted(rows, key=lambda row: row["repeat_index"])
+            first_outcome = ordered[0]["evaluator_pass"]
+            item_repeatability[(tier, instance_id)].extend(
+                (first_outcome, row["evaluator_pass"]) for row in ordered[1:]
+                if first_outcome is not None and row["evaluator_pass"] is not None)
 
         item_reports = []
         for (tier, instance_id), rows in sorted(item_rows.items()):
@@ -187,6 +212,14 @@ def analyze(records):
                              row["reviewer2_pass"] is not None]
             score_fractions = [row["score"] / row["max_score"] for row in rows
                                if row["score"] is not None]
+            item_review_pairs = [(row["reviewer1_pass"], row["reviewer2_pass"])
+                                 for row in reviewer_rows]
+            item_consensus = [
+                (row["evaluator_pass"], row["reviewer1_pass"])
+                for row in reviewer_rows if row["evaluator_pass"] is not None and
+                row["reviewer1_pass"] == row["reviewer2_pass"]
+            ]
+            item_repeats = item_repeatability[(tier, instance_id)]
             item_reports.append({
                 "item_id": rows[0]["item_id"], "item_instance_id": instance_id,
                 "item_fingerprint": rows[0]["item_fingerprint"],
@@ -195,10 +228,20 @@ def analyze(records):
                 "scored_first_responses": len(scored),
                 "unscored_first_responses": len(rows) - len(scored),
                 "pass_rate": round(pass_count / len(scored), 4) if scored else None,
+                "pass_rate_interval": _wilson_interval(pass_count, len(scored)),
                 "reviewer_pairs": len(reviewer_rows),
-                "reviewer_agreement": round(sum(
-                    row["reviewer1_pass"] == row["reviewer2_pass"]
-                    for row in reviewer_rows) / len(reviewer_rows), 4) if reviewer_rows else None,
+                "reviewer_agreement": round(sum(a == b for a, b in item_review_pairs) /
+                                            len(item_review_pairs), 4)
+                if item_review_pairs else None,
+                "reviewer_kappa": _cohen_kappa(item_review_pairs),
+                "evaluator_vs_unanimous_review": round(sum(a == b for a, b in item_consensus) /
+                                                       len(item_consensus), 4)
+                if item_consensus else None,
+                "evaluator_review_pairs": len(item_consensus),
+                "repeat_pairs": len(item_repeats),
+                "repeat_agreement": round(sum(a == b for a, b in item_repeats) /
+                                          len(item_repeats), 4)
+                if item_repeats else None,
                 "ambiguous_reviews": sum(
                     row["reviewer1_ambiguous"] is True or
                     row["reviewer2_ambiguous"] is True for row in rows),
@@ -230,6 +273,7 @@ def analyze(records):
                     if respondent_values else None,
                 "pass_rate_interval": _cluster_interval(
                     respondent_values, f"{scope_label}|{tier}") if respondent_values else None,
+                "response_level_wilson_interval": _wilson_interval(successes, len(scored)),
                 "mean_score_fraction": round(sum(tier_scores) / len(tier_scores), 4)
                 if tier_scores else None,
             })

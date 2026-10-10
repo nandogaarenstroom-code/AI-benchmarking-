@@ -98,7 +98,9 @@ python tools/calibration.py path/to/responses.csv --output path/to/calibration-r
 
 The dependency-free analyzer reports, separately for each version/category/cohort:
 
-- per-item-instance first-response counts, pass rates, unscored counts, and normalized partial-score means
+- per-item-instance first-response counts, pass rates with Wilson intervals, unscored counts,
+  reviewer disagreement, evaluator agreement with unanimous reviews, repeat consistency, and
+  normalized partial-score means
 - tier pass rates and respondent-cluster bootstrap intervals (95%, 2,000 resamples)
 - normalized score means (score divided by that response's max score)
 - per-item item-rest Pearson correlation within a tier when enough variable data exists
@@ -107,9 +109,10 @@ The dependency-free analyzer reports, separately for each version/category/cohor
   reviewer pairs
 - ambiguity counts and missing outcome counts
 
-Intervals are descriptive pilot uncertainty, not evidence that a tier is certified. The bootstrap
-resamples respondents as clusters when summarizing tier responses; it does not establish
-generalizability beyond the observed cohort. Item-rest correlations are undefined for small or
+Intervals are descriptive pilot uncertainty, not evidence that a tier is certified. The bootstrap resamples respondents as clusters when summarizing tier responses; the additional
+response-level Wilson interval does not account for correlation among multiple items answered by one
+person and is only a descriptive reference. Neither interval establishes generalizability beyond the
+observed cohort. Item-rest correlations are undefined for small or
 constant samples, and are not a standalone validity test. Repeated generations do not count as
 independent models or participants.
 
