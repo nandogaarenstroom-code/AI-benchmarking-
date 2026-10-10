@@ -17,7 +17,16 @@ server, network access, Docker, or third-party packages.
 
 ## What each test verifies
 
-All current tests are in `tests/test_benchmark.py`.
+Tests are in `tests/test_benchmark.py` and `tests/test_calibration.py`.
+
+### Calibration analysis
+
+The calibration-tool tests validate CSV schema and duplicate rejection, cohort/version separation,
+respondent-cluster intervals, missing outcomes, reviewer agreement, and repeatability calculations
+using synthetic fixtures. These fixtures validate the analyzer only; they are not evidence about
+model or human difficulty. Task-generation tests also verify seeded item fingerprints distinguish
+exact generated prompt/check variants. See [`CALIBRATION_STUDY.md`](../CALIBRATION_STUDY.md) for
+the data-collection protocol and analysis limits.
 
 ### Generation settings
 
@@ -26,6 +35,17 @@ Ollama and OpenAI-compatible adapters. The demo export test also verifies the se
 retained in result configuration. It does not replace integration testing against live servers.
 Additional coverage verifies repeated-run score metadata and that runtime details are included only
 when reported by the local server.
+
+Streaming adapter tests cover first-content TTFT measurement, timeout error mapping, malformed event
+handling, and size-bounded discovery responses. Evaluator checks cover JSON value types and exact
+word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
+samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
+cancellation during context tests. Difficulty-generation coverage checks that all four tiers appear
+in QUICK and that every primary category spans all tiers in FULL. It also checks varied
+reasoning/summarization items, two coding task families, and generated long-context tasks.
+Test-result coverage verifies
+prompt/evaluator explanations, answer traces, and that unavailable evaluators produce unscored
+NOT RUN outcomes.
 
 ### `test_domain_evaluators`
 
@@ -70,15 +90,16 @@ PDF/CSV content and schema completeness are not deeply validated.
 The automated suite does not currently verify:
 
 - live Ollama, LM Studio, or OpenAI-compatible servers
-- streaming edge cases, timeouts, malformed responses, or adapter error mapping
-- HTTP routes and status codes
+- live streaming behavior across real servers or every adapter failure mode
+- all HTTP routes and status codes (the suite covers representative security, validation, and cancel cases)
 - browser rendering and user interactions
-- cancellation, interrupted-run resume, or corrupt state handling
+- cancellation responsiveness during every model request or every phase, and corrupted resume-state recovery
 - retry behavior and all evaluator edge cases
-- performance metric accuracy or concurrency behavior
+- accuracy of real-server performance metrics or concurrency behavior
 - output report contents beyond selected JSON fields
 - Docker isolation or adversarial generated code
 - cross-platform behavior
+- saved-history interactions, keyboard chart navigation, or live model-server compatibility
 
 Accordingly, a passing suite shows that the covered core paths still behave as expected. It does not
 prove model quality, benchmark validity, security against hostile code, real-server compatibility,

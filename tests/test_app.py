@@ -70,6 +70,27 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 415)
         self.assertIsNone(self.manager.payload)
 
+    def test_malformed_json_and_invalid_profiles_are_rejected(self):
+        headers = {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        }
+        status, _ = self.request("/api/benchmark", "{", headers)
+        self.assertEqual(status, 400)
+        status, _ = self.request("/api/benchmark", json.dumps({"profile": "UNKNOWN"}), headers)
+        self.assertEqual(status, 400)
+        self.assertIsNone(self.manager.payload)
+
+    def test_cancel_endpoint_uses_protected_post_route(self):
+        status, body = self.request("/api/cancel", "{}", {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"cancelled": False})
+
     def test_valid_request_drops_caller_supplied_tests(self):
         status, _ = self.request("/api/benchmark", json.dumps({
             "profile": "QUICK", "tests": [{"evaluation_method": "code", "tests": ["raise Exception()"]}],

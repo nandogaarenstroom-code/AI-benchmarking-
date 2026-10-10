@@ -16,10 +16,28 @@ Every generated test contains:
 - `expected_answer` or expected terms/schema
 - `evaluation_method`
 - `max_score` (`10`)
+- `task_set_version` and `evaluator_version`
+- `item_instance_id` and `item_fingerprint` for the exact generated variant and checks
+- `difficulty_calibration_status`
+
+`subcategory` identifies the task family within a category and is included in CSV exports. Keep it
+when stratifying calibration or comparing task families.
 
 Tests are generated deterministically from a seed. Prompt fingerprints are checked so duplicate
-prompts are avoided. The difficulty labels cycle through **Easy**, **Medium**, **Hard**, and
-**Expert**.
+prompts are avoided. Every profile includes **Easy**, **Medium**, **Hard**, and **Uncalibrated** tiers,
+including `QUICK`. These are task-construction tiers, not empirically measured difficulty. The
+Uncalibrated label is deliberate: no human study or representative model cohort has been run to
+establish how difficult these items are. Results record task-set and evaluator versions so a future
+revision can be distinguished from this pilot.
+
+Each result records the rationale for an individual test's tier and a task-family `subcategory`.
+Comparisons should be made within the same category, subcategory, and task-set version, and are still
+not difficulty-calibrated.
+The dashboard also displays a per-test model-relative solve meter from the evaluator score and repeat
+outcomes. A successful answer means only that the selected model passed this test under this run's
+settings; partial credit, inconsistent repeats, and failures are shown distinctly. This meter does not
+establish general task difficulty. Demo-generated answers are labeled demo-only, while unavailable
+evaluations are not measured rather than failures.
 
 ## Profiles
 
@@ -43,106 +61,145 @@ are documented exactly below.
 
 ### Mathematics
 
-**Prompt:** A parameterized multiplication problem such as:
+**Prompt:** Seeded arithmetic varies by tier: single-digit addition (Easy), two-digit
+multiplication (Medium), multiplication plus addition (Hard), and grouped multi-operation
+arithmetic (Uncalibrated).
 
-> Calculate `a × b`. Return only the number.
-
-`a` and `b` are seeded random integers from 2 through 99.
-
-**Evaluation:** Extract the first numeric value from the response and compare it with the expected
-product. The current multiplication tests use zero numeric tolerance.
+**Evaluation:** The complete response must be one numeric value and match the generated answer using
+zero tolerance. Explanatory text or an additional contradictory number no longer passes.
 
 ### Reasoning
 
-**Prompt:** A simple categorical deduction such as:
+**Prompt:** The original courier-route pilot requires a valid ordering of stops. Progression adds
+precedence, immediate adjacency, non-adjacency, and fixed-position constraints. Some Uncalibrated
+items deliberately contain incompatible constraints and require the model to report that no route
+exists.
 
-> If all zibs are blue and item `a` is a zib, what color is item `a`?
-
-**Evaluation:** The response must contain the required answer term, currently `blue`.
+**Evaluation:** Parse JSON, check the possible/impossible decision, route membership and uniqueness,
+and each route constraint separately. The score is proportional to checks passed, so a partially
+valid proposed route earns partial credit. This is an original synthetic constraint-planning pilot,
+not a calibrated general reasoning measure.
 
 ### Coding
 
-**Prompt:** Ask the model to write Python defining `add(a, b)` and return code only.
+**Prompt:** The original inventory-ledger pilot asks for `reconcile_stock_events(events)`, which
+aggregates signed stock changes by SKU. Higher construction tiers introduce duplicate event IDs,
+invalid records, boolean-vs-integer handling, zero-net totals, and duplicate IDs that cross SKUs.
 
-**Evaluation:** The returned source is combined with assertions such as:
+**Evaluation:** The returned source is combined with generated sandbox assertions. For example:
 
 ```python
-assert add(2, 3) == 5
-assert add(-1, 1) == 0
+assert reconcile_stock_events([
+    {"event_id": "a", "sku": "PEN", "delta": 4},
+    {"event_id": "b", "sku": "PEN", "delta": -1},
+]) == {"PEN": 3}
 ```
 
-The code evaluator returns a pass only when the assertions complete successfully. Code execution
-is bounded by source length and timeout. If Docker is available and enabled, execution prefers a
-network-disabled, read-only container with CPU, memory, process, and timeout limits. This is a
-defense-in-depth measure; generated code should not be treated as safe for hostile workloads
-unless Docker isolation is available and verified.
+The generated inventory tests exercise valid aggregation, duplicate suppression, malformed records,
+and reconciliation edge cases. The code evaluator returns a pass only when all assertions complete successfully. A failed run says
+one or more assertions failed; process output is suppressed, so the UI does not claim to identify
+which assertion failed. Code execution is bounded by source length and timeout and occurs only in a
+network-disabled, read-only Docker container with CPU, memory, and process limits. If Docker is
+unavailable, the test is marked **NOT RUN**, not a model failure. Generated code should not be treated
+as safe for hostile workloads unless container isolation is available and verified.
+
+Coding now samples two independently specified original task families: event-ledger reconciliation
+and applying stock adjustments to an opening snapshot. They share an inventory domain but use different
+function contracts and generated edge-case assertions. The result records the family in `subcategory`;
+compare those families separately when investigating difficulty.
 
 ### Structured Output
 
-**Prompt:** Ask for JSON with the keys `answer` and `valid`.
+**Prompt:** Ask for JSON with required keys and value types; higher tiers require more fields.
 
-**Evaluation:** Parse the response as JSON, require a JSON object, and verify that all required
-keys exist. Values are not currently validated against a full JSON Schema.
+**Evaluation:** Parse the response as JSON, require an object, and verify required keys and primitive
+value types. This is not full JSON Schema validation.
 
 ### Knowledge
 
-**Prompt:** Ask:
+**Prompt:** Seeded fact recall varies by tier and includes questions such as:
 
 > What is the capital of France? Answer concisely.
 
-**Evaluation:** The response must contain `Paris`.
+**Evaluation:** The response must contain the expected fact. This small question set is not a
+calibrated measure of broad knowledge or category-wide difficulty.
 
 ### Hallucination Resistance
 
-**Prompt:** Ask about the fictional country Zorbland and instruct the model to say it is unknown.
+**Prompt:** Ask about a seeded fictional country and request an explicit uncertainty response.
 
-**Evaluation:** The response must contain `unknown`. This is a controlled refusal/factuality probe,
-not a general hallucination score.
+**Evaluation:** The response must contain `unknown`; higher tiers also require words indicating the
+premise is fictional and cannot be verified. This is a controlled probe, not a general hallucination
+score.
 
 ### Multilingual
 
-**Prompt:** Translate `good morning` into Spanish.
+**Prompt:** Translate seeded words or sentences into Spanish; higher tiers include clauses and
+conditional grammar.
 
-**Evaluation:** The response must contain both `buenos` and `días`.
+**Evaluation:** The complete response must match one of the item's configured acceptable Spanish
+translations after case and punctuation normalization. This prevents an answer from passing merely
+by quoting the translation alongside unrelated or contradictory text. Other valid translations may
+still be rejected; the evaluator is not a human language-quality judgment.
 
 ### Instruction Following
 
-**Prompt:** Ask for exactly three words describing rain.
+**Prompt:** Describe a seeded subject using an exact word count (3–6 words); Uncalibrated tasks also have
+an additional required term.
 
-**Evaluation:** The current rubric checks only that the response has at least the configured
-minimum number of words. It does not yet enforce exactly three words or semantic relevance.
+**Evaluation:** Check exact word count, required terms, and at least two distinct topical terms.
+Topical terms are a lexical relevance proxy only; semantic relevance and instruction quality are
+not reliably evaluated.
 
 ### Summarization
 
-**Prompt:** Summarize a statement about local systems and mention local privacy.
+**Prompt:** The original incident-handoff pilot summarizes an operations incident with a preliminary
+but unconfirmed hypothesis, a later confirmed cause, affected scope, recovery time, unresolved data
+loss, and a promised update. Higher tiers request more of these distinctions in JSON.
 
-**Evaluation:** The response must contain both `local` and `privacy`. This checks required facts,
-not semantic summary quality.
+**Evaluation:** Incident notes now vary among file-upload, checkout, and notification scenarios.
+The evaluator parses a JSON object, requires exactly the requested keys, and compares each field
+against expanded, scenario-specific acceptable factual summaries. Every format/key/fact check is
+shown in the result and contributes to proportional partial credit. This tests selected fact
+retention and contradiction handling, not open-ended summary quality; paraphrases outside the declared
+alternatives may still be rejected, so independent review remains necessary.
 
 ### Creative Generation
 
-**Prompt:** Ask for a four-word slogan about careful testing.
+**Prompt:** Write a slogan with an exact word count and required term(s).
 
-**Evaluation:** The current rubric checks only a minimum word count. It does not objectively score
-originality, quality, or relevance.
+**Evaluation:** Check exact word count, required term(s), and distinct topical vocabulary. This is
+only lexical task/format compliance: it does not assess originality, slogan quality, or semantic
+relevance.
 
 ### Consistency
 
-**Prompt:** Ask whether `2 + 2` equals `4`.
+**Prompt:** Verify seeded addition, multiplication, or multi-operation expressions and answer yes/no.
 
-**Evaluation:** The response must contain `yes`.
+**Evaluation:** The complete response must be exactly the expected `yes` or `no` (ignoring
+capitalization and punctuation), so a contradictory follow-up cannot pass.
 
 ### Context Retrieval
 
-**Prompt:** Include a seeded marker such as `BLUE-1234` and ask the model to return it.
+**Prompt:** Retrieve seeded markers among distractors; harder items request multiple values by
+attribute.
 
-**Evaluation:** The response must contain the exact marker.
+**Evaluation:** Check that all requested marker strings occur in the answer in the requested order.
+This does not establish broader long-context ability.
 
 ## Automatic scoring
 
-Each passing primary test receives `10/10`; each failed, empty, invalid, or unavailable response
-receives `0/10`. Category scores are normalized to 0–100. Categories without applicable tests
-are recorded as `null`/not tested rather than zero.
+A fully passing primary test receives `10/10`; a completed failing test receives `0/10` unless its
+evaluator supports partial credit. The reasoning and summarization pilots award proportional credit
+across their disclosed checks. Coding remains all-or-nothing across its sandbox assertions. A test
+whose required evaluator cannot run or whose model never returns an answer is **NOT RUN**, receives
+no score, and is excluded from quality averages. Categories without completed applicable tests are
+recorded as `null`/not tested rather than zero.
+
+Task and evaluator revisions increment their respective recorded version identifiers; this revision
+is `pilot-2`. Scores from different versions should not be treated as directly comparable without
+reviewing the changes. Calibration reports also separate task-family subcategories so mixed task
+families do not conceal different difficulty patterns.
 
 The result also records:
 
@@ -155,6 +212,13 @@ The result also records:
 - output-token count
 - latency
 - whether the test used a fresh context
+- difficulty rationale, prompt, and evaluation criteria
+- an explanation of the observable pass/fail check and each attempt's answer
+
+The dashboard exposes these records with difficulty and outcome filters. It shows model outputs and
+deterministic evaluator evidence, not hidden chain-of-thought. If a required evaluator is unavailable
+or all model requests fail, the test is marked **NOT RUN** and excluded from quality scoring rather
+than counted as an incorrect answer.
 
 The fresh-context quality score is separate from context-behavior and performance measurements.
 Demo results are marked `demo: true` and are not real model measurements.
@@ -224,6 +288,8 @@ Known failure codes include:
 - `MODEL_ERROR`
 
 Failures continue through the remaining tests and appear in the final JSON result.
+When Docker is not installed, code tests report `EVALUATOR_UNAVAILABLE` instead of silently
+implying that the model's code was incorrect.
 
 ## Evaluator limitations
 

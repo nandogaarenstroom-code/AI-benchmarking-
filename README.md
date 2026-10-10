@@ -18,6 +18,8 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 - JSON, CSV, PDF, and SVG result exports and result comparison
 - A small automated regression suite for core evaluators, deterministic generation, demo execution,
   exports, context metadata, and comparison
+- A local, version-aware calibration-study protocol and CSV analysis CLI for separate human/model
+  cohorts; it analyzes supplied observations but does not claim empirical calibration without data
 
 ### Still needed for broader production confidence
 
@@ -38,6 +40,21 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 For exact benchmark prompts and scoring limitations, see
 [Benchmark Test Documentation](Test_documentation.md). For what the repository's automated test
 suite does and does not verify, see [Automated Test Suite](tests/README.md).
+For the calibration pilot protocol, CSV schema, and analysis method, see
+[Original Task Calibration Pilot](CALIBRATION_STUDY.md).
+
+Analyze collected, de-identified calibration observations with:
+
+```bash
+python tools/calibration.py path/to/responses.csv --output path/to/report.json
+```
+
+Pass independent pre-study item judgments with `--item-reviews path/to/item-reviews.csv`.
+See [`CALIBRATION_STUDY.md`](CALIBRATION_STUDY.md) for both CSV schemas and data-handling guidance.
+
+The analyzer keeps task/evaluator versions, model settings, categories, and human/model cohorts
+separate. It reports preliminary evidence only; no human or model calibration data is bundled with
+this repository.
 
 ## Run
 
@@ -58,8 +75,21 @@ performance measurements, and file-saving phases, with phase progress and pass/f
 Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
 Completed files are saved under `results/` with a generated name such as
 `benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
-dashboard shows the results folder and provides download links. Every test and failure is retained
-in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+dashboard shows the results folder, saved-run history, and download links. Every test and failure is
+retained in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+Select a model deliberately before the run control is enabled; the demo model is never selected
+automatically. Active runs can be cancelled and resumed from their most recently checkpointed phase.
+Completed results include a **Test-by-test results** section with difficulty and outcome filters,
+the exact prompt, model answer, evaluation rule, reason for the result, and retry/repeat records.
+Each test also has a model-relative solve meter based on its evaluator score and completed repeats.
+It describes only the selected model's result under that run's settings: it is not a calibrated or
+universal difficulty estimate. Demo answers are explicitly marked as demo-only, and tests that could
+not be evaluated are marked not measured rather than counted as failures.
+Checks that could not run (for example, unavailable Docker or a model-server timeout) are
+distinguished from incorrect answers and excluded from quality scoring. If there are no valid
+measurements, the affected score is shown as unavailable rather than as zero.
+The interface reports observable answers and evaluator evidence; it does not ask models to disclose
+hidden chain-of-thought.
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
@@ -83,7 +113,8 @@ without changing the UI. Controlled benchmark measurements are not universal rea
 
 Test prompts are parameterized with seeded values and duplicate fingerprints are rejected. Results
 also include three deterministic bootstrap resamples of the measured item scores, including mean
-and standard deviation, so a single score is not presented without uncertainty context. Categories
+and standard deviation. These resamples describe item-level variability; they are not independent
+model runs. When repeated runs are requested, between-run scores are reported separately. Categories
 with no applicable tests are reported as `null`/not tested rather than silently scored as zero.
 
 The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
@@ -124,8 +155,10 @@ evaluation method, and maximum score. The current categories are:
 - Context retrieval
 - Tool calling
 
-Tests are distributed through four difficulty labels: **Easy**, **Medium**, **Hard**, and
-**Expert**. Profiles select the number of generated tests:
+Tests are distributed through **Easy**, **Medium**, **Hard**, and **Uncalibrated** task-construction
+tiers. The final label is explicit: the tasks have not been piloted against a human panel or a
+representative model cohort, so we do not claim that they are empirically expert-hard. Profiles select
+the number of generated tests:
 
 | Profile | Tests |
 | --- | ---: |
@@ -138,18 +171,34 @@ Tests are distributed through four difficulty labels: **Easy**, **Medium**, **Ha
 | CODING | 40 |
 | LONG CONTEXT | 30 |
 
-The current implementation deliberately uses deterministic arithmetic-style prompts across these
-categories. Therefore, the category framework and scoring pipeline are present, but this is not
-yet a deep domain-specific coding, tool-use, or long-context evaluation. The README describes
-what is actually run rather than implying unsupported coverage.
+Difficulty tiers appear in every profile, including `QUICK`. Every saved test and result records the
+task-set version, evaluator version, tier rationale, and calibration status. Compare results only
+within the same category, task-family subcategory, and task-set version; these difficulty tiers are
+not calibrated estimates.
+
+The Reasoning, Coding, and Summarization categories now include original task variants: route planning
+with varied constraints and satisfiable/unsatisfiable cases; both inventory-event reconciliation and
+opening-stock adjustment functions with generated edge-case assertions; and incident handoffs across
+file-upload, checkout, and notification scenarios. Reasoning and summarization expose per-criterion
+checks and partial scores; code runs in the existing resource-limited Docker evaluator. Calibration
+analysis keeps category subcategories separate. Exact-response evaluators reject extra contradictory
+text, and instruction/creative rubrics show lexical relevance evidence without claiming semantic
+judgment. These focused tasks do not establish general reasoning, software engineering, summarization,
+instruction-following, or creative ability. The category framework and scoring pipeline also do not
+yet amount to deep tool-use or long-context evaluation.
 
 ## Automatic scoring
 
-Yes. No manual grading is required. Each answer is compared with its generated expected answer
-using objective exact matching:
+No manual grading is required for the current deterministic checks. Each answer is evaluated with the
+applicable check (such as numeric matching, required terms, JSON keys and types, fact fields,
+constraint satisfaction, or sandboxed assertions). The test details show the criteria and observable
+evidence. These automatic checks are proxies for specified task behavior, not universal judgments of
+answer quality.
 
-- Correct answer: 10/10
-- Incorrect, empty, or unavailable answer: 0/10
+- Fully correct answer: 10/10
+- Incorrect answer: 0/10, except the reasoning and summarization pilots award proportional credit
+  across their disclosed criteria
+- Unavailable evaluator or model response: `NOT RUN`, excluded from quality scoring
 - Category score: percentage of points earned in that category
 - Quality score: average across completed test scores, normalized to 0–100
 - Performance score: derived from measured request throughput
@@ -157,6 +206,9 @@ using objective exact matching:
 
 Every answer, score, status, and failure is retained in the JSON result. Demo results are clearly
 marked with `demo: true` and `DEMO DATA`; they must not be interpreted as model performance.
+The dashboard and CSV export also include per-test prompts, answers, evaluator criteria, and outcome
+explanations. “How it did it” means the observable response and checks; private chain-of-thought is
+not requested or treated as evidence.
 
 ## Context handling and fairness
 
@@ -181,10 +233,13 @@ unknown, the conservative 128K ceiling is used; 256K is only attempted when expl
 advertised. This makes large-context results transparent rather than turning an overflow into a
 misleading quality failure.
 
-Performance runs perform three warm-ups, discard their outputs, then collect repeated latency,
-TTFT, generation time, token throughput, P50/P95 latency, standard deviation, and concurrency
-samples at levels 1, 2, and 4. These are controlled measurements and should not be treated as
-guarantees for unrelated real-world workloads.
+Performance runs perform three warm-ups, discard their outputs, then collect latency samples,
+streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.
+Throughput is estimated output tokens divided by the measured generation time of dedicated
+performance samples; token counts are estimates rather than tokenizer-reported counts. The result
+labels estimated timing when the adapter does not report streamed timing. P50/P95 latency and
+standard deviation are based on measured request latency. These are controlled measurements and
+should not be treated as guarantees for unrelated real-world workloads.
 
 Runs can be cancelled through the backend API. Resume state is written atomically, and corrupted
 resume files are rejected instead of being executed. Final JSON results are also written through
