@@ -398,7 +398,7 @@ function modelSolveMeter(test,demo){
   if(!scored.length)return {value:null,label:'Not measured',detail:'No completed evaluator result for this test.'};
   const maxScore=Number(test.max_score)>0?Number(test.max_score):10;
   const fractions=scored.map(run=>{
-    const score=Number(run.score);
+    const score=run.score===null||run.score===undefined||run.score===''?NaN:Number(run.score);
     return Number.isFinite(score)?Math.max(0,Math.min(1,score/maxScore)):(run.status==='PASS'?1:0);
   });
   const percent=Math.round(fractions.reduce((total,value)=>total+value,0)/fractions.length*100);
