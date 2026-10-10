@@ -14,13 +14,13 @@ from pathlib import Path
 TIERS = ("Easy", "Medium", "Hard", "Uncalibrated")
 REQUIRED_COLUMNS = {
     "protocol_id", "run_config_id", "task_set_version", "evaluator_version",
-    "category", "item_id", "item_instance_id", "item_fingerprint", "response_id", "tier",
+    "category", "subcategory", "item_id", "item_instance_id", "item_fingerprint", "response_id", "tier",
     "cohort_type", "cohort_label", "respondent_id", "repeat_index",
     "evaluator_pass", "score", "max_score", "reviewer1_pass", "reviewer2_pass",
     "reviewer1_ambiguous", "reviewer2_ambiguous",
 }
 REQUIRED_ITEM_REVIEW_COLUMNS = {
-    "protocol_id", "task_set_version", "evaluator_version", "category", "item_id",
+    "protocol_id", "task_set_version", "evaluator_version", "category", "subcategory", "item_id",
     "item_instance_id", "item_fingerprint", "tier", "reviewer_id", "answer_key_valid",
     "wording_clear", "evaluator_valid", "construct_fit", "ambiguous",
 }
@@ -66,7 +66,7 @@ def load_responses(path):
         for line, row in enumerate(reader, start=2):
             record = {name: (row.get(name) or "").strip() for name in REQUIRED_COLUMNS}
             for field in ("protocol_id", "run_config_id", "task_set_version",
-                          "evaluator_version", "category", "item_id", "item_instance_id",
+                          "evaluator_version", "category", "subcategory", "item_id", "item_instance_id",
                           "item_fingerprint", "response_id",
                           "cohort_label", "respondent_id"):
                 if not record[field]:
@@ -84,7 +84,7 @@ def load_responses(path):
                 raise CalibrationDataError(f"line {line}: repeat_index must be a positive integer")
             identity = tuple(record[field] for field in (
                 "protocol_id", "run_config_id", "task_set_version", "evaluator_version",
-                "category", "item_id", "item_instance_id",
+                "category", "subcategory", "item_id", "item_instance_id",
                 "cohort_type", "cohort_label", "respondent_id", "repeat_index"))
             if identity in seen:
                 raise CalibrationDataError(f"line {line}: duplicate response identity")
@@ -133,15 +133,16 @@ def load_item_reviews(path):
             review = {name: (row.get(name) or "").strip()
                       for name in REQUIRED_ITEM_REVIEW_COLUMNS}
             for field in ("protocol_id", "task_set_version", "evaluator_version", "category",
-                          "item_id", "item_instance_id", "item_fingerprint", "reviewer_id"):
+                          "subcategory", "item_id", "item_instance_id", "item_fingerprint",
+                          "reviewer_id"):
                 if not review[field]:
                     raise CalibrationDataError(f"item-review line {line}: {field} cannot be blank")
             if review["tier"] not in TIERS:
                 raise CalibrationDataError(
                     f"item-review line {line}: tier must be one of {', '.join(TIERS)}")
             identity = (review["protocol_id"], review["task_set_version"],
-                        review["evaluator_version"], review["item_fingerprint"],
-                        review["reviewer_id"])
+                        review["evaluator_version"], review["category"], review["subcategory"],
+                        review["item_fingerprint"], review["reviewer_id"])
             if identity in seen:
                 raise CalibrationDataError(f"item-review line {line}: duplicate reviewer/item")
             seen.add(identity)
@@ -159,11 +160,11 @@ def _analyze_item_reviews(reviews):
     groups = defaultdict(list)
     for review in reviews:
         key = (review["protocol_id"], review["task_set_version"],
-               review["evaluator_version"], review["category"])
+               review["evaluator_version"], review["category"], review["subcategory"])
         groups[key].append(review)
     output = []
     for key, group in sorted(groups.items()):
-        protocol_id, task_version, evaluator_version, category = key
+        protocol_id, task_version, evaluator_version, category, subcategory = key
         by_item = defaultdict(list)
         for review in group:
             by_item[review["item_fingerprint"]].append(review)
@@ -178,6 +179,7 @@ def _analyze_item_reviews(reviews):
                             (left[dimension], right[dimension]))
             item_results.append({
                 "item_id": item_reviews[0]["item_id"],
+                "subcategory": item_reviews[0]["subcategory"],
                 "item_instance_id": item_reviews[0]["item_instance_id"],
                 "item_fingerprint": fingerprint,
                 "tier": item_reviews[0]["tier"],
@@ -196,6 +198,7 @@ def _analyze_item_reviews(reviews):
         output.append({
             "protocol_id": protocol_id, "task_set_version": task_version,
             "evaluator_version": evaluator_version, "category": category,
+            "subcategory": subcategory,
             "item_count": len(item_results), "items": item_results,
             "pairwise_agreement": {
                 dimension: {
@@ -276,12 +279,13 @@ def analyze(records, item_reviews=()):
     for record in records:
         scope = (record["protocol_id"], record["run_config_id"],
                  record["task_set_version"], record["evaluator_version"],
-                 record["category"], record["cohort_type"], record["cohort_label"])
+                 record["category"], record["subcategory"],
+                 record["cohort_type"], record["cohort_label"])
         groups[scope].append(record)
 
     reports = []
     for scope, group in sorted(groups.items()):
-        (protocol_id, run_config_id, task_version, evaluator_version, category,
+        (protocol_id, run_config_id, task_version, evaluator_version, category, subcategory,
          cohort_type, cohort_label) = scope
         scope_label = "|".join(scope)
         first = [row for row in group if row["repeat_index"] == 1]
@@ -426,7 +430,7 @@ def analyze(records, item_reviews=()):
         reports.append({
             "protocol_id": protocol_id, "run_config_id": run_config_id,
             "task_set_version": task_version, "evaluator_version": evaluator_version,
-            "category": category, "cohort_type": cohort_type, "cohort_label": cohort_label,
+            "category": category, "subcategory": subcategory, "cohort_type": cohort_type, "cohort_label": cohort_label,
             "status": "preliminary; no automatic tier certification",
             "first_response_count": len(first),
             "repeat_observation_count": sum(row["repeat_index"] > 1 for row in group),

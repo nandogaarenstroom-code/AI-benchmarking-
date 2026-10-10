@@ -175,13 +175,16 @@ Difficulty tiers appear in every profile, including `QUICK`. Every saved test an
 task-set version, evaluator version, tier rationale, and calibration status. Compare results only
 within the same category and task-set version; these difficulty tiers are not calibrated estimates.
 
-The Reasoning, Coding, and Summarization categories now include original pilot tasks: constraint-based
-route planning with impossible cases, inventory-ledger reconciliation with malformed and duplicate
-events, and incident handoffs that distinguish confirmed facts from early guesses and unknowns.
-Reasoning and summarization expose per-criterion checks and partial scores; code runs in the existing
-resource-limited Docker evaluator. These focused pilots do not establish general reasoning, software
-engineering, or summarization ability. The category framework and scoring pipeline also do not yet
-amount to deep tool-use or long-context evaluation.
+The Reasoning, Coding, and Summarization categories now include original task variants: route planning
+with varied constraints and satisfiable/unsatisfiable cases; both inventory-event reconciliation and
+opening-stock adjustment functions with generated edge-case assertions; and incident handoffs across
+file-upload, checkout, and notification scenarios. Reasoning and summarization expose per-criterion
+checks and partial scores; code runs in the existing resource-limited Docker evaluator. Calibration
+analysis keeps category subcategories separate. Exact-response evaluators reject extra contradictory
+text, and instruction/creative rubrics show lexical relevance evidence without claiming semantic
+judgment. These focused tasks do not establish general reasoning, software engineering, summarization,
+instruction-following, or creative ability. The category framework and scoring pipeline also do not
+yet amount to deep tool-use or long-context evaluation.
 
 ## Automatic scoring
 

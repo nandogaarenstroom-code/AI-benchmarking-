@@ -190,6 +190,40 @@ class BenchmarkTests(unittest.TestCase):
         self.assertFalse(evaluate(rubric, "soft rain falls gently"))
         self.assertFalse(evaluate(rubric, "soft snow falls"))
 
+    def test_reviewed_exact_match_requires_the_complete_answer(self):
+        translation = {
+            "evaluation_method": "exact_any",
+            "expected_answer": "Gracias",
+            "acceptable_answers": ["Gracias", "Muchas gracias."],
+        }
+        self.assertTrue(evaluate(translation, "MUCHAS GRACIAS!"))
+        self.assertFalse(evaluate(translation, "I cannot translate this, but gracias is one option."))
+        self.assertFalse(evaluate(translation, "Gracias for your help."))
+        numeric = {"evaluation_method": "numeric", "expected_answer": "42", "tolerance": 0}
+        self.assertTrue(evaluate(numeric, "42"))
+        self.assertFalse(evaluate(numeric, "The answer is 42, not 41."))
+        self.assertFalse(evaluate(
+            {"evaluation_method": "choice", "expected_answer": "yes"}, "yes, but actually no"))
+        self.assertTrue(evaluate(
+            {"evaluation_method": "ordered_contains", "required_terms": ["BLUE-2", "GOLD-8"]},
+            "BLUE-2 then GOLD-8"))
+        self.assertFalse(evaluate(
+            {"evaluation_method": "ordered_contains", "required_terms": ["BLUE-2", "GOLD-8"]},
+            "GOLD-8 then BLUE-2"))
+
+    def test_rubric_reports_format_required_term_and_relevance_checks(self):
+        rubric = {"evaluation_method": "rubric", "exact_words": 3,
+                  "required_terms": ["rain"], "topic_terms": ["rain", "wet", "drops"],
+                  "minimum_topic_terms": 2}
+        result = evaluate_with_details(rubric, "rain rain rain")
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["score"], 6.67)
+        self.assertFalse(next(check for check in result["checks"]
+                              if check["name"] == "Topical relevance proxy")["passed"])
+        relevant = evaluate_with_details(rubric, "rain wet drops")
+        self.assertTrue(relevant["passed"])
+        self.assertEqual(relevant["score"], 10)
+
     def test_evaluators_explain_observable_pass_and_fail_evidence(self):
         test = {"evaluation_method": "contains_all", "required_terms": ["amber", "wug"]}
         passed = evaluate_with_details(test, "The amber wug is here.")
@@ -307,6 +341,51 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual([x["context_size"] for x in make_context_tests(7, 32768)],
                          [4096, 8192, 16384, 32768])
 
+    def test_pilot_generators_vary_constraints_scenarios_and_edge_cases(self):
+        reasoning_items = [item for seed in range(40) for item in make_tests("FULL", seed)
+                           if item["category"] == "Reasoning" and
+                           item["difficulty"] == "Uncalibrated"]
+        self.assertGreaterEqual(
+            sum(not item["schedule_possible"] for item in reasoning_items), 5)
+        self.assertGreaterEqual(
+            len({tuple(rule["kind"] for rule in item["schedule_constraints"])
+                 for item in reasoning_items}), 3)
+
+        summaries = [item for seed in range(40) for item in make_tests("FULL", seed)
+                     if item["category"] == "Summarization"]
+        self.assertGreaterEqual(
+            len({item["prompt"].split("Incident note:\n", 1)[1].split(". ", 1)[1]
+                 for item in summaries}), 2)
+        manager = BenchmarkManager(Path("."))
+        for item in summaries:
+            correct = json.loads(manager._answer({"demo": True}, item))
+            self.assertTrue(evaluate(item, json.dumps(correct)))
+
+        coding_items = [item for seed in range(40) for item in make_tests("FULL", seed)
+                        if item["category"] == "Coding"]
+        self.assertEqual({item["subcategory"] for item in coding_items},
+                         {"Inventory adjustments", "Inventory event reconciliation"})
+        ledger = next(item for item in coding_items
+                      if item["subcategory"] == "Inventory event reconciliation" and
+                      item["difficulty"] == "Uncalibrated")
+        self.assertTrue(any("None, [], {}" in check for check in ledger["tests"]))
+        self.assertTrue(any("' same '" in check and "' PEN '" in check
+                            for check in ledger["tests"]))
+        self.assertIn("event_id = event_id.strip()", ledger["demo_answer"])
+        self.assertIn("sku = sku.strip()", ledger["demo_answer"])
+        adjustment = next(item for item in coding_items
+                          if item["subcategory"] == "Inventory adjustments" and
+                          item["difficulty"] == "Uncalibrated")
+        self.assertTrue(any("stock == {'PEN': 4}" in check for check in adjustment["tests"]))
+        self.assertGreaterEqual(len(adjustment["tests"]), 6)
+
+        long_context = [item for item in make_tests("FULL", 37)
+                        if item["category"] == "Long Context"]
+        self.assertEqual({item["difficulty"] for item in long_context},
+                         {"Easy", "Medium", "Hard", "Uncalibrated"})
+        self.assertTrue(all("archive records" in item["prompt"].lower() for item in long_context))
+        self.assertTrue(all(evaluate(item, item["expected_answer"]) for item in long_context))
+
     def test_original_pilot_evaluators_explain_partial_and_full_results(self):
         tests = make_tests("FULL", 123)
         reasoning = next(test for test in tests
@@ -322,7 +401,7 @@ class BenchmarkTests(unittest.TestCase):
         route_result = evaluate_with_details(reasoning, route_answer)
         self.assertTrue(route_result["passed"])
         self.assertEqual(route_result["score"], 10)
-        self.assertGreater(len(route_result["checks"]), 3)
+        self.assertGreater(len(route_result["checks"]), 2)
         wrong_route_decision = json.loads(route_answer)
         wrong_route_decision["possible"] = not wrong_route_decision["possible"]
         partial_route = evaluate_with_details(reasoning, json.dumps(wrong_route_decision))
@@ -398,6 +477,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["difficulty_rationale"] for item in data["tests"]))
             csv_header = (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0]
             self.assertIn("prompt", csv_header)
+            self.assertIn("subcategory", csv_header)
             self.assertIn("item_fingerprint", csv_header)
 
     def test_repeated_demo_run_records_quality_variability(self):

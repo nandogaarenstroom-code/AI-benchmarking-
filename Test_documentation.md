@@ -20,6 +20,9 @@ Every generated test contains:
 - `item_instance_id` and `item_fingerprint` for the exact generated variant and checks
 - `difficulty_calibration_status`
 
+`subcategory` identifies the task family within a category and is included in CSV exports. Keep it
+when stratifying calibration or comparing task families.
+
 Tests are generated deterministically from a seed. Prompt fingerprints are checked so duplicate
 prompts are avoided. Every profile includes **Easy**, **Medium**, **Hard**, and **Uncalibrated** tiers,
 including `QUICK`. These are task-construction tiers, not empirically measured difficulty. The
@@ -27,8 +30,9 @@ Uncalibrated label is deliberate: no human study or representative model cohort 
 establish how difficult these items are. Results record task-set and evaluator versions so a future
 revision can be distinguished from this pilot.
 
-Each result records the rationale for an individual test's tier. Comparisons should be made within
-the same category and task-set version, and are still not difficulty-calibrated.
+Each result records the rationale for an individual test's tier and a task-family `subcategory`.
+Comparisons should be made within the same category, subcategory, and task-set version, and are still
+not difficulty-calibrated.
 The dashboard also displays a per-test model-relative solve meter from the evaluator score and repeat
 outcomes. A successful answer means only that the selected model passed this test under this run's
 settings; partial credit, inconsistent repeats, and failures are shown distinctly. This meter does not
@@ -61,8 +65,8 @@ are documented exactly below.
 multiplication (Medium), multiplication plus addition (Hard), and grouped multi-operation
 arithmetic (Uncalibrated).
 
-**Evaluation:** Extract the first numeric value from the response and compare it with the generated
-answer using zero tolerance.
+**Evaluation:** The complete response must be one numeric value and match the generated answer using
+zero tolerance. Explanatory text or an additional contradictory number no longer passes.
 
 ### Reasoning
 
@@ -99,6 +103,11 @@ network-disabled, read-only Docker container with CPU, memory, and process limit
 unavailable, the test is marked **NOT RUN**, not a model failure. Generated code should not be treated
 as safe for hostile workloads unless container isolation is available and verified.
 
+Coding now samples two independently specified original task families: event-ledger reconciliation
+and applying stock adjustments to an opening snapshot. They share an inventory domain but use different
+function contracts and generated edge-case assertions. The result records the family in `subcategory`;
+compare those families separately when investigating difficulty.
+
 ### Structured Output
 
 **Prompt:** Ask for JSON with required keys and value types; higher tiers require more fields.
@@ -128,15 +137,19 @@ score.
 **Prompt:** Translate seeded words or sentences into Spanish; higher tiers include clauses and
 conditional grammar.
 
-**Evaluation:** The response must contain the configured target translation phrase. Other valid
-translations may be rejected; this evaluator is not a human language-quality judgment.
+**Evaluation:** The complete response must match one of the item's configured acceptable Spanish
+translations after case and punctuation normalization. This prevents an answer from passing merely
+by quoting the translation alongside unrelated or contradictory text. Other valid translations may
+still be rejected; the evaluator is not a human language-quality judgment.
 
 ### Instruction Following
 
 **Prompt:** Describe a seeded subject using an exact word count (3–6 words); Uncalibrated tasks also have
 an additional required term.
 
-**Evaluation:** Check exact word count and required terms. Semantic relevance is not evaluated.
+**Evaluation:** Check exact word count, required terms, and at least two distinct topical terms.
+Topical terms are a lexical relevance proxy only; semantic relevance and instruction quality are
+not reliably evaluated.
 
 ### Summarization
 
@@ -144,31 +157,35 @@ an additional required term.
 but unconfirmed hypothesis, a later confirmed cause, affected scope, recovery time, unresolved data
 loss, and a promised update. Higher tiers request more of these distinctions in JSON.
 
-**Evaluation:** Parse a JSON object, require exactly the requested keys, and compare each field
-against its declared acceptable factual summaries. Every format/key/fact check is shown in the result
-and contributes to proportional partial credit. This tests selected fact retention and contradiction
-handling, not open-ended summary quality; paraphrases outside the declared alternatives may be
-rejected, so evaluators require review before broader use.
+**Evaluation:** Incident notes now vary among file-upload, checkout, and notification scenarios.
+The evaluator parses a JSON object, requires exactly the requested keys, and compares each field
+against expanded, scenario-specific acceptable factual summaries. Every format/key/fact check is
+shown in the result and contributes to proportional partial credit. This tests selected fact
+retention and contradiction handling, not open-ended summary quality; paraphrases outside the declared
+alternatives may still be rejected, so independent review remains necessary.
 
 ### Creative Generation
 
 **Prompt:** Write a slogan with an exact word count and required term(s).
 
-**Evaluation:** Check exact word count and required term(s), not originality, quality, or relevance.
+**Evaluation:** Check exact word count, required term(s), and distinct topical vocabulary. This is
+only lexical task/format compliance: it does not assess originality, slogan quality, or semantic
+relevance.
 
 ### Consistency
 
 **Prompt:** Verify seeded addition, multiplication, or multi-operation expressions and answer yes/no.
 
-**Evaluation:** The first answer token must be the expected `yes` or `no`.
+**Evaluation:** The complete response must be exactly the expected `yes` or `no` (ignoring
+capitalization and punctuation), so a contradictory follow-up cannot pass.
 
 ### Context Retrieval
 
 **Prompt:** Retrieve seeded markers among distractors; harder items request multiple values by
 attribute.
 
-**Evaluation:** Check that all requested marker strings occur in the answer. This does not validate
-their order.
+**Evaluation:** Check that all requested marker strings occur in the answer in the requested order.
+This does not establish broader long-context ability.
 
 ## Automatic scoring
 
@@ -179,8 +196,10 @@ whose required evaluator cannot run or whose model never returns an answer is **
 no score, and is excluded from quality averages. Categories without completed applicable tests are
 recorded as `null`/not tested rather than zero.
 
-Task and evaluator revisions increment their respective recorded version identifiers; scores from
-different versions should not be treated as directly comparable without reviewing the changes.
+Task and evaluator revisions increment their respective recorded version identifiers; this revision
+is `pilot-2`. Scores from different versions should not be treated as directly comparable without
+reviewing the changes. Calibration reports also separate task-family subcategories so mixed task
+families do not conceal different difficulty patterns.
 
 The result also records:
 

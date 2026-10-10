@@ -10,7 +10,7 @@ from tools.calibration import (
 
 FIELDS = [
     "protocol_id", "run_config_id", "task_set_version", "evaluator_version",
-    "category", "item_id", "item_instance_id", "item_fingerprint", "tier",
+    "category", "subcategory", "item_id", "item_instance_id", "item_fingerprint", "tier",
     "cohort_type", "cohort_label", "respondent_id", "response_id", "repeat_index",
     "evaluator_pass", "score", "max_score", "reviewer1_pass", "reviewer2_pass",
     "reviewer1_ambiguous", "reviewer2_ambiguous",
@@ -21,7 +21,7 @@ def response(**overrides):
     value = {
         "protocol_id": "protocol-2026-01", "run_config_id": "default-config",
         "task_set_version": "pilot-1", "evaluator_version": "pilot-1",
-        "category": "Reasoning", "item_id": "route-family-1",
+        "category": "Reasoning", "subcategory": "Constraint planning", "item_id": "route-family-1",
         "item_instance_id": "route-family-1@seed1", "item_fingerprint": "abc123",
         "tier": "Hard",
         "cohort_type": "human", "cohort_label": "domain-reviewers",
@@ -50,7 +50,7 @@ class CalibrationTests(unittest.TestCase):
     def write_review_csv(self, rows):
         fields = [
             "protocol_id", "task_set_version", "evaluator_version", "category",
-            "item_id", "item_instance_id", "item_fingerprint", "tier", "reviewer_id",
+            "subcategory", "item_id", "item_instance_id", "item_fingerprint", "tier", "reviewer_id",
             "answer_key_valid", "wording_clear", "evaluator_valid", "construct_fit", "ambiguous",
         ]
         temporary = tempfile.TemporaryDirectory()
@@ -74,17 +74,23 @@ class CalibrationTests(unittest.TestCase):
                      cohort_label="model-a@v1", respondent_id="m1",
                      response_id="resp-m1-alt-config"),
             response(category="Coding", item_id="code-1", item_instance_id="code-1@seed1",
-                     item_fingerprint="def456", respondent_id="h4",
+                     subcategory="Inventory event reconciliation", item_fingerprint="def456", respondent_id="h4",
                      response_id="resp-h4-1"),
+            response(category="Coding", subcategory="Inventory adjustments", item_id="code-2",
+                     item_instance_id="code-2@seed1", item_fingerprint="ghi789",
+                     respondent_id="h5", response_id="resp-h5-1"),
         ]
         report = analyze(load_responses(self.write_csv(rows)))
         groups = report["groups"]
-        self.assertEqual(len(groups), 5)
+        self.assertEqual(len(groups), 6)
         self.assertEqual({group["cohort_type"] for group in groups}, {"human", "model"})
         self.assertEqual({group["task_set_version"] for group in groups}, {"pilot-1", "pilot-2"})
         self.assertEqual({group["run_config_id"] for group in groups if
                           group["cohort_type"] == "model"},
                          {"default-config", "model-config-2"})
+        coding_groups = [group for group in groups if group["category"] == "Coding"]
+        self.assertEqual({group["subcategory"] for group in coding_groups},
+                         {"Inventory event reconciliation", "Inventory adjustments"})
         hard = next(group for group in groups if group["task_set_version"] == "pilot-1" and
                     group["cohort_type"] == "human" and group["category"] == "Reasoning")
         tier = next(item for item in hard["tier_results"] if item["tier"] == "Hard")
@@ -175,6 +181,7 @@ class CalibrationTests(unittest.TestCase):
         base = {
             "protocol_id": "protocol-2026-01", "task_set_version": "pilot-1",
             "evaluator_version": "pilot-1", "category": "Coding",
+            "subcategory": "Inventory event reconciliation",
             "item_id": "code-1", "item_instance_id": "code-1@seed1",
             "item_fingerprint": "code-hash", "tier": "Hard",
             "answer_key_valid": "true", "wording_clear": "true",

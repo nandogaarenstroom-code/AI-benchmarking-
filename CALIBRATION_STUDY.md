@@ -13,7 +13,7 @@ versions. Published HELM, BIG-bench, MMLU, GPQA, and SWE-bench results may infor
 construct descriptions, but are not a common scale. This project does not copy or import their
 questions, datasets, patches, or code.
 
-The current implementation versions the task set and evaluator as `pilot-1`. Freeze those definitions
+The current implementation versions the task set and evaluator as `pilot-2`. Freeze those definitions
 for each data collection wave. Any change to prompts, answer keys, scoring rules, or task generation
 requires a new version and a separate report; do not mix checkpointed runs across versions.
 
@@ -21,9 +21,9 @@ requires a new version and a separate report; do not mix checkpointed runs acros
 
 | Local pilot | Intended narrow construct | Useful external design context | Explicit non-claim |
 | --- | --- | --- | --- |
-| Reasoning | Find a route satisfying interacting ordering constraints, including impossible instances. | BIG-bench's task diversity and human/model comparison practices. | Not general reasoning, formal proof, or a BIG-bench score. |
-| Coding | Implement deterministic inventory-event reconciliation with duplicate and malformed records. | SWE-bench's principle of executing task-specific tests. | Not repository-level issue resolution or comparable to SWE-bench. |
-| Summarization | Produce a faithful incident handoff preserving impact, cause, recovery, hypotheses, and unknowns. | HELM's scenario-specific reporting and MMLU/GPQA's explicit domain/construct boundaries. | Not broad summarization quality or an official HELM metric. |
+| Reasoning | Find a route satisfying varied interacting ordering constraints, including satisfiable and unsatisfiable instances. | BIG-bench's task diversity and human/model comparison practices. | Not general reasoning, formal proof, or a BIG-bench score. |
+| Coding | Implement deterministic inventory-event reconciliation or apply adjustments to opening stock, using generated assertions. | SWE-bench's principle of executing task-specific tests. | Not repository-level issue resolution or comparable to SWE-bench. |
+| Summarization | Produce a faithful incident handoff across original upload, checkout, and notification scenarios, preserving impact, cause, recovery, hypotheses, and unknowns. | HELM's scenario-specific reporting and MMLU/GPQA's explicit domain/construct boundaries. | Not broad summarization quality or an official HELM metric. |
 
 The other application categories retain their existing narrow tests; this pilot does not calibrate
 them. A graduate-science study inspired by GPQA would need an independently authored and reviewed
@@ -76,7 +76,7 @@ evaluators, not as representative population calibration.
    rather than entering zero.
 
 ```text
-protocol_id,run_config_id,task_set_version,evaluator_version,category,item_id,item_instance_id,item_fingerprint,response_id,tier,cohort_type,cohort_label,respondent_id,repeat_index,evaluator_pass,score,max_score,reviewer1_pass,reviewer2_pass,reviewer1_ambiguous,reviewer2_ambiguous
+protocol_id,run_config_id,task_set_version,evaluator_version,category,subcategory,item_id,item_instance_id,item_fingerprint,response_id,tier,cohort_type,cohort_label,respondent_id,repeat_index,evaluator_pass,score,max_score,reviewer1_pass,reviewer2_pass,reviewer1_ambiguous,reviewer2_ambiguous
 ```
 
 `protocol_id` identifies the preregistered study protocol. `run_config_id` identifies one exact
@@ -85,7 +85,7 @@ CSV and archive it with the study. `cohort_type` is `human` or `model`. `cohort_
 preregistered human group or an exact model/version. Outcomes are `true`/`false` or `1`/`0`. Scores are numeric from zero through
 `max_score`; `evaluator_pass` records the evaluator's binary outcome separately from a partial score.
 Reviewer outcome and ambiguity fields are independently completed. Each
-`task/evaluator/category/item-instance/cohort/respondent/repeat_index` combination must be unique.
+`task/evaluator/category/subcategory/item-instance/cohort/respondent/repeat_index` combination must be unique.
 `item_id` identifies the task family; `item_instance_id` and `item_fingerprint` identify the exact
 seeded prompt and evaluator checks so different generated variants are never mistaken for the same
 item. Reuse the exact stable identifiers from the run artifact; do not reconstruct them from item
@@ -94,7 +94,7 @@ position or a truncated hash.
 Before response collection, save independent item-level reviewer judgments in a second CSV:
 
 ```text
-protocol_id,task_set_version,evaluator_version,category,item_id,item_instance_id,item_fingerprint,tier,reviewer_id,answer_key_valid,wording_clear,evaluator_valid,construct_fit,ambiguous
+protocol_id,task_set_version,evaluator_version,category,subcategory,item_id,item_instance_id,item_fingerprint,tier,reviewer_id,answer_key_valid,wording_clear,evaluator_valid,construct_fit,ambiguous
 ```
 
 Use true/false for each judgment and a distinct pseudonymous reviewer ID. The analyzer reports each
@@ -112,7 +112,7 @@ python tools/calibration.py path/to/responses.csv --output path/to/calibration-r
 
 Include the pre-study review CSV with `--item-reviews path/to/item-reviews.csv`.
 
-The dependency-free analyzer reports, separately for each version/category/cohort:
+The dependency-free analyzer reports, separately for each version/category/subcategory/cohort:
 
 - per-item-instance first-response counts, pass rates with Wilson intervals, unscored counts,
   reviewer disagreement, evaluator agreement with unanimous reviews, repeat consistency, and

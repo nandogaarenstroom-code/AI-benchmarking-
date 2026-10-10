@@ -29,6 +29,21 @@ def _contains_term(text, term):
     )
 
 
+def _contains_terms_in_order(text, terms):
+    text_tokens = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+    cursor = 0
+    for term in terms:
+        term_tokens = re.findall(r"\w+", str(term).casefold(), flags=re.UNICODE)
+        if not term_tokens:
+            return False
+        match = next((index for index in range(cursor, len(text_tokens) - len(term_tokens) + 1)
+                      if text_tokens[index:index + len(term_tokens)] == term_tokens), None)
+        if match is None:
+            return False
+        cursor = match + len(term_tokens)
+    return True
+
+
 def _normalized_value(value):
     return " ".join(re.findall(r"\w+", str(value).casefold(), flags=re.UNICODE))
 
@@ -55,9 +70,13 @@ def _schedule_is_valid(route, items, constraints):
 def evaluation_criteria(test):
     method = test.get("evaluation_method")
     if method in ("numeric_exact", "numeric"):
-        return f"Numeric result must equal {test.get('expected_answer')} within tolerance {test.get('tolerance', 1e-9)}."
+        return (f"Complete response must be one numeric value equal to {test.get('expected_answer')} "
+                f"within tolerance {test.get('tolerance', 1e-9)}.")
     if method == "choice":
-        return f"First answer token must equal the expected choice {test.get('expected_answer')}."
+        return f"Complete response must be the expected choice {test.get('expected_answer')}."
+    if method == "exact_any":
+        return ("The complete response must match one configured acceptable answer "
+                "(ignoring case and punctuation).")
     if method == "json_schema":
         types = test.get("required_types", {})
         return "Valid JSON object must contain " + ", ".join(
@@ -72,13 +91,20 @@ def evaluation_criteria(test):
     if method == "contains_all":
         return "Response must contain all required terms: " + ", ".join(
             str(term) for term in test.get("required_terms", [])) + "."
+    if method == "ordered_contains":
+        return "Response must contain all requested values in this order: " + ", ".join(
+            str(term) for term in test.get("required_terms", [])) + "."
     if method == "rubric":
         count = (f"exactly {test['exact_words']} words"
                  if "exact_words" in test else
                  f"at least {test.get('minimum_words', 1)} words")
         terms = test.get("required_terms", [])
-        return f"Response must have {count}" + (
-            f" and contain: {', '.join(map(str, terms))}." if terms else ".")
+        relevance = test.get("minimum_topic_terms", 0)
+        return (f"Response must have {count}" +
+                (f" and contain: {', '.join(map(str, terms))}." if terms else ".") +
+                (f" It must also contain at least {relevance} distinct topical terms; "
+                 "this is a lexical relevance proxy, not semantic grading."
+                 if relevance else ""))
     if method == "code":
         return f"Python answer must pass all {len(test.get('tests', []))} sandboxed assertions."
     return f"Response must exactly match {test.get('expected_answer')}."
@@ -97,15 +123,26 @@ def evaluate_with_details(test, answer):
             tolerance = float(test.get("tolerance", 1e-9))
         except (TypeError, ValueError, OverflowError):
             tolerance = 1e-9
-        passed = actual is not None and target is not None and abs(actual - target) <= tolerance
-        explanation = (f"Parsed numeric result {actual} matches expected {target}."
+        single_value = re.fullmatch(r"-?\d+(?:\.\d+)?", answer) is not None
+        passed = (single_value and actual is not None and target is not None and
+                  abs(actual - target) <= tolerance)
+        explanation = (f"Single numeric result {actual} matches expected {target}."
                       if passed else f"Parsed numeric result {actual}; expected {target}.")
     elif method == "choice":
-        first_word = re.search(r"[a-z0-9]+", answer.lower())
-        actual = first_word.group() if first_word else ""
-        passed = actual == str(expected).strip().lower()
-        explanation = (f"First answer token {actual!r} matches the expected choice."
-                      if passed else f"First answer token {actual!r}; expected {expected!r}.")
+        actual = _normalized_value(answer)
+        passed = actual == _normalized_value(expected)
+        explanation = (f"Complete response {actual!r} matches the expected choice."
+                      if passed else f"Complete response {actual!r}; expected only {expected!r}.")
+    elif method == "exact_any":
+        acceptable = test.get("acceptable_answers", [expected])
+        if not isinstance(acceptable, list):
+            acceptable = []
+        normalized = _normalized_value(answer)
+        passed = bool(normalized) and normalized in {
+            _normalized_value(item) for item in acceptable if isinstance(item, str)
+        }
+        explanation = ("The complete response matches a reviewed acceptable answer."
+                       if passed else "The complete response did not match any reviewed acceptable answer.")
     elif method == "json_schema":
         try:
             value = json.loads(answer)
@@ -144,6 +181,13 @@ def evaluate_with_details(test, answer):
         passed = not missing
         explanation = ("All required terms were found." if passed else
                        "Missing required term(s): " + ", ".join(missing) + ".")
+    elif method == "ordered_contains":
+        required = test.get("required_terms", [])
+        found = [_contains_term(answer, term) for term in required]
+        in_order = _contains_terms_in_order(answer, required)
+        passed = all(found) and in_order
+        explanation = ("All requested values were found in order." if passed else
+                       "Requested values were missing or appeared in the wrong order.")
     elif method == "constraint_schedule":
         items = test.get("schedule_items", [])
         constraints = test.get("schedule_constraints", [])
@@ -218,23 +262,32 @@ def evaluate_with_details(test, answer):
                        else len(words) >= test.get("minimum_words", 1))
         missing = [str(item) for item in test.get("required_terms", [])
                    if not _contains_term(answer, item)]
-        passed = valid_count and not missing
-        if not valid_count:
-            explanation = (f"Response has {len(words)} words; expected exactly "
-                           f"{test['exact_words']}." if "exact_words" in test else
-                           f"Response has {len(words)} words; expected at least "
-                           f"{test.get('minimum_words', 1)}.")
-        elif missing:
-            explanation = "Missing required term(s): " + ", ".join(missing) + "."
-        else:
-            explanation = f"Word-count constraint passed ({len(words)} words); all required terms were found."
+        topic_terms = test.get("topic_terms", [])
+        matched_topics = [str(term) for term in topic_terms
+                          if isinstance(term, str) and _contains_term(answer, term)]
+        minimum_topics = test.get("minimum_topic_terms", 0)
+        checks = [{"name": "Word count", "passed": valid_count,
+                   "expected": test.get("exact_words", test.get("minimum_words", 1)),
+                   "actual": len(words)}]
+        checks.extend({"name": f"Required term: {term}",
+                       "passed": term not in missing} for term in test.get("required_terms", []))
+        if minimum_topics:
+            checks.append({"name": "Topical relevance proxy",
+                           "passed": len(set(matched_topics)) >= minimum_topics,
+                           "expected_distinct_terms": minimum_topics,
+                           "matched_terms": sorted(set(matched_topics))})
+        passed = all(check["passed"] for check in checks)
+        score = round(10 * sum(check["passed"] for check in checks) / len(checks), 2)
+        explanation = (f"{sum(check['passed'] for check in checks)} of {len(checks)} lexical "
+                       "format/relevance checks passed. Topical terms are only a relevance proxy; "
+                       "semantic quality and originality are not judged.")
     elif method != "json_schema":
         passed = answer == str(expected)
         explanation = "Response exactly matches the expected answer." if passed else (
             f"Response did not exactly match expected answer {expected!r}.")
     result = {"passed": passed, "status": "PASS" if passed else "FAILED",
               "criteria": criteria, "explanation": explanation}
-    if method in ("constraint_schedule", "fact_fields"):
+    if method in ("constraint_schedule", "fact_fields", "rubric"):
         result["score"] = score
         result["checks"] = checks
     return result

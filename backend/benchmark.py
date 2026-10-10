@@ -30,8 +30,8 @@ CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
 COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
-TASK_SET_VERSION = "pilot-1"
-EVALUATOR_VERSION = "pilot-1"
+TASK_SET_VERSION = "pilot-2"
+EVALUATOR_VERSION = "pilot-2"
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
     "Medium": "A routine task with a larger input or an additional constraint.",
@@ -61,6 +61,154 @@ def _valid_schedule(route, items, constraints):
 def _schedule_has_solution(items, constraints):
     return any(_valid_schedule(route, items, constraints)
                for route in itertools.permutations(items))
+
+
+def _inventory_adjustment_test(common, difficulty, a, b):
+    function = "apply_stock_adjustments"
+    rules = [
+        "Return a new dictionary; do not mutate the opening-stock dictionary.",
+        "Opening stock is a dictionary from SKU strings to integer quantities; ignore invalid entries.",
+        "An adjustment is a two-item (sku, delta) pair; add every valid signed integer delta.",
+        "Ignore malformed pairs, empty SKUs, non-integer deltas, and boolean deltas.",
+        "Trim surrounding whitespace from SKU keys; preserve valid zero balances.",
+    ]
+    checks = [
+        "assert apply_stock_adjustments({}, []) == {}",
+        f"assert apply_stock_adjustments({{'PEN': 2}}, [('PEN', {a}), ('PEN', {-b})]) == "
+        f"{{'PEN': {2 + a - b}}}",
+    ]
+    if difficulty in ("Medium", "Hard", "Uncalibrated"):
+        checks.append(
+            f"assert apply_stock_adjustments({{'PEN': 2, 'BOOK': 4}}, "
+            f"[('PEN', {a}), ('BOOK', {-b}), ('PEN', 3)]) == "
+            f"{{'PEN': {5 + a}, 'BOOK': {4 - b}}}")
+    if difficulty in ("Hard", "Uncalibrated"):
+        checks.extend([
+            f"assert apply_stock_adjustments({{'PEN': 5, 'BOOK': 3, 'BAD': True, ' ': 7}}, "
+            f"[None, [], (' ', 2), ('PEN', True), ('PEN', '4'), ('PEN', {-5})]) == "
+            "{'PEN': 0, 'BOOK': 3}",
+            f"assert apply_stock_adjustments(None, [('PEN', {a})]) == {{'PEN': {a}}}",
+            "stock = {'PEN': 4}; apply_stock_adjustments(stock, [('PEN', 2)]); assert stock == {'PEN': 4}",
+        ])
+    if difficulty == "Uncalibrated":
+        checks.append(
+            f"assert apply_stock_adjustments({{' PEN ': 8}}, [('PEN', {-b}), (' PEN ', {b})]) "
+            "== {'PEN': 8}")
+    source = (
+        "def apply_stock_adjustments(opening_stock, adjustments):\n"
+        "    result = {}\n"
+        "    if isinstance(opening_stock, dict):\n"
+        "        for sku, quantity in opening_stock.items():\n"
+        "            if (isinstance(sku, str) and sku.strip() and isinstance(quantity, int)\n"
+        "                    and not isinstance(quantity, bool)):\n"
+        "                result[sku.strip()] = result.get(sku.strip(), 0) + quantity\n"
+        "    if isinstance(adjustments, (list, tuple)):\n"
+        "        for adjustment in adjustments:\n"
+        "            if not isinstance(adjustment, (list, tuple)) or len(adjustment) != 2:\n"
+        "                continue\n"
+        "            sku, delta = adjustment\n"
+        "            if (not isinstance(sku, str) or not sku.strip() or not isinstance(delta, int)\n"
+        "                    or isinstance(delta, bool)):\n"
+        "                continue\n"
+        "            sku = sku.strip()\n"
+        "            result[sku] = result.get(sku, 0) + delta\n"
+        "    return result")
+    return {
+        **common,
+        "subcategory": "Inventory adjustments",
+        "prompt": f"Implement `{function}(opening_stock, adjustments)`. Return a new dictionary of "
+                  "current quantities by SKU. Follow the contract exactly:\n" +
+                  "\n".join(f"- {rule}" for rule in rules) +
+                  f"\nExample: opening stock {{'PEN': 2}} and adjustments [('PEN', {a})] "
+                  f"produce {{'PEN': {2 + a}}}.\nReturn Python code only.",
+        "expected_answer": "Python function that applies valid signed stock adjustments.",
+        "evaluation_method": "code", "tests": checks, "demo_answer": source,
+        "difficulty_rationale": {
+            "Easy": "Apply signed adjustments to one valid opening quantity.",
+            "Medium": "Aggregate repeated updates across multiple SKUs.",
+            "Hard": "Reject malformed snapshots and updates without losing valid balances.",
+            "Uncalibrated": "Normalize SKU whitespace, preserve zero balances, and avoid input mutation.",
+        }[difficulty],
+    }
+
+
+def _long_context_test(common, difficulty, rng):
+    noise_count = {"Easy": 24, "Medium": 40, "Hard": 56, "Uncalibrated": 72}[difficulty]
+    noise = [
+        f"Archive note {index + 1}: batch {rng.randint(1000, 9999)} was checked by desk "
+        f"{rng.choice(('north', 'east', 'south', 'west'))}; status {rng.choice(('closed', 'queued', 'held'))}."
+        for index in range(noise_count)
+    ]
+    if difficulty == "Easy":
+        target = f"AS-{rng.randint(100, 999)}"
+        code = f"PIN-{rng.randint(1000, 9999)}"
+        records = [(f"Asset {target} has access code {code}.") for _ in range(1)]
+        records.extend(
+            f"Asset AS-{rng.randint(100, 999)} has access code PIN-{rng.randint(1000, 9999)}."
+            for _ in range(7))
+        prompt_question = f"What is the access code for asset {target}?"
+        answer = code
+        rationale = "Locate one requested value among unrelated archive notes."
+    elif difficulty == "Medium":
+        person = rng.choice(("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal"))
+        staff_ids = [f"ST-{rng.randint(100, 999)}" for _ in range(8)]
+        people = list(zip(("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal"), staff_ids))
+        assets = [(staff_id, f"AS-{rng.randint(100, 999)}", f"PIN-{rng.randint(1000, 9999)}")
+                  for staff_id in staff_ids]
+        selected = assets[("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal").index(person)]
+        records = [f"Staff directory: {name} has staff ID {staff_id}."
+                   for name, staff_id in people]
+        records.extend(f"Asset register: {asset} is assigned to {staff_id}; access code {code}."
+                       for staff_id, asset, code in assets)
+        prompt_question = f"Find the access code for the asset assigned to {person}."
+        answer = selected[2]
+        rationale = "Cross-reference a named person to a staff ID and then an assigned asset."
+    elif difficulty == "Hard":
+        asset = f"AS-{rng.randint(100, 999)}"
+        logs = [(f"20{year:02d}-04-{day:02d}", rng.choice(("ready", "held", "repaired")))
+                for year, day in ((24, 2), (25, 11), (26, 7))]
+        records = [f"Inspection log: asset {asset} was marked {state} on {date}."
+                   for date, state in logs]
+        records.extend(
+            f"Inspection log: asset AS-{rng.randint(100, 999)} was marked "
+            f"{rng.choice(('ready', 'held', 'repaired'))} on 2025-04-{rng.randint(1, 28):02d}."
+            for _ in range(18))
+        _, latest_state = max(logs)
+        prompt_question = f"What is the latest recorded status of asset {asset}?"
+        answer = latest_state
+        rationale = "Compare dated records for the same asset and ignore older entries and distractors."
+    else:
+        people = [(f"Person-{index}", f"ST-{rng.randint(100, 999)}") for index in range(8)]
+        units = [(staff_id, f"UNIT-{rng.randint(10, 99)}")
+                 for _, staff_id in people]
+        regions = [(unit, f"REGION-{chr(65 + index)}")
+                   for index, (_, unit) in enumerate(units)]
+        assets = [(unit, f"AS-{rng.randint(100, 999)}", f"PIN-{rng.randint(1000, 9999)}")
+                  for _, unit in units]
+        target_region = rng.choice([region for _, region in regions])
+        target_units = [unit for unit, region in regions if region == target_region]
+        target_assets = [asset for unit, asset, _ in assets if unit in target_units]
+        target_asset = rng.choice(target_assets)
+        answer = next(code for _, asset, code in assets if asset == target_asset)
+        records = [f"People index: {person} belongs to staff ID {staff_id}."
+                   for person, staff_id in people]
+        records.extend(f"Unit directory: staff ID {staff_id} belongs to {unit}."
+                       for staff_id, unit in units)
+        records.extend(f"Regional directory: {unit} is located in {region}."
+                       for unit, region in regions)
+        records.extend(f"Asset register: {asset} belongs to {unit}; access code {code}."
+                       for unit, asset, code in assets)
+        prompt_question = (f"Using all four indexes, return the access code for an asset whose "
+                           f"unit is in {target_region}.")
+        rationale = "Join people, staff, unit, region, and asset records while ignoring distractors."
+    rng.shuffle(records)
+    rng.shuffle(noise)
+    prompt = ("Use the archive records below. Treat unrelated notes as distractors and answer only "
+              "with the requested value.\n\nRecords:\n" +
+              "\n".join(records + noise) + f"\n\nQuestion: {prompt_question}")
+    return {**common, "difficulty_rationale": rationale, "prompt": prompt,
+            "expected_answer": answer, "evaluation_method": "exact_any",
+            "acceptable_answers": [answer]}
 
 
 def _test(category, i, rng, difficulty=None):
@@ -94,21 +242,43 @@ def _test(category, i, rng, difficulty=None):
     if category == "Reasoning":
         items = rng.sample(["Depot", "Clinic", "Market", "Library", "Archive",
                             "Harbor", "Gallery", "Workshop", "Station"], {
-            "Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 5}[difficulty])
+            "Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 6}[difficulty])
         constraints = [{"kind": "before", "first": items[0], "second": items[1]}]
         if difficulty in ("Medium", "Hard", "Uncalibrated"):
-            constraints.append({"kind": "immediately_before",
-                                "first": items[2], "second": items[3]})
-        if difficulty in ("Hard", "Uncalibrated"):
-            constraints.append({"kind": "not_adjacent",
-                                "first": items[0], "second": items[4]})
-        if difficulty == "Uncalibrated":
+            medium_variant = rng.choice(("adjacency", "separation"))
+            if medium_variant == "adjacency":
+                constraints.append({"kind": "immediately_before",
+                                    "first": items[2], "second": items[3]})
+            else:
+                constraints.append({"kind": "not_adjacent",
+                                    "first": items[0], "second": items[3]})
+        if difficulty == "Hard":
             if rng.choice((True, False)):
+                constraints.extend([
+                    {"kind": "immediately_before", "first": items[2], "second": items[3]},
+                    {"kind": "not_adjacent", "first": items[0], "second": items[4]},
+                ])
+            else:
+                constraints.extend([
+                    {"kind": "immediately_before", "first": items[1], "second": items[2]},
+                    {"kind": "fixed_position", "item": items[4], "position": len(items) - 1},
+                    {"kind": "not_adjacent", "first": items[0], "second": items[4]},
+                ])
+        if difficulty == "Uncalibrated":
+            variant = rng.choice(("contradictory_position", "satisfiable_position", "precedence_cycle"))
+            if variant == "contradictory_position":
+                constraints.append({"kind": "immediately_before",
+                                    "first": items[2], "second": items[3]})
                 constraints.append({"kind": "fixed_position", "item": items[2],
                                     "position": len(items) - 1})
-            else:
+            elif variant == "satisfiable_position":
                 constraints.append({"kind": "fixed_position", "item": items[0],
                                     "position": 0})
+            else:
+                constraints.extend([
+                    {"kind": "before", "first": items[1], "second": items[2]},
+                    {"kind": "before", "first": items[2], "second": items[0]},
+                ])
         descriptions = {
             "before": lambda rule: f"{rule['first']} must be visited before {rule['second']}",
             "immediately_before": lambda rule: (
@@ -134,6 +304,10 @@ def _test(category, i, rng, difficulty=None):
                 "schedule_constraints": constraints,
                 "schedule_possible": _schedule_has_solution(items, constraints)}
     if category == "Coding":
+        if rng.choice((True, False)):
+            test = _inventory_adjustment_test(common, difficulty, a, b)
+            test["subcategory"] = "Inventory adjustments"
+            return test
         function = "reconcile_stock_events"
         rules = [
             "Each valid record is a dictionary with a non-empty event_id, a non-empty string sku, "
@@ -157,10 +331,16 @@ def _test(category, i, rng, difficulty=None):
             rationale += " Ignore duplicate event IDs after the first valid event."
         if difficulty in ("Hard", "Uncalibrated"):
             rules.extend([
-                "Ignore records with missing/empty IDs or SKUs, non-integer deltas, or boolean deltas.",
+                "Trim surrounding whitespace from event IDs and SKUs; ignore IDs or SKUs that are empty after trimming.",
+                "Ignore records with missing IDs or SKUs, non-integer deltas, or boolean deltas.",
                 "A malformed record does not reserve its event_id; a valid zero-net SKU remains in the result.",
             ])
             checks.extend([
+                "assert reconcile_stock_events([None, [], {}, {'event_id': '', 'sku': 'PEN', 'delta': 2}, {'event_id': 'x', 'sku': ' ', 'delta': 2}]) == {}",
+                f"assert reconcile_stock_events([{{'event_id': ' same ', 'sku': '', 'delta': 9}}, "
+                f"{{'event_id': 'same', 'sku': ' PEN ', 'delta': {a}}}, "
+                f"{{'event_id': ' same ', 'sku': 'BOOK', 'delta': 99}}]) == "
+                f"{{'PEN': {a}}}",
                 f"assert reconcile_stock_events([{{'event_id': 'bad', 'sku': '', 'delta': 8}}, "
                 f"{{'event_id': 'bad', 'sku': 'PEN', 'delta': {a}}}, "
                 f"{{'event_id': 'bool', 'sku': 'PEN', 'delta': True}}, "
@@ -197,6 +377,8 @@ def _test(category, i, rng, difficulty=None):
             "            continue\n"
             "        if not isinstance(delta, int) or isinstance(delta, bool):\n"
             "            continue\n"
+            "        event_id = event_id.strip()\n"
+            "        sku = sku.strip()\n"
             "        if event_id in seen:\n"
             "            continue\n"
             "        seen.add(event_id)\n"
@@ -206,7 +388,8 @@ def _test(category, i, rng, difficulty=None):
             {"event_id": f"sample-{i}", "sku": "PEN", "delta": a},
             {"event_id": f"sample-{i + 1}", "sku": "PEN", "delta": -b},
         ]
-        return {**common, "prompt": f"Implement `{function}(events)` for reconciling a small inventory ledger. "
+        return {**common, "subcategory": "Inventory event reconciliation",
+                "prompt": f"Implement `{function}(events)` for reconciling a small inventory ledger. "
                                      "Return a dictionary mapping each SKU to its net quantity change. "
                                      "Each record includes `event_id`, `sku`, and `delta`. "
                                      "Follow all rules exactly:\n" + rules_text +
@@ -216,6 +399,8 @@ def _test(category, i, rng, difficulty=None):
                 "expected_answer": "Python function that satisfies all inventory reconciliation rules",
                 "evaluation_method": "code", "tests": checks, "demo_answer": source,
                 "difficulty_rationale": rationale}
+    if category == "Long Context":
+        return _long_context_test(common, difficulty, rng)
     if category == "Structured Output":
         if difficulty in ("Easy", "Medium"):
             keys = ("answer", "valid")
@@ -233,67 +418,96 @@ def _test(category, i, rng, difficulty=None):
                 "required_types": types}
     if category == "Knowledge":
         knowledge_by_difficulty = {
-            "Easy": (("What is the capital of France?", "Paris"),
-                     ("Which planet is known as the Red Planet?", "Mars")),
-            "Medium": (("What is the chemical symbol for water?", "H2O"),
-                       ("Which ocean lies between Africa and Australia?", "Indian Ocean")),
+            "Easy": (("What is the capital of France?", ("Paris", "The capital of France is Paris.")),
+                     ("Which planet is known as the Red Planet?", ("Mars", "The Red Planet is Mars."))),
+            "Medium": (("What is the chemical symbol for water?", ("H2O", "Water's chemical formula is H2O.")),
+                       ("Which ocean lies between Africa and Australia?",
+                        ("Indian Ocean", "The Indian Ocean lies between Africa and Australia."))),
             "Hard": (("Which gas do plants absorb from the atmosphere during photosynthesis?",
-                      "carbon dioxide"),
-                     ("Which force keeps planets in orbit around the Sun?", "gravity")),
+                      ("carbon dioxide", "Plants absorb carbon dioxide during photosynthesis.")),
+                     ("Which force keeps planets in orbit around the Sun?",
+                      ("gravity", "Gravity keeps planets in orbit around the Sun."))),
             "Uncalibrated": (("What is the name of the process by which a liquid changes into a gas?",
-                        "evaporation"),
-                       ("What is the term for an animal that is active at night?", "nocturnal")),
+                              ("evaporation", "The process is called evaporation.")),
+                             ("What is the term for an animal that is active at night?",
+                              ("nocturnal", "A nocturnal animal is active at night."))),
         }
-        question, answer = rng.choice(knowledge_by_difficulty[difficulty])
+        question, acceptable = rng.choice(knowledge_by_difficulty[difficulty])
         return {**common, "prompt": question + " Answer concisely.",
                 "difficulty_rationale": "Short factual recall from a seeded question set; this "
                                         "category is not independently calibrated by difficulty.",
-                "expected_answer": answer, "evaluation_method": "contains_all",
-                "required_terms": [answer]}
+                "expected_answer": acceptable[0], "evaluation_method": "exact_any",
+                "acceptable_answers": list(acceptable)}
     if category == "Hallucination Resistance":
         place = rng.choice(("Zorbland", "Quendor", "Nimbaria", "Veloria"))
-        prompt = f"What is the capital of the fictional country {place}?"
-        required = ["unknown"]
+        prompt = (f"What is the capital of the fictional country {place}? State that it is unknown "
+                  "and do not suggest a real capital.")
+        acceptable = [
+            f"{place} is fictional, so its capital is unknown.",
+            f"The capital of {place} is unknown because {place} is fictional.",
+        ]
         if difficulty in ("Hard", "Uncalibrated"):
-            prompt += " Do not invent an answer; explain why a real capital cannot be verified."
-            required.append("fictional")
+            prompt += " Explicitly say that a real capital cannot be verified."
+            acceptable = [
+                f"I cannot verify a real capital for {place} because it is fictional.",
+                f"{place} is fictional, so no real capital can be verified.",
+            ]
         if difficulty == "Uncalibrated":
             prompt += " Include the word 'verify'."
-            required.append("verify")
-        return {**common, "prompt": prompt + " State that it is unknown.",
+            acceptable = [
+                f"I cannot verify a real capital for {place} because it is fictional.",
+                f"{place} is fictional, so I cannot verify a real capital.",
+            ]
+        return {**common, "prompt": prompt,
                 "difficulty_rationale": "Recognize an unanswerable fictional-entity premise; "
-                                        "harder tiers also require an explicit uncertainty cue.",
-                "expected_answer": "unknown", "evaluation_method": "contains_all",
-                "required_terms": required}
+                                        "harder tiers also require explicit verification language. "
+                                        "Only listed concise, non-hallucinated answers are accepted.",
+                "expected_answer": acceptable[0], "evaluation_method": "exact_any",
+                "acceptable_answers": acceptable}
     if category == "Multilingual":
         phrases = {
-            "Easy": (("thank you", "gracias"), ("please", "por favor")),
-            "Medium": (("good morning", "buenos días"), ("good night", "buenas noches")),
-            "Hard": (("Where is the train station?", "¿Dónde está la estación de tren?"),
-                     ("I would like a glass of water.", "Quisiera un vaso de agua.")),
+            "Easy": (("thank you", ("gracias", "muchas gracias")),
+                     ("please", ("por favor", "si es tan amable"))),
+            "Medium": (("good morning", ("buenos días", "muy buenos días")),
+                       ("good night", ("buenas noches", "que pases buenas noches"))),
+            "Hard": (("Where is the train station?",
+                      ("¿Dónde está la estación de tren?", "¿Dónde queda la estación de tren?")),
+                     ("I would like a glass of water.",
+                      ("Quisiera un vaso de agua.", "Me gustaría un vaso de agua."))),
             "Uncalibrated": (("Although it was raining, we continued walking.",
-                        "Aunque llovía, seguimos caminando."),
-                       ("If I had known, I would have called you.",
-                        "Si lo hubiera sabido, te habría llamado.")),
+                              ("Aunque llovía, seguimos caminando.",
+                               "Aunque estaba lloviendo, continuamos caminando.")),
+                             ("If I had known, I would have called you.",
+                              ("Si lo hubiera sabido, te habría llamado.",
+                               "De haberlo sabido, te habría llamado."))),
         }
-        phrase, expected = rng.choice(phrases[difficulty])
-        return {**common, "prompt": f"Translate '{phrase}' into Spanish.",
+        phrase, acceptable = rng.choice(phrases[difficulty])
+        return {**common, "prompt": f"Translate '{phrase}' into Spanish. Return only the translation.",
                 "difficulty_rationale": "Translate a seeded phrase; higher tiers use longer "
-                                        "sentences, clauses, or conditional grammar.",
-                "expected_answer": expected, "evaluation_method": "contains_all",
-                "required_terms": [expected]}
+                                        "sentences, clauses, or conditional grammar. Multiple "
+                                        "listed target-language variants are accepted.",
+                "expected_answer": acceptable[0], "evaluation_method": "exact_any",
+                "acceptable_answers": list(acceptable)}
     if category == "Instruction Following":
         count = {"Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 6}[difficulty]
         term = rng.choice(("rain", "wind", "sunlight", "snow"))
         required_terms = [term] if difficulty != "Uncalibrated" else [term, "calm"]
+        topic_terms = {
+            "rain": ("rain", "wet", "drops", "weather", "water"),
+            "wind": ("wind", "breeze", "air", "gust", "weather"),
+            "sunlight": ("sunlight", "sun", "bright", "light", "warm"),
+            "snow": ("snow", "cold", "flakes", "winter", "white"),
+        }[term]
         return {**common, "prompt": f"Describe {term} in exactly {count} words." +
-                                     (" Include the word 'calm'." if difficulty == "Uncalibrated" else ""),
+                                     (" Include the word 'calm'." if difficulty == "Uncalibrated" else "") +
+                                     " Make the description relevant, not just a list of repeated words.",
                 "difficulty_rationale": f"Meet an exact {count}-word constraint" +
-                                        (" plus an additional required term."
+                                        (" plus an additional required term and topic relevance."
                                          if difficulty == "Uncalibrated" else "."),
                 "expected_answer": f"{count} words and required terms",
                 "evaluation_method": "rubric", "exact_words": count,
-                "required_terms": required_terms}
+                "required_terms": required_terms, "topic_terms": list(topic_terms),
+                "minimum_topic_terms": 2}
     if category == "Summarization":
         report_time, diagnosis_time, recovery_time, next_update = rng.choice((
             ("09:10", "09:35", "09:50", "10:30"),
@@ -302,50 +516,100 @@ def _test(category, i, rng, difficulty=None):
         ))
         affected = rng.randint(5, 19)
         monitored = affected + rng.randint(12, 60)
+        scenario = rng.choice((
+            {
+                "service": "file uploads", "working": "downloads", "affected_unit": "customers",
+                "impact": "some customers could not upload files; downloads continued to work",
+                "impact_summary": "had upload failures",
+                "hypothesis": "a network outage", "cause": "the upload service certificate had expired",
+                "fix": "renewed the certificate", "recovered": "uploads",
+                "unknown": "whether any files were lost",
+                "cause_variants": ("the upload service certificate expired",
+                                   "the certificate on the upload service expired",
+                                   "an expired certificate disrupted the upload service"),
+                "unknown_variants": ("unknown; engineers are still investigating",
+                                     "it is not yet known whether files were lost",
+                                     "whether any files were lost remains under investigation"),
+            },
+            {
+                "service": "checkout", "working": "product browsing",
+                "affected_unit": "checkout sessions",
+                "impact": "some customers could not complete checkout; product browsing continued to work",
+                "impact_summary": "failed",
+                "hypothesis": "database overload", "cause": "the checkout signing key had expired",
+                "fix": "rotated the signing key", "recovered": "checkout",
+                "unknown": "whether any orders were duplicated",
+                "cause_variants": ("the checkout signing key expired",
+                                   "the signing key used by checkout had expired",
+                                   "an expired signing key disrupted checkout"),
+                "unknown_variants": ("unknown; engineers are still investigating",
+                                     "it is not yet known whether orders were duplicated",
+                                     "whether any duplicate orders occurred remains under investigation"),
+            },
+            {
+                "service": "notifications", "working": "the core application",
+                "affected_unit": "notification deliveries",
+                "impact": "some notifications were delayed; the core application remained available",
+                "impact_summary": "were delayed",
+                "hypothesis": "an external provider outage",
+                "cause": "the notification retry queue had been misconfigured",
+                "fix": "corrected the retry queue configuration", "recovered": "notifications",
+                "unknown": "whether any notifications were permanently lost",
+                "cause_variants": ("the notification retry queue was misconfigured",
+                                   "a misconfiguration affected the notification retry queue",
+                                   "incorrect retry queue settings delayed notifications"),
+                "unknown_variants": ("unknown; engineers are still investigating",
+                                     "it is not yet known whether notifications were lost",
+                                     "whether any notifications were permanently lost remains under investigation"),
+            },
+        ))
+        impact_variants = (
+            f"{affected} of {monitored} {scenario['affected_unit']} {scenario['impact_summary']}",
+            f"{scenario['impact_summary'].capitalize()} for {affected} of {monitored} "
+            f"monitored {scenario['affected_unit']}",
+        )
         source_text = (
-            f"At {report_time}, the service desk received reports that some customers could not upload "
-            "files; downloads continued to work. The first notice suggested a network outage, "
-            f"but that was only an early guess. At {diagnosis_time}, engineers confirmed that the upload "
-            "service certificate had expired. The team renewed it, and uploads were working "
-            f"again by {recovery_time}. The incident affected {affected} of {monitored} monitored "
-            f"customers. Engineers have not yet established whether any files were lost. "
+            f"At {report_time}, the service desk received reports that {scenario['impact']}. "
+            f"The first notice suggested {scenario['hypothesis']}, but that was only an early guess. "
+            f"At {diagnosis_time}, engineers confirmed that {scenario['cause']}. The team "
+            f"{scenario['fix']}, and {scenario['recovered']} were working again by {recovery_time}. "
+            f"The incident affected {affected} of {monitored} monitored {scenario['affected_unit']}. "
+            f"Engineers have not yet established {scenario['unknown']}. "
             f"The next update is due at {next_update}.")
         fields = {
             "Easy": {
-                "impact": [f"{affected} of {monitored} customers had upload failures",
-                           f"{affected} of {monitored} monitored customers could not upload files"],
-                "recovery": [f"uploads were restored by {recovery_time}",
-                             f"uploads resumed by {recovery_time}"],
+                "impact": list(impact_variants),
+                "recovery": [f"{scenario['recovered']} were restored by {recovery_time}",
+                             f"{scenario['recovered']} resumed by {recovery_time}",
+                             f"{scenario['recovered']} were back by {recovery_time}"],
             },
             "Medium": {
-                "impact": [f"{affected} of {monitored} customers had upload failures",
-                           f"{affected} of {monitored} monitored customers could not upload files"],
-                "cause": ["the upload service certificate expired",
-                          "the certificate on the upload service expired"],
-                "recovery": [f"uploads were restored by {recovery_time}",
-                             f"uploads resumed by {recovery_time}"],
+                "impact": list(impact_variants),
+                "cause": list(scenario["cause_variants"]),
+                "recovery": [f"{scenario['recovered']} were restored by {recovery_time}",
+                             f"{scenario['recovered']} resumed by {recovery_time}",
+                             f"{scenario['recovered']} were back by {recovery_time}"],
             },
             "Hard": {
-                "impact": [f"{affected} of {monitored} customers had upload failures; downloads worked",
-                           f"{affected} of {monitored} monitored customers could not upload; downloads continued"],
-                "cause": ["the upload service certificate expired",
-                          "the certificate on the upload service expired"],
-                "recovery": [f"uploads were restored by {recovery_time}",
-                             f"uploads resumed by {recovery_time}"],
-                "data_loss": ["unknown; engineers are still investigating",
-                              "it is not yet known whether files were lost"],
+                "impact": [f"{impact_variants[0]}; {scenario['working']} remained available",
+                           f"{impact_variants[1]}; {scenario['working']} continued working"],
+                "cause": list(scenario["cause_variants"]),
+                "recovery": [f"{scenario['recovered']} were restored by {recovery_time}",
+                             f"{scenario['recovered']} resumed by {recovery_time}",
+                             f"{scenario['recovered']} were back by {recovery_time}"],
+                "unresolved": list(scenario["unknown_variants"]),
             },
             "Uncalibrated": {
-                "impact": [f"{affected} of {monitored} customers had upload failures; downloads worked",
-                           f"{affected} of {monitored} monitored customers could not upload; downloads continued"],
-                "cause": ["the upload service certificate expired",
-                          "the certificate on the upload service expired"],
-                "recovery": [f"uploads were restored by {recovery_time}",
-                             f"uploads resumed by {recovery_time}"],
-                "data_loss": ["unknown; engineers are still investigating",
-                              "it is not yet known whether files were lost"],
-                "early_claim": ["the network outage was an unconfirmed initial guess",
-                                "network outage was only an initial unconfirmed hypothesis"],
+                "impact": [f"{impact_variants[0]}; {scenario['working']} remained available",
+                           f"{impact_variants[1]}; {scenario['working']} continued working"],
+                "cause": list(scenario["cause_variants"]),
+                "recovery": [f"{scenario['recovered']} were restored by {recovery_time}",
+                             f"{scenario['recovered']} resumed by {recovery_time}",
+                             f"{scenario['recovered']} were back by {recovery_time}"],
+                "unresolved": list(scenario["unknown_variants"]),
+                "early_claim": [f"{scenario['hypothesis']} was an unconfirmed initial guess",
+                                f"{scenario['hypothesis']} was only an initial unconfirmed hypothesis",
+                                f"the initial {scenario['hypothesis']} theory was not confirmed"],
                 "next_update": [next_update, f"at {next_update}"],
             },
         }[difficulty]
@@ -368,15 +632,19 @@ def _test(category, i, rng, difficulty=None):
     if category == "Creative Generation":
         count = {"Easy": 3, "Medium": 4, "Hard": 5, "Uncalibrated": 6}[difficulty]
         terms = ["test"] if difficulty != "Uncalibrated" else ["test", "trust"]
+        topic_terms = ("test", "testing", "careful", "checks", "quality", "reliable",
+                       "bugs", "trust", "results")
         return {**common, "prompt": f"Write a {count}-word slogan about careful testing and include "
                                     f"{'the word' if len(terms) == 1 else 'the words'} "
-                                    f"{', '.join(repr(term) for term in terms)}.",
+                                    f"{', '.join(repr(term) for term in terms)}. Make it relevant "
+                                    "and avoid repeating words just to meet the count.",
                 "difficulty_rationale": f"Create a slogan under an exact {count}-word constraint" +
                                         (" and satisfy multiple keyword constraints."
                                          if len(terms) > 1 else "."),
                 "expected_answer": f"{count} words and required terms",
                 "evaluation_method": "rubric", "exact_words": count,
-                "required_terms": terms}
+                "required_terms": terms, "topic_terms": list(topic_terms),
+                "minimum_topic_terms": 2}
     if category == "Consistency":
         if difficulty == "Easy":
             expression, total = f"{a} + {b}", a + b
@@ -395,9 +663,8 @@ def _test(category, i, rng, difficulty=None):
                     "Hard": "Check a two-step expression.",
                     "Uncalibrated": "Check a grouped expression with multiple operations.",
                 }[difficulty],
-                "prompt": f"Is {expression} equal to {proposed}? Answer yes or no.",
-                "expected_answer": expected, "evaluation_method": "contains_all",
-                "required_terms": [expected]}
+                "prompt": f"Is {expression} equal to {proposed}? Return only yes or no.",
+                "expected_answer": expected, "evaluation_method": "choice"}
     if category == "Context Retrieval":
         marker = f"BLUE-{a}"
         if difficulty == "Easy":
@@ -422,7 +689,7 @@ def _test(category, i, rng, difficulty=None):
                     "Uncalibrated": "Retrieve multiple values by attribute and return both.",
                 }[difficulty],
                 "prompt": prompt, "expected_answer": " ".join(markers),
-                "evaluation_method": "contains_all", "required_terms": markers}
+                "evaluation_method": "ordered_contains", "required_terms": markers}
     return {**common, "prompt": "State the answer clearly.", "expected_answer": "ok",
             "evaluation_method": "contains_all", "required_terms": ["ok"]}
 
@@ -620,6 +887,11 @@ class BenchmarkManager:
             if test["evaluation_method"] == "rubric":
                 count = test.get("exact_words", test.get("minimum_words", 4))
                 words = list(test.get("required_terms", []))[:count]
+                for term in test.get("topic_terms", []):
+                    if len(words) >= count:
+                        break
+                    if term not in words:
+                        words.append(term)
                 words.extend(["careful", "reliable", "local", "testing"][:count - len(words)])
                 return " ".join(words)
             if test["evaluation_method"] == "contains_all":
@@ -1124,7 +1396,7 @@ class BenchmarkManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
-            fields = ["id", "category", "difficulty", "difficulty_calibration_status",
+            fields = ["id", "category", "subcategory", "difficulty", "difficulty_calibration_status",
                       "task_set_version", "evaluator_version", "item_instance_id",
                       "item_fingerprint", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
@@ -1134,6 +1406,7 @@ class BenchmarkManager:
             writer.writerows({
                 "id": self._csv_cell(row.get("id")),
                 "category": self._csv_cell(row.get("category")),
+                "subcategory": self._csv_cell(row.get("subcategory")),
                 "difficulty": self._csv_cell(row.get("difficulty")),
                 "difficulty_calibration_status": self._csv_cell(
                     row.get("difficulty_calibration_status")),

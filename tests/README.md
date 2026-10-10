@@ -41,7 +41,9 @@ handling, and size-bounded discovery responses. Evaluator checks cover JSON valu
 word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
 samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
 cancellation during context tests. Difficulty-generation coverage checks that all four tiers appear
-in QUICK and that every primary category spans all tiers in FULL. Test-result coverage verifies
+in QUICK and that every primary category spans all tiers in FULL. It also checks varied
+reasoning/summarization items, two coding task families, and generated long-context tasks.
+Test-result coverage verifies
 prompt/evaluator explanations, answer traces, and that unavailable evaluators produce unscored
 NOT RUN outcomes.
 
