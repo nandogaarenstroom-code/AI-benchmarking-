@@ -140,21 +140,22 @@ def _long_context_test(common, difficulty, rng):
         for index in range(noise_count)
     ]
     if difficulty == "Easy":
-        target = f"AS-{rng.randint(100, 999)}"
-        code = f"PIN-{rng.randint(1000, 9999)}"
-        records = [(f"Asset {target} has access code {code}.") for _ in range(1)]
-        records.extend(
-            f"Asset AS-{rng.randint(100, 999)} has access code PIN-{rng.randint(1000, 9999)}."
-            for _ in range(7))
+        asset_ids = rng.sample(range(100, 1000), 8)
+        codes = rng.sample(range(1000, 10000), 8)
+        target, code = f"AS-{asset_ids[0]}", f"PIN-{codes[0]}"
+        records = [f"Asset AS-{asset_id} has access code PIN-{pin}."
+                   for asset_id, pin in zip(asset_ids, codes)]
         prompt_question = f"What is the access code for asset {target}?"
         answer = code
         rationale = "Locate one requested value among unrelated archive notes."
     elif difficulty == "Medium":
         person = rng.choice(("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal"))
-        staff_ids = [f"ST-{rng.randint(100, 999)}" for _ in range(8)]
+        staff_ids = [f"ST-{staff_id}" for staff_id in rng.sample(range(100, 1000), 8)]
         people = list(zip(("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal"), staff_ids))
-        assets = [(staff_id, f"AS-{rng.randint(100, 999)}", f"PIN-{rng.randint(1000, 9999)}")
-                  for staff_id in staff_ids]
+        asset_ids = rng.sample(range(100, 1000), 8)
+        codes = rng.sample(range(1000, 10000), 8)
+        assets = [(staff_id, f"AS-{asset_id}", f"PIN-{code}")
+                  for staff_id, asset_id, code in zip(staff_ids, asset_ids, codes)]
         selected = assets[("Ari", "Bo", "Cy", "Dee", "Eli", "Flo", "Gia", "Hal").index(person)]
         records = [f"Staff directory: {name} has staff ID {staff_id}."
                    for name, staff_id in people]
@@ -164,27 +165,31 @@ def _long_context_test(common, difficulty, rng):
         answer = selected[2]
         rationale = "Cross-reference a named person to a staff ID and then an assigned asset."
     elif difficulty == "Hard":
-        asset = f"AS-{rng.randint(100, 999)}"
+        asset_ids = rng.sample(range(100, 1000), 19)
+        asset = f"AS-{asset_ids[0]}"
         logs = [(f"20{year:02d}-04-{day:02d}", rng.choice(("ready", "held", "repaired")))
                 for year, day in ((24, 2), (25, 11), (26, 7))]
         records = [f"Inspection log: asset {asset} was marked {state} on {date}."
                    for date, state in logs]
         records.extend(
-            f"Inspection log: asset AS-{rng.randint(100, 999)} was marked "
+            f"Inspection log: asset AS-{asset_id} was marked "
             f"{rng.choice(('ready', 'held', 'repaired'))} on 2025-04-{rng.randint(1, 28):02d}."
-            for _ in range(18))
+            for asset_id in asset_ids[1:])
         _, latest_state = max(logs)
         prompt_question = f"What is the latest recorded status of asset {asset}?"
         answer = latest_state
         rationale = "Compare dated records for the same asset and ignore older entries and distractors."
     else:
-        people = [(f"Person-{index}", f"ST-{rng.randint(100, 999)}") for index in range(8)]
-        units = [(staff_id, f"UNIT-{rng.randint(10, 99)}")
-                 for _, staff_id in people]
+        staff_ids = [f"ST-{value}" for value in rng.sample(range(100, 1000), 8)]
+        people = [(f"Person-{index}", staff_ids[index]) for index in range(8)]
+        unit_ids = [f"UNIT-{value}" for value in rng.sample(range(10, 100), 8)]
+        units = list(zip(staff_ids, unit_ids))
         regions = [(unit, f"REGION-{chr(65 + index)}")
                    for index, (_, unit) in enumerate(units)]
-        assets = [(unit, f"AS-{rng.randint(100, 999)}", f"PIN-{rng.randint(1000, 9999)}")
-                  for _, unit in units]
+        asset_ids = rng.sample(range(100, 1000), 8)
+        codes = rng.sample(range(1000, 10000), 8)
+        assets = [(unit, f"AS-{asset_id}", f"PIN-{code}")
+                  for (_, unit), asset_id, code in zip(units, asset_ids, codes)]
         target_region = rng.choice([region for _, region in regions])
         target_units = [unit for unit, region in regions if region == target_region]
         target_assets = [asset for unit, asset, _ in assets if unit in target_units]

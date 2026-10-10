@@ -173,7 +173,8 @@ the number of generated tests:
 
 Difficulty tiers appear in every profile, including `QUICK`. Every saved test and result records the
 task-set version, evaluator version, tier rationale, and calibration status. Compare results only
-within the same category and task-set version; these difficulty tiers are not calibrated estimates.
+within the same category, task-family subcategory, and task-set version; these difficulty tiers are
+not calibrated estimates.
 
 The Reasoning, Coding, and Summarization categories now include original task variants: route planning
 with varied constraints and satisfiable/unsatisfiable cases; both inventory-event reconciliation and
