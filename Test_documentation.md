@@ -29,6 +29,11 @@ revision can be distinguished from this pilot.
 
 Each result records the rationale for an individual test's tier. Comparisons should be made within
 the same category and task-set version, and are still not difficulty-calibrated.
+The dashboard also displays a per-test model-relative solve meter from the evaluator score and repeat
+outcomes. A successful answer means only that the selected model passed this test under this run's
+settings; partial credit, inconsistent repeats, and failures are shown distinctly. This meter does not
+establish general task difficulty. Demo-generated answers are labeled demo-only, while unavailable
+evaluations are not measured rather than failures.
 
 ## Profiles
 

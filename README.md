@@ -81,6 +81,10 @@ Select a model deliberately before the run control is enabled; the demo model is
 automatically. Active runs can be cancelled and resumed from their most recently checkpointed phase.
 Completed results include a **Test-by-test results** section with difficulty and outcome filters,
 the exact prompt, model answer, evaluation rule, reason for the result, and retry/repeat records.
+Each test also has a model-relative solve meter based on its evaluator score and completed repeats.
+It describes only the selected model's result under that run's settings: it is not a calibrated or
+universal difficulty estimate. Demo answers are explicitly marked as demo-only, and tests that could
+not be evaluated are marked not measured rather than counted as failures.
 Checks that could not run (for example, unavailable Docker or a model-server timeout) are
 distinguished from incorrect answers and excluded from quality scoring. If there are no valid
 measurements, the affected score is shown as unavailable rather than as zero.

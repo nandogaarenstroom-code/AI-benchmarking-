@@ -33,6 +33,9 @@ fieldset label{display:block;font-size:14px;color:#dce7f4}
 .test-record{border:1px solid var(--line);border-radius:9px;padding:12px;margin:10px 0;background:#0e1b2a}
 .test-record summary{color:var(--text)}
 .test-record pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09111d;padding:10px;border-radius:6px}
+.model-meter{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:12px 0;background:#101f30}
+.model-meter-label{display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:700}
+.model-meter progress{margin:8px 0 2px}
 .test-label{display:inline-block;border:1px solid var(--line);border-radius:99px;padding:2px 8px;margin-left:6px;font-size:12px}
 .controls{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:20px}
 .controls label{font-size:14px;color:var(--muted)}
@@ -147,6 +150,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <h3>Test-by-test results</h3>
   <p class="muted">Review every prompt, difficulty, model answer, evaluator check, and retry. This is the observable evidence used for scoring—not private chain-of-thought.</p>
   <p class="muted">Difficulty labels are task-construction tiers, not calibrated estimates of human or model difficulty. The top pilot tier is labeled Uncalibrated.</p>
+  <p class="muted">The per-test model-relative meter shows this model's evaluator score and repeat consistency for this run only. It is not a universal or calibrated difficulty rating; demo results do not measure model ability, and unrun tests are not treated as failures.</p>
   <div id="difficulty-summary" class="grid"></div>
   <div class="test-filters">
     <label>Difficulty
@@ -388,6 +392,42 @@ function addTestField(container,label,value,preformatted=false){
   content.textContent=value===undefined||value===null||value===''?'Not available':String(value);
   block.append(content);container.append(block);
 }
+function modelSolveMeter(test,demo){
+  const runs=Array.isArray(test.replicates)&&test.replicates.length?test.replicates:[test];
+  const scored=runs.filter(run=>run.status==='PASS'||run.status==='FAILED');
+  if(!scored.length)return {value:null,label:'Not measured',detail:'No completed evaluator result for this test.'};
+  const maxScore=Number(test.max_score)>0?Number(test.max_score):10;
+  const fractions=scored.map(run=>{
+    const score=Number(run.score);
+    return Number.isFinite(score)?Math.max(0,Math.min(1,score/maxScore)):(run.status==='PASS'?1:0);
+  });
+  const percent=Math.round(fractions.reduce((total,value)=>total+value,0)/fractions.length*100);
+  const passed=scored.filter(run=>run.status==='PASS').length;
+  let outcome;
+  if(scored.length>1)outcome=passed===scored.length?'Solved on every repeat':
+    passed>0?`Solved on ${passed}/${scored.length} repeats`:
+    percent>0?'Partial credit across repeats':'Not solved on these repeats';
+  else outcome=passed?'Solved on this run':percent>0?'Partially solved':'Not solved on this run';
+  const detail=`Mean evaluator score ${percent}% · ${passed}/${scored.length} evaluated attempt${scored.length===1?'':'s'} passed`+
+    (scored.length<runs.length?` · ${runs.length-scored.length} not measured`:'');
+  return {value:percent,label:demo?'Demo-only result':outcome,
+    detail:demo?'Generated demo answers do not measure model ability. '+detail:detail};
+}
+function addModelSolveMeter(container,test,demo){
+  const meter=modelSolveMeter(test,demo),section=document.createElement('div');
+  section.className='model-meter';
+  const label=document.createElement('div'),title=document.createElement('span'),value=document.createElement('span');
+  label.className='model-meter-label';title.textContent='Model-relative solve meter';value.textContent=meter.label;
+  label.append(title,value);section.append(label);
+  if(meter.value!==null){
+    const progress=document.createElement('progress');
+    progress.max=100;progress.value=meter.value;
+    progress.setAttribute('aria-label',`Evaluator score ${meter.value} percent`);
+    section.append(progress);
+  }
+  const detail=document.createElement('p');detail.className='muted';detail.textContent=meter.detail;
+  section.append(detail);container.append(section);
+}
 function renderTestResults(result){
   const tests=result.tests||[],difficulty=$('difficulty-filter').value,outcome=$('outcome-filter').value;
   const counts=result.summary?.by_difficulty||{};
@@ -415,6 +455,7 @@ function renderTestResults(result){
     heading.textContent=`${test.id} · ${test.category} · ${test.difficulty||'Unclassified'} · ${outcomeText}`+
       (test.score===null||test.score===undefined?'':` · ${test.score}/${test.max_score??10}`);
     record.className='test-record';record.append(heading);
+    addModelSolveMeter(record,test,result.demo);
     addTestField(record,'Why this difficulty',test.difficulty_rationale);
     if(test.difficulty_calibration_status)
       addTestField(record,'Difficulty calibration',test.difficulty_calibration_status);
