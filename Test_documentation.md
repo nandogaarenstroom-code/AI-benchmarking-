@@ -17,6 +17,7 @@ Every generated test contains:
 - `evaluation_method`
 - `max_score` (`10`)
 - `task_set_version` and `evaluator_version`
+- `item_instance_id` and `item_fingerprint` for the exact generated variant and checks
 - `difficulty_calibration_status`
 
 Tests are generated deterministically from a seed. Prompt fingerprints are checked so duplicate

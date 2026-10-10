@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import copy
+import hashlib
 import itertools
 import json
 import math
@@ -443,6 +444,15 @@ def make_tests(profile, seed):
         seen.add(fingerprint)
         test["id"] = f"{test['category'].lower().replace(' ', '-')}-{len(tests)+1:03d}"
         test["evaluation_criteria"] = evaluation_criteria(test)
+        fingerprint_data = {
+            key: value for key, value in test.items()
+            if key not in ("id", "demo_answer", "evaluation_criteria")
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            fingerprint_data, sort_keys=True, ensure_ascii=False,
+            separators=(",", ":")).encode("utf-8")).hexdigest()
+        test["item_fingerprint"] = fingerprint
+        test["item_instance_id"] = f"{test['id']}@{fingerprint[:16]}"
         tests.append(test)
     return tests
 
@@ -1114,7 +1124,8 @@ class BenchmarkManager:
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
             fields = ["id", "category", "difficulty", "difficulty_calibration_status",
-                      "task_set_version", "evaluator_version", "difficulty_rationale", "prompt",
+                      "task_set_version", "evaluator_version", "item_instance_id",
+                      "item_fingerprint", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
                       "evaluation_checks",
                       "score", "status", "attempt_count", "attempts", "repeats", "latency_s"]
@@ -1127,6 +1138,8 @@ class BenchmarkManager:
                     row.get("difficulty_calibration_status")),
                 "task_set_version": self._csv_cell(row.get("task_set_version")),
                 "evaluator_version": self._csv_cell(row.get("evaluator_version")),
+                "item_instance_id": self._csv_cell(row.get("item_instance_id")),
+                "item_fingerprint": self._csv_cell(row.get("item_fingerprint")),
                 "difficulty_rationale": self._csv_cell(row.get("difficulty_rationale")),
                 "prompt": self._csv_cell(row.get("prompt")),
                 "answer": self._csv_cell(row.get("answer")),

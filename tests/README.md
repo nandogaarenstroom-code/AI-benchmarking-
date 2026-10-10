@@ -17,7 +17,16 @@ server, network access, Docker, or third-party packages.
 
 ## What each test verifies
 
-All current tests are in `tests/test_benchmark.py`.
+Tests are in `tests/test_benchmark.py` and `tests/test_calibration.py`.
+
+### Calibration analysis
+
+The calibration-tool tests validate CSV schema and duplicate rejection, cohort/version separation,
+respondent-cluster intervals, missing outcomes, reviewer agreement, and repeatability calculations
+using synthetic fixtures. These fixtures validate the analyzer only; they are not evidence about
+model or human difficulty. Task-generation tests also verify seeded item fingerprints distinguish
+exact generated prompt/check variants. See [`CALIBRATION_STUDY.md`](../CALIBRATION_STUDY.md) for
+the data-collection protocol and analysis limits.
 
 ### Generation settings
 

@@ -18,6 +18,8 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 - JSON, CSV, PDF, and SVG result exports and result comparison
 - A small automated regression suite for core evaluators, deterministic generation, demo execution,
   exports, context metadata, and comparison
+- A local, version-aware calibration-study protocol and CSV analysis CLI for separate human/model
+  cohorts; it analyzes supplied observations but does not claim empirical calibration without data
 
 ### Still needed for broader production confidence
 
@@ -38,6 +40,8 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 For exact benchmark prompts and scoring limitations, see
 [Benchmark Test Documentation](Test_documentation.md). For what the repository's automated test
 suite does and does not verify, see [Automated Test Suite](tests/README.md).
+For the calibration pilot protocol, CSV schema, and analysis method, see
+[Original Task Calibration Pilot](CALIBRATION_STUDY.md).
 
 ## Run
 

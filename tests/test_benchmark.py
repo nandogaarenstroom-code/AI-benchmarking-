@@ -291,6 +291,10 @@ class BenchmarkTests(unittest.TestCase):
                             "not empirically calibrated" for test in quick))
         self.assertTrue(all(test["task_set_version"] == TASK_SET_VERSION and
                             test["evaluator_version"] == EVALUATOR_VERSION for test in quick))
+        self.assertTrue(all(test["item_fingerprint"] and test["item_instance_id"]
+                            for test in quick))
+        self.assertNotEqual(make_tests("QUICK", 7)[0]["item_fingerprint"],
+                            make_tests("QUICK", 8)[0]["item_fingerprint"])
         coding_prompts = [test["prompt"] for test in make_tests("FULL", 7)
                           if test["category"] == "Coding"]
         self.assertGreater(len(set(coding_prompts)), 1)
@@ -392,7 +396,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["evaluation"]["criteria"] for item in data["tests"]))
             self.assertTrue(all(item["evaluation"]["explanation"] for item in data["tests"]))
             self.assertTrue(all(item["difficulty_rationale"] for item in data["tests"]))
-            self.assertIn("prompt", (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0])
+            csv_header = (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0]
+            self.assertIn("prompt", csv_header)
+            self.assertIn("item_fingerprint", csv_header)
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:
