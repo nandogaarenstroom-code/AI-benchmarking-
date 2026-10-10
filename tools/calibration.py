@@ -14,11 +14,19 @@ from pathlib import Path
 TIERS = ("Easy", "Medium", "Hard", "Uncalibrated")
 REQUIRED_COLUMNS = {
     "protocol_id", "run_config_id", "task_set_version", "evaluator_version",
-    "category", "item_id", "item_instance_id", "item_fingerprint", "tier",
+    "category", "item_id", "item_instance_id", "item_fingerprint", "response_id", "tier",
     "cohort_type", "cohort_label", "respondent_id", "repeat_index",
     "evaluator_pass", "score", "max_score", "reviewer1_pass", "reviewer2_pass",
     "reviewer1_ambiguous", "reviewer2_ambiguous",
 }
+REQUIRED_ITEM_REVIEW_COLUMNS = {
+    "protocol_id", "task_set_version", "evaluator_version", "category", "item_id",
+    "item_instance_id", "item_fingerprint", "tier", "reviewer_id", "answer_key_valid",
+    "wording_clear", "evaluator_valid", "construct_fit", "ambiguous",
+}
+ITEM_REVIEW_FIELDS = (
+    "answer_key_valid", "wording_clear", "evaluator_valid", "construct_fit", "ambiguous",
+)
 BOOLEAN_FIELDS = (
     "evaluator_pass", "reviewer1_pass", "reviewer2_pass",
     "reviewer1_ambiguous", "reviewer2_ambiguous",
@@ -46,6 +54,7 @@ def load_responses(path):
     """Load and validate response records; blank outcome cells remain unscored."""
     records = []
     seen = set()
+    response_ids = set()
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         if not reader.fieldnames:
@@ -58,7 +67,7 @@ def load_responses(path):
             record = {name: (row.get(name) or "").strip() for name in REQUIRED_COLUMNS}
             for field in ("protocol_id", "run_config_id", "task_set_version",
                           "evaluator_version", "category", "item_id", "item_instance_id",
-                          "item_fingerprint",
+                          "item_fingerprint", "response_id",
                           "cohort_label", "respondent_id"):
                 if not record[field]:
                     raise CalibrationDataError(f"line {line}: {field} cannot be blank")
@@ -80,6 +89,9 @@ def load_responses(path):
             if identity in seen:
                 raise CalibrationDataError(f"line {line}: duplicate response identity")
             seen.add(identity)
+            if record["response_id"] in response_ids:
+                raise CalibrationDataError(f"line {line}: response_id must be unique")
+            response_ids.add(record["response_id"])
             for field in BOOLEAN_FIELDS:
                 record[field] = _parse_bool(record[field], field, line)
             try:
@@ -105,13 +117,108 @@ def load_responses(path):
     return records
 
 
+def load_item_reviews(path):
+    """Load independent, pre-study review judgments for exact item instances."""
+    reviews = []
+    seen = set()
+    with Path(path).open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames:
+            raise CalibrationDataError("item-review CSV must include a header row")
+        missing = REQUIRED_ITEM_REVIEW_COLUMNS - set(reader.fieldnames)
+        if missing:
+            raise CalibrationDataError(
+                "item-review CSV is missing columns: " + ", ".join(sorted(missing)))
+        for line, row in enumerate(reader, start=2):
+            review = {name: (row.get(name) or "").strip()
+                      for name in REQUIRED_ITEM_REVIEW_COLUMNS}
+            for field in ("protocol_id", "task_set_version", "evaluator_version", "category",
+                          "item_id", "item_instance_id", "item_fingerprint", "reviewer_id"):
+                if not review[field]:
+                    raise CalibrationDataError(f"item-review line {line}: {field} cannot be blank")
+            if review["tier"] not in TIERS:
+                raise CalibrationDataError(
+                    f"item-review line {line}: tier must be one of {', '.join(TIERS)}")
+            identity = (review["protocol_id"], review["task_set_version"],
+                        review["evaluator_version"], review["item_fingerprint"],
+                        review["reviewer_id"])
+            if identity in seen:
+                raise CalibrationDataError(f"item-review line {line}: duplicate reviewer/item")
+            seen.add(identity)
+            for field in ITEM_REVIEW_FIELDS:
+                value = _parse_bool(review[field], field, line)
+                if value is None:
+                    raise CalibrationDataError(
+                        f"item-review line {line}: {field} must be answered")
+                review[field] = value
+            reviews.append(review)
+    return reviews
+
+
+def _analyze_item_reviews(reviews):
+    groups = defaultdict(list)
+    for review in reviews:
+        key = (review["protocol_id"], review["task_set_version"],
+               review["evaluator_version"], review["category"])
+        groups[key].append(review)
+    output = []
+    for key, group in sorted(groups.items()):
+        protocol_id, task_version, evaluator_version, category = key
+        by_item = defaultdict(list)
+        for review in group:
+            by_item[review["item_fingerprint"]].append(review)
+        item_results = []
+        pairs_by_dimension = defaultdict(list)
+        for fingerprint, item_reviews in sorted(by_item.items()):
+            ordered = sorted(item_reviews, key=lambda row: row["reviewer_id"])
+            for dimension in ITEM_REVIEW_FIELDS:
+                for left_index, left in enumerate(ordered):
+                    for right in ordered[left_index + 1:]:
+                        pairs_by_dimension[dimension].append(
+                            (left[dimension], right[dimension]))
+            item_results.append({
+                "item_id": item_reviews[0]["item_id"],
+                "item_instance_id": item_reviews[0]["item_instance_id"],
+                "item_fingerprint": fingerprint,
+                "tier": item_reviews[0]["tier"],
+                "reviewer_count": len(item_reviews),
+                "dimensions": {
+                    dimension: {
+                        "yes": sum(row[dimension] for row in item_reviews),
+                        "no": sum(not row[dimension] for row in item_reviews),
+                    } for dimension in ITEM_REVIEW_FIELDS
+                },
+                "unanimous": {
+                    dimension: len({row[dimension] for row in item_reviews}) == 1
+                    for dimension in ITEM_REVIEW_FIELDS
+                },
+            })
+        output.append({
+            "protocol_id": protocol_id, "task_set_version": task_version,
+            "evaluator_version": evaluator_version, "category": category,
+            "item_count": len(item_results), "items": item_results,
+            "pairwise_agreement": {
+                dimension: {
+                    "paired_reviews": len(pairs_by_dimension[dimension]),
+                    "exact_agreement": round(sum(left == right for left, right in
+                                                  pairs_by_dimension[dimension]) /
+                                              len(pairs_by_dimension[dimension]), 4)
+                    if pairs_by_dimension[dimension] else None,
+                    "cohen_kappa": _cohen_kappa(pairs_by_dimension[dimension]),
+                } for dimension in ITEM_REVIEW_FIELDS
+            },
+            "status": "review evidence only; adjudicate before response study",
+        })
+    return output
+
+
 def _cluster_interval(respondent_values, seed_text):
     """Percentile interval over respondents, keeping a person's items clustered."""
     values = list(respondent_values.values())
     if not values:
         return None
     if len(values) == 1:
-        return {"low": round(values[0], 4), "high": round(values[0], 4),
+        return {"low": None, "high": None, "estimate": round(values[0], 4),
                 "method": "single respondent; interval not estimable"}
     seed = int(hashlib.sha256(seed_text.encode()).hexdigest()[:16], 16)
     rng = random.Random(seed)
@@ -163,7 +270,7 @@ def _correlation(pairs):
     return round(covariance / denominator, 4) if denominator else None
 
 
-def analyze(records):
+def analyze(records, item_reviews=()):
     """Return item and tier evidence without pooling cohorts, categories or versions."""
     groups = defaultdict(list)
     for record in records:
@@ -358,11 +465,13 @@ def analyze(records):
             "cohort_policy": "protocols, run configurations, cohorts, categories and versions are never pooled",
         },
         "groups": reports,
+        "item_review_groups": _analyze_item_reviews(item_reviews),
         "limitations": [
             "This report analyzes only supplied observations; it does not collect or invent calibration data.",
             "Human and model cohorts are reported separately and are not universal reference populations.",
             "External benchmark scores are not merged or treated as equivalent constructs.",
             "A calibration study requires independent item review and a pre-registered decision protocol.",
+            "Percentile cluster bootstrap intervals can degenerate when all respondent outcomes are identical.",
         ],
     }
 
@@ -370,10 +479,13 @@ def analyze(records):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("responses", type=Path, help="CSV using the schema in CALIBRATION_STUDY.md")
+    parser.add_argument("--item-reviews", type=Path,
+                        help="Optional CSV of independent pre-study item review judgments")
     parser.add_argument("--output", type=Path, help="Write JSON report here; default is stdout")
     args = parser.parse_args(argv)
     try:
-        report = analyze(load_responses(args.responses))
+        reviews = load_item_reviews(args.item_reviews) if args.item_reviews else []
+        report = analyze(load_responses(args.responses), reviews)
     except (OSError, CalibrationDataError) as exc:
         parser.error(str(exc))
     rendered = json.dumps(report, indent=2, ensure_ascii=False) + "\n"

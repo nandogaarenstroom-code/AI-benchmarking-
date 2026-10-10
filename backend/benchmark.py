@@ -452,7 +452,8 @@ def make_tests(profile, seed):
             fingerprint_data, sort_keys=True, ensure_ascii=False,
             separators=(",", ":")).encode("utf-8")).hexdigest()
         test["item_fingerprint"] = fingerprint
-        test["item_instance_id"] = f"{test['id']}@{fingerprint[:16]}"
+        category_key = test["category"].lower().replace(" ", "-")
+        test["item_instance_id"] = f"{category_key}@{fingerprint}"
         tests.append(test)
     return tests
 

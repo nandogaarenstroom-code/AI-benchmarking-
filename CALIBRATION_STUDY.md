@@ -57,7 +57,7 @@ evaluators, not as representative population calibration.
 1. Two independent reviewers inspect each item before model/human testing. They check task clarity,
    answer-key validity, edge-case coverage, and whether the evaluator accepts plausible correct
    answers while rejecting contradictions. Record their independent binary judgments and ambiguity
-   flags; adjudicate before the main response study.
+   flags in the item-review CSV schema below; adjudicate before the main response study.
 2. Recruit separate cohorts: domain-relevant human participants and less-specialized participants.
    Record no names, contact details, or unnecessary demographics in the response file. Obtain
    informed consent and follow applicable institutional/organizational review requirements.
@@ -71,10 +71,12 @@ evaluators, not as representative population calibration.
    answers using the preregistered rubric. Preserve evaluator output, both reviews, ambiguity flags,
    and adjudication separately; never replace a disagreement with an undocumented label.
 6. Export the following CSV schema. `respondent_id` should be a random study pseudonym, not a
-   reversible identifier. Leave missing assessments blank rather than entering zero.
+   reversible identifier. Use a distinct random `response_id` to join reviewed answers to a protected
+   response archive; do not place raw answers in the analysis CSV. Leave missing assessments blank
+   rather than entering zero.
 
 ```text
-protocol_id,run_config_id,protocol_id,run_config_id,task_set_version,evaluator_version,category,item_id,item_instance_id,item_fingerprint,tier,cohort_type,cohort_label,respondent_id,repeat_index,evaluator_pass,score,max_score,reviewer1_pass,reviewer2_pass,reviewer1_ambiguous,reviewer2_ambiguous
+protocol_id,run_config_id,task_set_version,evaluator_version,category,item_id,item_instance_id,item_fingerprint,response_id,tier,cohort_type,cohort_label,respondent_id,repeat_index,evaluator_pass,score,max_score,reviewer1_pass,reviewer2_pass,reviewer1_ambiguous,reviewer2_ambiguous
 ```
 
 `protocol_id` identifies the preregistered study protocol. `run_config_id` identifies one exact
@@ -86,7 +88,19 @@ Reviewer outcome and ambiguity fields are independently completed. Each
 `task/evaluator/category/item-instance/cohort/respondent/repeat_index` combination must be unique.
 `item_id` identifies the task family; `item_instance_id` and `item_fingerprint` identify the exact
 seeded prompt and evaluator checks so different generated variants are never mistaken for the same
-item.
+item. Reuse the exact stable identifiers from the run artifact; do not reconstruct them from item
+position or a truncated hash.
+
+Before response collection, save independent item-level reviewer judgments in a second CSV:
+
+```text
+protocol_id,task_set_version,evaluator_version,category,item_id,item_instance_id,item_fingerprint,tier,reviewer_id,answer_key_valid,wording_clear,evaluator_valid,construct_fit,ambiguous
+```
+
+Use true/false for each judgment and a distinct pseudonymous reviewer ID. The analyzer reports each
+item's independent judgments and pairwise agreement by dimension; disagreements must be adjudicated
+and documented before collecting scored responses. Keep free-text reviewer notes in the
+access-controlled study archive, not in the analysis data.
 
 ## Analysis and decision rules
 
@@ -95,6 +109,8 @@ Run from the repository root:
 ```bash
 python tools/calibration.py path/to/responses.csv --output path/to/calibration-report.json
 ```
+
+Include the pre-study review CSV with `--item-reviews path/to/item-reviews.csv`.
 
 The dependency-free analyzer reports, separately for each version/category/cohort:
 

@@ -43,6 +43,19 @@ suite does and does not verify, see [Automated Test Suite](tests/README.md).
 For the calibration pilot protocol, CSV schema, and analysis method, see
 [Original Task Calibration Pilot](CALIBRATION_STUDY.md).
 
+Analyze collected, de-identified calibration observations with:
+
+```bash
+python tools/calibration.py path/to/responses.csv --output path/to/report.json
+```
+
+Pass independent pre-study item judgments with `--item-reviews path/to/item-reviews.csv`.
+See [`CALIBRATION_STUDY.md`](CALIBRATION_STUDY.md) for both CSV schemas and data-handling guidance.
+
+The analyzer keeps task/evaluator versions, model settings, categories, and human/model cohorts
+separate. It reports preliminary evidence only; no human or model calibration data is bundled with
+this repository.
+
 ## Run
 
 ```bash
