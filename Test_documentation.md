@@ -196,8 +196,8 @@ whose required evaluator cannot run or whose model never returns an answer is **
 no score, and is excluded from quality averages. Categories without completed applicable tests are
 recorded as `null`/not tested rather than zero.
 
-Task and evaluator revisions increment their respective recorded version identifiers; this revision
-is `pilot-2`. Scores from different versions should not be treated as directly comparable without
+Task and evaluator revisions increment their respective recorded version identifiers. This task-set
+revision is `pilot-3` and the evaluator revision is `pilot-2`. Scores from different versions should not be treated as directly comparable without
 reviewing the changes. Calibration reports also separate task-family subcategories so mixed task
 families do not conceal different difficulty patterns.
 
@@ -240,7 +240,8 @@ Each context test:
 1. Creates a seeded marker.
 2. Adds deterministic distractor text.
 3. Places the marker at the beginning, middle, or end.
-4. Estimates prompt tokens from prompt length.
+4. Rotates marker positions among beginning, middle, and end across target sizes. Prompt tokens are
+   estimated from text length, not measured with the tested model's tokenizer.
 5. Asks the model to retrieve the marker.
 6. Records latency, estimated prompt tokens, answer, and pass/fail status.
 
@@ -270,8 +271,9 @@ records:
 
 For real Ollama and OpenAI-compatible adapters, streaming is now enabled and `ttft_s` is measured
 from the first non-empty streamed content chunk. Demo mode remains deterministic and does not
-claim real streaming performance. Docker code isolation is opt-in with
-`BENCHMARK_USE_DOCKER=1`; otherwise the bounded fallback evaluator is used.
+claim real streaming performance. Each concurrency level reports successful and failed request counts, elapsed time, mean request
+latency, and estimated request/output-token throughput. It uses the first five primary prompts only,
+so treat it as a small controlled sample, not a capacity guarantee.
 
 The current performance score is derived from measured throughput and capped at 100. These values
 are controlled local measurements and should not be presented as universal real-world guarantees.
@@ -295,13 +297,15 @@ implying that the model's code was incorrect.
 
 The current objective evaluators are intentionally simple:
 
-- numeric extraction with tolerance
-- first-letter multiple-choice matching
+- complete-response numeric matching
+- complete-response choice matching
 - JSON parsing and required-key validation
 - required-term matching
 - word-count rubric checks
 - assertion-based Python execution
 
 There is no configured local evaluator-model rubric yet. Subjective categories therefore must not
-be interpreted as human-quality judgments. The benchmark reports controlled measurements and
-limitations rather than claiming universal model capability.
+be interpreted as human-quality judgments. Future semantic judgments should be reported separately
+until validated against blinded human ratings; they should not silently replace or be merged into
+the deterministic score. The benchmark reports controlled measurements and limitations rather than
+claiming universal model capability.
