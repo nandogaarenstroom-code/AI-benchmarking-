@@ -37,12 +37,16 @@ Additional coverage verifies repeated-run score metadata and that runtime detail
 when reported by the local server.
 
 Streaming adapter tests cover first-content TTFT measurement, timeout error mapping, malformed event
-handling, and size-bounded discovery responses. Evaluator checks cover JSON value types and exact
+handling, size-bounded discovery responses, and a real streaming adapter round-trip against a temporary
+loopback HTTP server. The loopback test exercises the local HTTP protocol only; it does not establish
+compatibility with live model servers. Evaluator checks cover JSON value types and exact
 word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
 samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
 cancellation during context tests. Difficulty-generation coverage checks that all four tiers appear
 in QUICK and that every primary category spans all tiers in FULL. It also checks varied
 reasoning/summarization items, two coding task families, and generated long-context tasks.
+Knowledge generation tests check seeded domain-family variety; context generation checks estimated
+target sizes and rotating marker positions. Performance checks verify reported concurrency outcomes.
 Test-result coverage verifies
 prompt/evaluator explanations, answer traces, and that unavailable evaluators produce unscored
 NOT RUN outcomes.
@@ -90,12 +94,13 @@ PDF/CSV content and schema completeness are not deeply validated.
 The automated suite does not currently verify:
 
 - live Ollama, LM Studio, or OpenAI-compatible servers
-- live streaming behavior across real servers or every adapter failure mode
+- live streaming behavior across real servers or every adapter failure mode (the loopback fixture
+  checks only the local adapter protocol)
 - all HTTP routes and status codes (the suite covers representative security, validation, and cancel cases)
 - browser rendering and user interactions
 - cancellation responsiveness during every model request or every phase, and corrupted resume-state recovery
 - retry behavior and all evaluator edge cases
-- accuracy of real-server performance metrics or concurrency behavior
+- accuracy of real-server performance metrics or concurrency behavior beyond the reported sample
 - output report contents beyond selected JSON fields
 - Docker isolation or adversarial generated code
 - cross-platform behavior
