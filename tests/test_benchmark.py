@@ -690,9 +690,10 @@ class BenchmarkTests(unittest.TestCase):
             execute = manager._execute
             cancelled = False
 
-            def cancel_after_first_fresh(model, test, history=None, generation_options=None):
+            def cancel_after_first_fresh(model, test, history=None, generation_options=None,
+                                         progress_callback=None):
                 nonlocal cancelled
-                result = execute(model, test, history, generation_options)
+                result = execute(model, test, history, generation_options, progress_callback)
                 if "context_size" in test and history is None and not cancelled:
                     cancelled = True
                     manager.cancel_requested.set()

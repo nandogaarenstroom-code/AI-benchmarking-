@@ -806,6 +806,13 @@ class BenchmarkManager:
         with self._status_lock:
             if "phase" in values and values["phase"] != self._status.get("phase"):
                 values.setdefault("phase_started_at", time.time())
+                values.setdefault("current_test", None)
+                values.setdefault("current_category", None)
+                values.setdefault("current_test_started_at", None)
+                values.setdefault("current_attempt", 0)
+                values.setdefault("current_attempt_status", None)
+                values.setdefault("current_ttft_s", None)
+                values.setdefault("current_generation_s", None)
             self._status.update(values)
 
     def list_results(self):
@@ -1053,8 +1060,16 @@ class BenchmarkManager:
     @staticmethod
     def _live_test_record(item):
         evaluation = item.get("evaluation") or {}
+        source_attempts = item.get("attempts", [])
+        if item.get("replicates"):
+            source_attempts = [
+                {**attempt, "repeat": repeat_index + 1}
+                for repeat_index, replicate in enumerate(item["replicates"])
+                for attempt in replicate.get("attempts", [])
+            ]
         attempts = [{
             "attempt": attempt.get("attempt"),
+            "repeat": attempt.get("repeat"),
             "status": attempt.get("status"),
             "error": attempt.get("error"),
             "answer": str(attempt.get("answer", ""))[:1200],
@@ -1066,7 +1081,7 @@ class BenchmarkManager:
             "ttft_s": attempt.get("ttft_s"),
             "generation_s": attempt.get("generation_s"),
             "timing_is_estimated": attempt.get("timing_is_estimated", True),
-        } for attempt in item.get("attempts", [])]
+        } for attempt in source_attempts]
         return {
             "id": item.get("id"), "category": item.get("category"),
             "difficulty": item.get("difficulty"), "status": item.get("status"),

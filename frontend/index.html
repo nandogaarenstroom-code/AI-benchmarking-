@@ -515,6 +515,7 @@ function appendLiveTests(status){
       if(attempt.answer)addTestField(detail,'Attempt answer',attempt.answer,true);
       if(attempt.error)addTestField(detail,'Error code',attempt.error);
       addTestField(detail,'Attempt evaluation',attempt.evaluation?.explanation);
+      if(attempt.repeat)detail.querySelector('summary').textContent=`Repeat ${attempt.repeat} · ${summary.textContent}`;
       record.append(detail);
     });
     addUserFeedback(record,test,runId);
@@ -523,7 +524,8 @@ function appendLiveTests(status){
   if(!container.childElementCount)container.textContent='Waiting for the first primary test to finish…';
 }
 function formatSeconds(value){
-  return Number.isFinite(Number(value))?`${Number(value).toFixed(2)}s`:'not available';
+  return value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))
+    ?`${Number(value).toFixed(2)}s`:'not available';
 }
 function updateTelemetry(status){
   const elapsed=status.current_test_started_at
@@ -584,7 +586,7 @@ async function poll(){
     $('activity').textContent=`Paused at the ${checkpoint.replaceAll('_',' ')} checkpoint. `+
       `${status.primary_completed_count||0} primary tests are preserved. Resume continues with unfinished work; `+
       'performance samples restart if cancellation occurred during that phase.';
-    $('run-state').textContent='PAUSED';$('bar').value=0;
+    $('run-state').textContent='PAUSED';$('bar').max=status.total||1;$('bar').value=status.progress||0;
     $('telemetry').textContent='Saved progress is available to resume. No tests were skipped or removed from scoring.';
     setRunning(false);
   }else{

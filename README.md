@@ -135,9 +135,6 @@ distinguished from incorrect answers and excluded from quality scoring. If there
 measurements, the affected score is shown as unavailable rather than as zero.
 The interface reports observable answers and evaluator evidence; it does not ask models to disclose
 hidden chain-of-thought.
-Users can also privately rate an answer and flag a questionable evaluation on each test record.
-This feedback is stored only in the current browser, is not included in result files, and never
-changes deterministic scores.
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
