@@ -72,7 +72,8 @@ On Windows, the dashboard can also start an app-managed llama.cpp server. Choose
 full path to a local `.gguf` model, a requested context size, and GPU layer count. The app binds that
 server to `127.0.0.1:8080`, waits for its health endpoint, and offers a stop control; a server already
 using that port must be stopped first. The app starts only the process it owns and stops it when the
-app exits normally. It does not download model files.
+app exits normally. It does not download model files. Only select an executable you trust: it runs
+with the same operating-system permissions as the benchmark app.
 
 The displayed startup context and GPU-layer values are the requested command-line settings; they do
 not guarantee the model or available memory can support them. A high context or offload request may
