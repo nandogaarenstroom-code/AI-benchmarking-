@@ -54,6 +54,8 @@ class LlamaServerManagerTests(unittest.TestCase):
         wrong_model = self.root / "model.bin"
         wrong_model.touch()
         with patch("backend.llama_server.sys.platform", "win32"):
+            with self.assertRaisesRegex(LlamaServerError, "absolute"):
+                self.manager.start("path", "llama-server.exe", str(self.model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, "llama-server.exe"):
                 self.manager.start("path", str(wrong_exe), str(self.model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, ".gguf"):

@@ -180,6 +180,8 @@ class LlamaServerManager:
         if not isinstance(value, str) or not value.strip():
             raise LlamaServerError("Enter the full path to llama-server.exe.")
         path = Path(value.strip()).expanduser()
+        if not path.is_absolute() or ".." in path.parts:
+            raise LlamaServerError("Use an absolute llama-server.exe path without parent-directory segments.")
         try:
             path = path.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
@@ -193,6 +195,8 @@ class LlamaServerManager:
         if not isinstance(value, str) or not value.strip():
             raise LlamaServerError("Enter the full path to a GGUF model file.")
         path = Path(value.strip()).expanduser()
+        if not path.is_absolute() or ".." in path.parts:
+            raise LlamaServerError("Use an absolute model path without parent-directory segments.")
         try:
             path = path.resolve(strict=True)
         except (OSError, RuntimeError) as exc:
