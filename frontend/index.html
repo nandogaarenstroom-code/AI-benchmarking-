@@ -64,12 +64,115 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
 .legend{display:flex;flex-wrap:wrap;gap:14px;margin:12px 0}.key::before{content:"";display:inline-block;width:11px;height:11px;margin-right:6px;background:var(--key)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media(max-width:600px){body{margin:18px auto;padding:0 14px}section{padding:17px}#voxel-lab{min-height:360px}.controls{display:grid}.controls label{display:flex;align-items:center;justify-content:space-between}.controls select{margin:0}.settings{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Instrument-panel styling for the local benchmark lab. */
+:root{
+  color-scheme:dark;
+  --bg:#0b1014;--panel:#11191d;--panel-raised:#172329;--line:#34444a;
+  --text:#edf1e8;--muted:#aab7b2;--accent:#c4ed68;--accent-dark:#1b2910;
+  --blue:#86d9cf;--danger:#ff9287;--amber:#f3bd6e
+}
+body{
+  position:relative;max-width:1160px;margin:0 auto;padding:42px 28px 72px;
+  background:
+    linear-gradient(#c4ed6808 1px,transparent 1px),
+    linear-gradient(90deg,#c4ed6808 1px,transparent 1px),
+    radial-gradient(ellipse at 50% -22%,#283b36 0,transparent 54%),var(--bg);
+  background-size:36px 36px,36px 36px,auto,auto
+}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;background:linear-gradient(90deg,transparent 0 49.95%,#c4ed6808 50%,transparent 50.05%)}
+h1{display:flex;flex-direction:column;gap:5px;font-size:clamp(34px,5vw,52px);letter-spacing:-.055em}
+h1::before{content:"FIELD SYSTEM  /  LOCAL INFERENCE";font:700 11px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.19em;color:var(--accent)}
+body>p.muted:first-of-type{max-width:620px;margin:10px 0 30px;font-size:15px}
+section{
+  position:relative;margin:20px 0;padding:25px 28px 27px;
+  background:linear-gradient(145deg,#172126f5,#10171bf7);
+  border:1px solid #34444a;border-radius:11px;box-shadow:0 18px 48px #0003
+}
+section::before{content:"";position:absolute;left:-1px;top:18px;bottom:18px;width:2px;background:#50615e;border-radius:2px}
+section.station-setup::before,section.station-config::before{background:var(--accent)}
+section.station-progress::before{background:var(--blue)}
+section.station-history::before{background:var(--amber)}
+section h2{display:flex;align-items:center;gap:11px;font-size:19px;letter-spacing:-.02em}
+section h2::before{font:700 11px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.12em;color:var(--accent)}
+.station-setup h2::before{content:"01"}
+.station-config h2::before{content:"02"}
+.station-progress h2::before{content:"03"}
+.station-history h2::before{content:"04"}
+.station-report>h2::before{content:"05"}
+h3{margin-top:28px}
+button,select,input{border-radius:6px;border-color:#43565a;background:#0d1518}
+button{min-height:42px}
+button:disabled{cursor:not-allowed;opacity:.48}
+input::placeholder{color:#80908b}
+select:focus,input:focus,button:focus-visible,.model:focus-visible,.history-item:focus-within{
+  outline:2px solid var(--blue);outline-offset:3px
+}
+fieldset{border-color:#34444a;border-radius:7px}
+fieldset legend{padding:0 8px;color:var(--blue);font:700 11px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.1em;text-transform:uppercase}
+.settings{gap:12px}
+.settings label,.controls label,.test-filters label{font-size:13px;font-weight:650;letter-spacing:.01em}
+.settings input,.settings select{margin-top:7px}
+.primary{background:var(--accent);border-color:var(--accent);color:#1b2910}
+.primary:hover{background:#d5f78b;border-color:#d5f78b}
+.secondary{background:#10191c}
+.model{border-color:#34484b;border-radius:7px;background:#10191c}
+.model:hover,.model.selected,.model[aria-pressed="true"]{border-color:var(--accent);background:#1b2924}
+.model-meta,.history-item,.metric,.live-pill,.test-label{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.model-meta{font-size:12px;line-height:1.6}
+.model-meter,.test-record{border-color:#34444a;border-radius:7px;background:#111a1d}
+.history-item{padding:13px 10px;border-bottom-color:#2a383c;font-size:13px}
+.history-item:nth-child(odd){background:#ffffff04}
+.history-item input{accent-color:var(--accent)}
+.grid>.metric,.grid>div{min-width:0}
+.grid>.metric{font-size:26px}
+#difficulty-summary>.grid>div,#difficulty-summary>div{padding:13px;border:1px solid var(--line);border-radius:7px;background:#10191c}
+.metric{font-weight:750;letter-spacing:-.04em}
+.notice{border-left-color:var(--amber);background:#f3bd6e0c;padding:12px 14px}
+.demo{color:var(--amber)}
+.test-label{font-weight:650}
+#progress{border-color:#55766e;background:linear-gradient(120deg,#1b302a,#172126 65%);box-shadow:0 0 0 1px #c4ed6810,0 18px 48px #0004}
+.live-pill{background:#1b302a;color:#d5f78b}
+.live-pill::before{background:var(--accent);box-shadow:0 0 10px #c4ed6870}
+#live{font-variant-numeric:tabular-nums}
+progress{accent-color:var(--accent)}
+progress::-webkit-progress-value{background:linear-gradient(90deg,#92bc43,#c4ed68)}
+progress::-moz-progress-bar{background:linear-gradient(90deg,#92bc43,#c4ed68)}
+.lab{border-color:#526260;border-radius:8px;background-color:#0b1214}
+#voxel-detail{border-color:#687e77;background:#0b1214f2;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+table{font-variant-numeric:tabular-nums}
+th{color:var(--blue)}
+td,th{border-bottom-color:#2d3b3e}
+summary{color:var(--blue)}
+a{color:var(--accent)}
+code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+#llama-server-status,#discovery-status,#activity{font-size:13px}
+#result-links a{border-radius:6px}
+@media(max-width:700px){
+  body{padding:28px 18px 50px}
+  section{padding:21px 19px}
+  .toolbar{align-items:flex-start}
+  .toolbar button{flex-shrink:0}
+  .history-item{align-items:flex-start;flex-wrap:wrap}
+}
+@media(max-width:420px){
+  body{padding:22px 13px 38px}
+  section{padding:18px 15px}
+  .settings{grid-template-columns:minmax(0,1fr)}
+  .toolbar{flex-direction:column}
+  .toolbar button{align-self:flex-start}
+  #progress-heading{align-items:flex-start;flex-direction:column}
+  table{font-size:13px}
+  td,th{padding:7px 5px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+}
 </style>
 </head>
 <body>
 <h1>Local AI Benchmark</h1>
 <p class="muted">A private, local-only evaluation dashboard for your models.</p>
-<section>
+<section class="station-setup">
   <h2>Start llama.cpp server (Windows)</h2>
   <p class="muted">The app can start a local llama-server on 127.0.0.1:8080. You must already have a GGUF model file.
     Context size is a requested startup value, not a promise that the model or your hardware can support it.</p>
@@ -101,7 +204,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <button class="secondary" id="stop-llama-server" type="button" disabled>Stop app-managed server</button>
   <p id="llama-server-status" class="muted" role="status" aria-live="polite">Checking managed server…</p>
 </section>
-<section>
+<section class="station-config">
   <div class="toolbar"><h2>Detected local models</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
   <div id="models">Scanning local AI servers…</div>
   <p id="discovery-status" class="muted" role="status"></p>
@@ -135,7 +238,7 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
   <p id="run-error" role="alert" hidden></p>
 </section>
-<section id="progress" aria-live="polite" hidden>
+<section id="progress" class="station-progress" aria-live="polite" hidden>
   <div id="progress-heading"><h2 id="phase">Preparing benchmark…</h2><span class="live-pill" id="run-state">RUNNING</span></div>
   <p id="activity" class="muted"></p>
   <progress id="bar" value="0" max="1" aria-label="Current benchmark phase progress"></progress>
@@ -143,13 +246,13 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <p class="muted">Keep this page open to follow each phase. Completed results will appear below.</p>
   <button class="secondary" id="cancel" type="button" hidden>Cancel run</button>
 </section>
-<section id="history-section">
+<section id="history-section" class="station-history">
   <div class="toolbar"><h2>Saved benchmark results</h2><button class="secondary" id="refresh-results" type="button">Refresh results</button></div>
   <div id="history" class="muted">Loading saved results…</div>
   <button class="secondary" id="compare-results" type="button" disabled>Compare selected</button>
   <div id="comparison" aria-live="polite"></div>
 </section>
-<section id="result" hidden>
+<section id="result" class="station-report" hidden>
   <h2>BENCHMARK COMPLETE <span id="demo-label" class="demo"></span></h2>
   <div class="grid">
     <div>Quality <div class="metric" id="quality"></div></div>
