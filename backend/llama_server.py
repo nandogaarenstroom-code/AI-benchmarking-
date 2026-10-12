@@ -16,7 +16,6 @@ from pathlib import Path
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8080
-DEFAULT_WINGET_PACKAGE_ID = "ggml.llamacpp"
 STARTUP_TIMEOUT = 180
 
 
