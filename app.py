@@ -5,8 +5,9 @@ an offline workstation with ``python app.py``.
 """
 from __future__ import annotations
 
-import json
+import atexit
 import hmac
+import json
 import os
 import secrets
 import socketserver
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import BenchmarkManager
 from backend.discovery import discover_models, resolve_model
+from backend.llama_server import LlamaServerConflict, LlamaServerError, llama_server_manager
 
 ROOT = Path(__file__).parent
 manager = BenchmarkManager(ROOT / "results")
@@ -120,6 +122,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path == "/api/models":
             return self._json({"models": discover_models()})
+        if path == "/api/llama-server/status":
+            return self._json(llama_server_manager.status())
         if path == "/api/status":
             return self._json(manager.status())
         if path == "/api/results":
@@ -146,7 +150,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        if path not in ("/api/benchmark", "/api/resume", "/api/cancel"):
+        if path not in (
+                "/api/benchmark", "/api/resume", "/api/cancel",
+                "/api/llama-server/start", "/api/llama-server/stop"):
             return self.send_error(404)
         if not self._valid_host() or not self._valid_origin():
             return self._json({"error": "forbidden origin"}, 403)
@@ -205,6 +211,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "no resumable benchmark"}, 404)
         if path == "/api/cancel":
             return self._json({"cancelled": manager.cancel()})
+        if path == "/api/llama-server/start":
+            try:
+                status = llama_server_manager.start(
+                    payload.get("source"), payload.get("executable_path"),
+                    payload.get("package_id"),
+                    payload.get("model_path"), payload.get("context_size"),
+                    payload.get("gpu_layers", 0))
+            except LlamaServerConflict as exc:
+                return self._json({"error": str(exc)}, 409)
+            except LlamaServerError as exc:
+                return self._json({"error": str(exc)}, 400)
+            return self._json(status)
+        if path == "/api/llama-server/stop":
+            try:
+                return self._json(llama_server_manager.stop())
+            except LlamaServerConflict as exc:
+                return self._json({"error": str(exc)}, 409)
         self.send_error(404)
 
     def log_message(self, *_):
@@ -212,6 +235,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    atexit.register(llama_server_manager.stop)
     port = int(os.environ.get("PORT", "8000"))
     print(f"Local AI Benchmark running at http://localhost:{port}")
     BoundedThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

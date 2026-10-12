@@ -13,9 +13,10 @@ versions. Published HELM, BIG-bench, MMLU, GPQA, and SWE-bench results may infor
 construct descriptions, but are not a common scale. This project does not copy or import their
 questions, datasets, patches, or code.
 
-The current implementation versions the task set and evaluator as `pilot-2`. Freeze those definitions
+The current task-set version is `pilot-3`; the evaluator version is `pilot-2`. Freeze both definitions
 for each data collection wave. Any change to prompts, answer keys, scoring rules, or task generation
-requires a new version and a separate report; do not mix checkpointed runs across versions.
+requires a new task-set version; evaluator changes require a new evaluator version. Analyze each
+version combination separately and do not pool checkpointed runs across versions.
 
 ## Construct map
 

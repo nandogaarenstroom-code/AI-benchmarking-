@@ -67,6 +67,23 @@ an installed model. For real models, start Ollama, LM Studio, llama.cpp, or anot
 server before opening the dashboard. Discovery never invents metadata: unavailable values are
 reported as `Unknown`.
 
+On Windows, the dashboard can also start an app-managed llama.cpp server. Choose an existing
+`llama-server.exe` path or select an already-installed WinGet package and enter its package ID
+(the default is `ggml.llamacpp`, and custom-fork package IDs are supported). WinGet itself does not
+provide a `run` command: the app locates `llama-server.exe` under that package's local WinGet
+installation folder and launches it. Then enter the full path to a local `.gguf` model, a requested
+context size, and GPU layer count. The app binds that
+server to `127.0.0.1:8080`, waits for its health endpoint, and offers a stop control; a server already
+using that port must be stopped first. The app starts only the process it owns and stops it when the
+app exits normally. It does not download model files. Only select an executable you trust: it runs
+with the same operating-system permissions as the benchmark app.
+
+The displayed startup context and GPU-layer values are the requested command-line settings; they do
+not guarantee the model or available memory can support them. A high context or offload request may
+fail during model loading. The saved benchmark result separately records this app-managed request
+and any runtime values llama.cpp actually reports through `/props`. The launcher is Windows-only;
+on other platforms, start llama.cpp yourself and refresh model discovery.
+
 ## Automated behavior
 
 Selecting a model and pressing **Run benchmark** starts the selected profile without further
@@ -118,12 +135,13 @@ model runs. When repeated runs are requested, between-run scores are reported se
 with no applicable tests are reported as `null`/not tested rather than silently scored as zero.
 
 The engine now includes objective numeric, choice, JSON-key, required-term, instruction-length,
-and Python-code evaluators. Subjective categories use a clearly labelled deterministic rubric
-fallback; a future configured local evaluator model can replace that fallback without changing
-the result format. Model-generated code runs only in a resource-limited, network-disabled Docker
-container. If Docker or the preloaded `python:3-alpine` image is unavailable, coding evaluations
-fail closed and are recorded as failed; the app never falls back to executing model code on the
-host. Caller-supplied test code is ignored.
+and Python-code evaluators. Subjective categories use deterministic checks or finite acceptable
+answers; they do not measure semantic quality. No evaluator model is configured. Any future
+semantic judge should be reported separately from the deterministic score until validated against
+blinded human ratings. Model-generated code runs only in a resource-limited, network-disabled Docker
+container. If Docker or the preloaded `python:3-alpine` image is unavailable, coding evaluations are
+marked **NOT RUN**; the app never falls back to executing model code on the host. Caller-supplied test
+code is ignored.
 
 The HTTP server binds to loopback, limits request size and concurrency, and requires a per-process
 CSRF token plus same-origin requests for state-changing API operations. Benchmark model endpoints
@@ -153,7 +171,9 @@ evaluation method, and maximum score. The current categories are:
 - Creative generation
 - Consistency
 - Context retrieval
-- Tool calling
+
+Tool calling is **not** currently a generated test category. The discovered `tools` capability field
+is metadata only; no model is asked to invoke a tool or graded on tool-use behavior.
 
 Tests are distributed through **Easy**, **Medium**, **Hard**, and **Uncalibrated** task-construction
 tiers. The final label is explicit: the tasks have not been piloted against a human panel or a
@@ -223,7 +243,9 @@ will always behave this way in a real application. Context accumulation is measu
 fresh-context quality rather than being mixed into the primary quality score.
 
 Each run also records a separate context-scaling result with fresh and accumulated variants at
-4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. The accumulated variant deliberately reuses the
+4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. Marker positions rotate
+between beginning, middle, and end. Prompt sizes are estimated from text length rather than measured
+with each model's tokenizer, and each size/position is sampled only once. The accumulated variant deliberately reuses the
 conversation history so context degradation can be observed; it is not mixed into the primary
 fresh-context quality score.
 
@@ -235,6 +257,8 @@ misleading quality failure.
 
 Performance runs perform three warm-ups, discard their outputs, then collect latency samples,
 streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.
+Concurrency results include request success/failure counts, elapsed time, mean latency, and estimated
+throughput; they use only the selected profile's first five test prompts and are a small local sample.
 Throughput is estimated output tokens divided by the measured generation time of dedicated
 performance samples; token counts are estimates rather than tokenizer-reported counts. The result
 labels estimated timing when the adapter does not report streamed timing. P50/P95 latency and

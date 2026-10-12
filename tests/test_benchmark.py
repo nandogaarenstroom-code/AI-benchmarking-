@@ -1,6 +1,8 @@
 import json
+import threading
 import tempfile
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -8,7 +10,10 @@ from unittest.mock import patch
 from backend.benchmark import (
     EVALUATOR_VERSION, TASK_SET_VERSION, BenchmarkManager, make_context_tests, make_tests,
 )
-from backend.discovery import AdapterError, _get, _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
+from backend.discovery import (
+    AdapterError, _get, _llama_runtime_details, ask_model, discover_models,
+    model_info, normalize_generation_options, resolve_model,
+)
 from backend.evaluation import evaluate, evaluate_with_details
 from backend.reporting import write_chart, write_pdf
 
@@ -39,6 +44,28 @@ class BenchmarkTests(unittest.TestCase):
                 _llama_runtime_details("http://localhost:8080/v1")["generation_defaults"],
                 {"temperature": 0.7},
             )
+
+    def test_discovered_model_includes_only_managed_server_startup_settings(self):
+        launch = {
+            "source": "path", "model_file": "model.gguf",
+            "context_size_requested": 65536, "gpu_layers_requested": 24,
+            "host": "127.0.0.1", "port": 8080,
+        }
+
+        def fake_get(url, timeout=0.7):
+            if url == "http://127.0.0.1:8080/v1/models":
+                return {"data": [{"id": "local-model"}]}
+            return None
+
+        with patch("backend.discovery._get", side_effect=fake_get), \
+                patch("backend.discovery._llama_runtime_details", return_value={
+                    "llama_cpp": True, "context_length": 65536}), \
+                patch("backend.discovery.llama_server_manager.managed_launch",
+                      return_value=launch):
+            models = discover_models()
+        model = next(item for item in models if item.get("id") == "local-model")
+        self.assertEqual(model["managed_launch"], launch)
+        self.assertEqual(model_info(model)["managed_launch"], launch)
 
     def test_generation_options_are_normalized(self):
         options = normalize_generation_options({
@@ -176,6 +203,53 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--read-only", command)
         self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
+
+    def test_openai_compatible_adapter_integrates_with_loopback_server(self):
+        captured = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path != "/v1/models":
+                    self.send_error(404)
+                    return
+                body = json.dumps({"data": [{"id": "stub-model"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                captured.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = (b'data: {"choices":[{"delta":{"content":"Paris"}}]}\n\n'
+                        b'data: [DONE]\n\n')
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            endpoint = f"http://127.0.0.1:{server.server_port}/v1"
+            self.assertEqual(_get(endpoint + "/models"), {"data": [{"id": "stub-model"}]})
+            model = {"id": "stub-model", "backend": "OpenAI-compatible",
+                     "endpoint": endpoint, "llama_cpp": False}
+            result = ask_model(model, "What is the capital of France?")
+            self.assertEqual(result["text"], "Paris")
+            self.assertGreaterEqual(result["output_tokens"], 1)
+            self.assertTrue(captured[0]["stream"])
+            self.assertEqual(captured[0]["messages"], [
+                {"role": "user", "content": "What is the capital of France?"}])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_json_types_and_exact_word_count_are_enforced(self):
         schema = {"evaluation_method": "json_schema", "required_keys": ["answer", "valid"],
@@ -340,6 +414,17 @@ class BenchmarkTests(unittest.TestCase):
                          [4096, 8192, 16384, 32768, 65536, 131072])
         self.assertEqual([x["context_size"] for x in make_context_tests(7, 32768)],
                          [4096, 8192, 16384, 32768])
+        context_tests = make_context_tests(7, 32768)
+        self.assertEqual([item["context_position"] for item in context_tests],
+                         ["beginning", "middle", "end", "beginning"])
+        self.assertTrue(all(item["context_size"] * 0.99 <= item["estimated_prompt_tokens"]
+                            <= item["context_size"] for item in context_tests))
+        self.assertTrue(all(item["id"].endswith(item["context_position"])
+                            for item in context_tests))
+        knowledge = [item for seed in range(40) for item in make_tests("FULL", seed)
+                     if item["category"] == "Knowledge"]
+        self.assertGreaterEqual(len({item["subcategory"] for item in knowledge}), 4)
+        self.assertGreaterEqual(len({item["prompt"] for item in knowledge}), 8)
 
     def test_pilot_generators_vary_constraints_scenarios_and_edge_cases(self):
         reasoning_items = [item for seed in range(40) for item in make_tests("FULL", seed)
@@ -518,6 +603,9 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(result["generation_s"], 1.0)
         self.assertEqual(result["latency_mean_s"], 0.6)
         self.assertFalse(result["timing_is_estimated"])
+        self.assertEqual([item["workers"] for item in result["concurrency_results"]], [1, 2, 4])
+        self.assertTrue(all(item["successful_requests"] == 2
+                            for item in result["concurrency_results"]))
 
     def test_unavailable_performance_samples_produce_no_score(self):
         with tempfile.TemporaryDirectory() as directory:

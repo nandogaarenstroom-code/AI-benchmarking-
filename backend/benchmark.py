@@ -30,7 +30,7 @@ CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
 COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
-TASK_SET_VERSION = "pilot-2"
+TASK_SET_VERSION = "pilot-3"
 EVALUATOR_VERSION = "pilot-2"
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
@@ -423,22 +423,50 @@ def _test(category, i, rng, difficulty=None):
                 "required_types": types}
     if category == "Knowledge":
         knowledge_by_difficulty = {
-            "Easy": (("What is the capital of France?", ("Paris", "The capital of France is Paris.")),
-                     ("Which planet is known as the Red Planet?", ("Mars", "The Red Planet is Mars."))),
-            "Medium": (("What is the chemical symbol for water?", ("H2O", "Water's chemical formula is H2O.")),
-                       ("Which ocean lies between Africa and Australia?",
-                        ("Indian Ocean", "The Indian Ocean lies between Africa and Australia."))),
-            "Hard": (("Which gas do plants absorb from the atmosphere during photosynthesis?",
-                      ("carbon dioxide", "Plants absorb carbon dioxide during photosynthesis.")),
-                     ("Which force keeps planets in orbit around the Sun?",
-                      ("gravity", "Gravity keeps planets in orbit around the Sun."))),
-            "Uncalibrated": (("What is the name of the process by which a liquid changes into a gas?",
-                              ("evaporation", "The process is called evaporation.")),
-                             ("What is the term for an animal that is active at night?",
-                              ("nocturnal", "A nocturnal animal is active at night."))),
+            "Easy": (
+                ("geography", "What is the capital of France?",
+                 ("Paris", "The capital of France is Paris.")),
+                ("astronomy", "Which planet is known as the Red Planet?",
+                 ("Mars", "The Red Planet is Mars.")),
+                ("biology", "What is the basic unit of life?",
+                 ("cell", "The cell is the basic unit of life.")),
+                ("mathematics", "How many sides does a triangle have?",
+                 ("three", "A triangle has three sides.")),
+            ),
+            "Medium": (
+                ("chemistry", "What is the chemical symbol for water?",
+                 ("H2O", "Water's chemical formula is H2O.")),
+                ("geography", "Which ocean lies between Africa and Australia?",
+                 ("Indian Ocean", "The Indian Ocean lies between Africa and Australia.")),
+                ("physics", "What is the SI unit of electric current?",
+                 ("ampere", "Electric current is measured in amperes.")),
+                ("biology", "Which part of a plant primarily absorbs water from soil?",
+                 ("roots", "A plant's roots primarily absorb water from soil.")),
+            ),
+            "Hard": (
+                ("biology", "Which gas do plants absorb from the atmosphere during photosynthesis?",
+                 ("carbon dioxide", "Plants absorb carbon dioxide during photosynthesis.")),
+                ("physics", "Which force keeps planets in orbit around the Sun?",
+                 ("gravity", "Gravity keeps planets in orbit around the Sun.")),
+                ("astronomy", "What is the name of the galaxy that contains our Solar System?",
+                 ("Milky Way", "Our Solar System is in the Milky Way galaxy.")),
+                ("chemistry", "What is the pH of a neutral aqueous solution at room temperature?",
+                 ("7", "A neutral aqueous solution has a pH of 7 at room temperature.")),
+            ),
+            "Uncalibrated": (
+                ("chemistry", "What is the name of the process by which a liquid changes into a gas?",
+                 ("evaporation", "The process is called evaporation.")),
+                ("biology", "What is the term for an animal that is active at night?",
+                 ("nocturnal", "A nocturnal animal is active at night.")),
+                ("geography", "What imaginary line divides Earth into the Northern and Southern Hemispheres?",
+                 ("equator", "The Equator divides Earth into the Northern and Southern Hemispheres.")),
+                ("physics", "What is the approximate speed of light in a vacuum, in kilometers per second?",
+                 ("299792", "Light travels at approximately 299,792 kilometers per second in a vacuum.")),
+            ),
         }
-        question, acceptable = rng.choice(knowledge_by_difficulty[difficulty])
-        return {**common, "prompt": question + " Answer concisely.",
+        domain, question, acceptable = rng.choice(knowledge_by_difficulty[difficulty])
+        return {**common, "subcategory": f"Knowledge: {domain}",
+                "prompt": question + " Answer concisely.",
                 "difficulty_rationale": "Short factual recall from a seeded question set; this "
                                         "category is not independently calibrated by difficulty.",
                 "expected_answer": acceptable[0], "evaluation_method": "exact_any",
@@ -733,16 +761,20 @@ def make_tests(profile, seed):
 def make_context_tests(seed, max_context=131072):
     rng = random.Random(seed)
     tests = []
-    for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144):
+    marker_positions = ("beginning", "middle", "end")
+    filler_unit = " neutral distractor information."
+    for index, size in enumerate((4096, 8192, 16384, 32768, 65536, 131072, 262144)):
         if size > max_context:
             continue
         marker = f"CTX-{rng.randint(1000, 9999)}"
-        filler = (" neutral distractor information." * max(1, size // 38))
-        position = ("beginning" if size % 3 == 1 else "middle" if size % 3 == 2 else "end")
+        position = marker_positions[index % len(marker_positions)]
+        fixed_text = f"{marker}\n\nReturn the marker."
+        filler_count = max(0, (size * 4 - len(fixed_text)) // len(filler_unit))
+        filler = filler_unit * filler_count
         prompt = f"{marker}\n{filler}\nReturn the marker." if position == "beginning" else (
             f"{filler[:len(filler)//2]}{marker}{filler[len(filler)//2:]}\nReturn the marker."
             if position == "middle" else f"{filler}\n{marker}\nReturn the marker.")
-        tests.append({"id": f"context-{size}", "category": "Context Scaling",
+        tests.append({"id": f"context-{size}-{position}", "category": "Context Scaling",
                       "context_size": size, "context_position": position, "prompt": prompt,
                       "estimated_prompt_tokens": max(1, len(prompt) // 4),
                       "expected_answer": marker, "evaluation_method": "contains_all",
@@ -1334,17 +1366,38 @@ class BenchmarkManager:
     def _performance(self, model, samples, generation_options=None, progress_callback=None):
         progress = 0
         def safe_answer(test):
+            started = time.perf_counter()
             try:
-                self._answer(model, test, generation_options=generation_options)
+                answer = self._answer(model, test, generation_options=generation_options)
             except Exception:
-                return False
-            return True
+                return {"success": False, "latency_s": time.perf_counter() - started,
+                        "output_tokens": 0}
+            text = answer.get("text", "") if isinstance(answer, dict) else answer
+            return {"success": True, "latency_s": time.perf_counter() - started,
+                    "output_tokens": (answer.get("output_tokens") or max(1, len(str(text).split())))
+                    if isinstance(answer, dict) else max(1, len(str(text).split()))}
 
+        concurrency_results = []
         for concurrency in (1, 2, 4):
             if self.cancel_requested.is_set():
                 return None
+            started = time.perf_counter()
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                list(pool.map(safe_answer, samples))
+                outcomes = list(pool.map(safe_answer, samples))
+            elapsed = time.perf_counter() - started
+            successful = [item for item in outcomes if item["success"]]
+            concurrency_results.append({
+                "workers": concurrency, "requests": len(outcomes),
+                "successful_requests": len(successful),
+                "failed_requests": len(outcomes) - len(successful),
+                "elapsed_s": round(elapsed, 4),
+                "requests_per_second": round(len(successful) / elapsed, 2) if elapsed else None,
+                "estimated_output_tokens_per_second": round(
+                    sum(item["output_tokens"] for item in successful) / elapsed, 2)
+                    if elapsed else None,
+                "latency_mean_s": round(statistics.mean(
+                    item["latency_s"] for item in successful), 4) if successful else None,
+            })
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Concurrency sample {concurrency} complete.")
@@ -1382,7 +1435,8 @@ class BenchmarkManager:
                 "token_count_is_estimated": True,
                 "warmup_runs": 3, "measured_runs": len(evaluated),
                 "not_run_samples": not_run_count,
-                "concurrency_levels": [1, 2, 4]}
+                "concurrency_levels": [1, 2, 4],
+                "concurrency_results": concurrency_results}
 
     def _write_outputs(self, result):
         result_id = result["id"]
