@@ -215,6 +215,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 status = llama_server_manager.start(
                     payload.get("source"), payload.get("executable_path"),
+                    payload.get("package_id"),
                     payload.get("model_path"), payload.get("context_size"),
                     payload.get("gpu_layers", 0))
             except LlamaServerConflict as exc:

@@ -108,6 +108,7 @@ class ApiSecurityTests(unittest.TestCase):
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({
             "source": "path", "executable_path": "C:\\models\\llama-server.exe",
+            "package_id": "vendor.custom-fork",
             "model_path": "C:\\models\\test.gguf", "context_size": 65536,
             "gpu_layers": 24, "tests": [{"id": "caller-controlled"}],
         })
@@ -122,7 +123,8 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body_bytes), {"state": "running", "message": "ready"})
         start.assert_called_once_with(
-            "path", "C:\\models\\llama-server.exe", "C:\\models\\test.gguf", 65536, 24)
+            "path", "C:\\models\\llama-server.exe", "vendor.custom-fork",
+            "C:\\models\\test.gguf", 65536, 24)
 
         headers.pop("X-CSRF-Token")
         with patch.object(app.llama_server_manager, "start") as start:

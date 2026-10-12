@@ -68,8 +68,11 @@ server before opening the dashboard. Discovery never invents metadata: unavailab
 reported as `Unknown`.
 
 On Windows, the dashboard can also start an app-managed llama.cpp server. Choose an existing
-`llama-server.exe` path or install the fixed `ggml.llamacpp` package through winget, then enter the
-full path to a local `.gguf` model, a requested context size, and GPU layer count. The app binds that
+`llama-server.exe` path or select an already-installed WinGet package and enter its package ID
+(the default is `ggml.llamacpp`, and custom-fork package IDs are supported). WinGet itself does not
+provide a `run` command: the app locates `llama-server.exe` under that package's local WinGet
+installation folder and launches it. Then enter the full path to a local `.gguf` model, a requested
+context size, and GPU layer count. The app binds that
 server to `127.0.0.1:8080`, waits for its health endpoint, and offers a stop control; a server already
 using that port must be stopped first. The app starts only the process it owns and stops it when the
 app exits normally. It does not download model files. Only select an executable you trust: it runs

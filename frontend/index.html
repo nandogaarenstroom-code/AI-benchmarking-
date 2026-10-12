@@ -74,11 +74,14 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
   <p class="muted">The app can start a local llama-server on 127.0.0.1:8080. You must already have a GGUF model file.
     Context size is a requested startup value, not a promise that the model or your hardware can support it.</p>
   <div class="settings">
-    <label>Install / executable source
-      <select id="llama-source"><option value="path">I have llama-server.exe</option><option value="winget">Install with winget</option></select>
+    <label>Executable source
+      <select id="llama-source"><option value="path">Choose llama-server.exe path</option><option value="winget">Use existing WinGet install</option></select>
     </label>
     <label id="llama-executable-row">Full path to llama-server.exe
       <input id="llama-executable" type="text" placeholder="C:\path\to\llama-server.exe" autocomplete="off">
+    </label>
+    <label id="llama-package-row">Installed WinGet package ID
+      <input id="llama-package" type="text" value="ggml.llamacpp" maxlength="128" autocomplete="off">
     </label>
     <label>Full path to GGUF model file
       <input id="llama-model" type="text" placeholder="C:\models\model.gguf" autocomplete="off">
@@ -90,7 +93,8 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
       <input id="llama-gpu-layers" type="number" min="0" max="1000" step="1" value="0">
     </label>
   </div>
-  <p class="muted">The winget option installs the fixed package <code>ggml.llamacpp</code>. Installation may take several minutes.
+  <p class="muted">WinGet does not launch apps itself; this option locates <code>llama-server.exe</code> inside an already-installed WinGet package.
+    Enter that package's ID (including a custom-fork package ID).
     High context sizes or GPU offload settings can exceed available memory. This app-managed server uses port 8080.</p>
   <p class="muted"><strong>Security:</strong> only launch an executable you trust. It runs with the same permissions as this app.</p>
   <button class="primary" id="start-llama-server" type="button">Start llama-server</button>
@@ -663,7 +667,9 @@ $('run').onclick=()=>{
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
 function updateLlamaSource(){
-  $('llama-executable-row').hidden=$('llama-source').value==='winget';
+  const useWinget=$('llama-source').value==='winget';
+  $('llama-executable-row').hidden=useWinget;
+  $('llama-package-row').hidden=!useWinget;
 }
 async function updateLlamaServerStatus(){
   try{
@@ -680,13 +686,14 @@ $('start-llama-server').onclick=async()=>{
   const button=$('start-llama-server');
   button.disabled=true;
   $('llama-server-status').textContent=$('llama-source').value==='winget'
-    ?'Installing llama.cpp with winget, then starting the server…'
+    ?'Finding llama-server.exe in the installed WinGet package…'
     :'Starting llama-server and waiting for its health check…';
   try{
     const response=await fetch('/api/llama-server/start',{
       method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},
       body:JSON.stringify({
         source:$('llama-source').value,executable_path:$('llama-executable').value,
+        package_id:$('llama-package').value,
         model_path:$('llama-model').value,context_size:Number($('llama-context').value),
         gpu_layers:Number($('llama-gpu-layers').value)
       })

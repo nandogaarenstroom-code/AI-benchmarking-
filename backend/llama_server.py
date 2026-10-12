@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-import shutil
+import re
 import socket
 import subprocess
 import sys
@@ -16,7 +16,7 @@ from pathlib import Path
 
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8080
-WINGET_PACKAGE_ID = "ggml.llamacpp"
+DEFAULT_WINGET_PACKAGE_ID = "ggml.llamacpp"
 STARTUP_TIMEOUT = 180
 
 
@@ -52,6 +52,7 @@ class LlamaServerManager:
                 return None
             return {
                 "source": self._configuration["source"],
+                "package_id": self._configuration["package_id"],
                 "model_file": self._configuration["model_file"],
                 "context_size_requested": self._configuration["context_size"],
                 "gpu_layers_requested": self._configuration["gpu_layers"],
@@ -59,12 +60,13 @@ class LlamaServerManager:
                 "port": SERVER_PORT,
             }
 
-    def start(self, source, executable_path, model_path, context_size, gpu_layers):
+    def start(self, source, executable_path, package_id, model_path, context_size, gpu_layers):
         if sys.platform != "win32":
             raise LlamaServerError("Starting llama-server from the dashboard is supported on Windows only.")
         source = source if source in ("path", "winget") else None
         if source is None:
-            raise LlamaServerError("Choose either an executable path or the winget install option.")
+            raise LlamaServerError("Choose an executable path or an installed WinGet package.")
+        package_id = self._validate_package_id(package_id) if source == "winget" else None
         model = self._validate_model_path(model_path)
         context = self._integer(context_size, "context size", 512, 2_147_483_647)
         layers = self._integer(gpu_layers, "GPU layers", 0, 1000)
@@ -81,7 +83,13 @@ class LlamaServerManager:
         try:
             self._ensure_port_available()
             if source == "winget":
-                executable = self._install_with_winget()
+                executable = self._find_installed_executable(package_id)
+                if executable is None:
+                    raise LlamaServerError(
+                        f"llama-server.exe was not found in the installed WinGet package "
+                        f"{package_id!r}. Check the package ID or use an explicit executable path."
+                    )
+                executable = self._validate_executable_path(str(executable))
             else:
                 executable = self._validate_executable_path(executable_path)
             command = [
@@ -102,7 +110,8 @@ class LlamaServerManager:
                     target=self._drain_output, args=(process,), daemon=True)
                 self._output_thread.start()
                 self._configuration = {
-                    "source": source, "model_file": model.name,
+                    "source": "winget-installed" if source == "winget" else "path",
+                    "package_id": package_id, "model_file": model.name,
                     "context_size": context, "gpu_layers": layers,
                 }
                 self._status = {
@@ -191,6 +200,13 @@ class LlamaServerManager:
         return path
 
     @staticmethod
+    def _validate_package_id(value):
+        if (not isinstance(value, str) or
+                not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", value.strip())):
+            raise LlamaServerError("Enter a valid installed WinGet package ID.")
+        return value.strip()
+
+    @staticmethod
     def _validate_model_path(value):
         if not isinstance(value, str) or not value.strip():
             raise LlamaServerError("Enter the full path to a GGUF model file.")
@@ -216,52 +232,17 @@ class LlamaServerManager:
             ) from exc
 
     @staticmethod
-    def _install_with_winget():
-        winget = shutil.which("winget")
-        if not winget:
-            raise LlamaServerError("winget was not found. Install App Installer or choose an executable path.")
-        command = [
-            winget, "install", "--exact", "--id", WINGET_PACKAGE_ID,
-            "--accept-source-agreements", "--accept-package-agreements",
-            "--disable-interactivity",
-        ]
-        try:
-            result = subprocess.run(
-                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, timeout=600, check=False,
-                shell=False,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW}
-                   if hasattr(subprocess, "CREATE_NO_WINDOW") else {}),
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise LlamaServerError(f"winget installation failed: {exc}") from exc
-        if result.returncode != 0:
-            output = (result.stdout or "").strip()[-500:]
-            raise LlamaServerError(
-                "winget could not install llama.cpp." + (f" {output}" if output else "")
-            )
-        executable = LlamaServerManager._find_installed_executable()
-        if executable is None:
-            raise LlamaServerError(
-                "winget completed, but llama-server.exe was not found. Try Refresh or enter its path."
-            )
-        return LlamaServerManager._validate_executable_path(str(executable))
-
-    @staticmethod
-    def _find_installed_executable():
-        found = shutil.which("llama-server.exe")
-        if found:
-            return Path(found)
+    def _find_installed_executable(package_id):
         local_app_data = os.environ.get("LOCALAPPDATA")
         if not local_app_data:
             return None
         winget_root = Path(local_app_data) / "Microsoft" / "WinGet"
-        link = winget_root / "Links" / "llama-server.exe"
-        if link.is_file():
-            return link
         packages = winget_root / "Packages"
         if packages.is_dir():
-            for package_dir in packages.glob(f"{WINGET_PACKAGE_ID}_*"):
+            package_dirs = [path for path in packages.iterdir()
+                            if path.is_dir() and path.name.casefold().startswith(
+                                package_id.casefold() + "_")]
+            for package_dir in package_dirs:
                 for candidate in package_dir.rglob("llama-server.exe"):
                     if candidate.is_file():
                         return candidate

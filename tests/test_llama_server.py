@@ -1,4 +1,3 @@
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,7 +30,7 @@ class LlamaServerManagerTests(unittest.TestCase):
                 patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=True), \
                 patch("backend.llama_server.subprocess.Popen", return_value=process) as popen:
             status = self.manager.start(
-                "path", str(self.executable), str(self.model), "65536", 24)
+                "path", str(self.executable), None, str(self.model), "65536", 24)
             self.assertEqual(status["state"], "running")
             args = popen.call_args.args[0]
             self.assertEqual(args, [
@@ -55,18 +54,18 @@ class LlamaServerManagerTests(unittest.TestCase):
         wrong_model.touch()
         with patch("backend.llama_server.sys.platform", "win32"):
             with self.assertRaisesRegex(LlamaServerError, "absolute"):
-                self.manager.start("path", "llama-server.exe", str(self.model), 4096, 0)
+                self.manager.start("path", "llama-server.exe", None, str(self.model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, "llama-server.exe"):
-                self.manager.start("path", str(wrong_exe), str(self.model), 4096, 0)
+                self.manager.start("path", str(wrong_exe), None, str(self.model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, ".gguf"):
-                self.manager.start("path", str(self.executable), str(wrong_model), 4096, 0)
+                self.manager.start("path", str(self.executable), None, str(wrong_model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, "between"):
-                self.manager.start("path", str(self.executable), str(self.model), 1, 0)
+                self.manager.start("path", str(self.executable), None, str(self.model), 1, 0)
 
     def test_start_is_windows_only(self):
         with patch("backend.llama_server.sys.platform", "linux"):
             with self.assertRaisesRegex(LlamaServerError, "Windows only"):
-                self.manager.start("path", str(self.executable), str(self.model), 4096, 0)
+                self.manager.start("path", str(self.executable), None, str(self.model), 4096, 0)
 
     def test_startup_timeout_stops_child_and_clears_managed_state(self):
         process = MagicMock()
@@ -76,39 +75,44 @@ class LlamaServerManagerTests(unittest.TestCase):
                 patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=False), \
                 patch("backend.llama_server.subprocess.Popen", return_value=process):
             with self.assertRaisesRegex(LlamaServerError, "startup timeout"):
-                self.manager.start("path", str(self.executable), str(self.model), 4096, 0)
+                self.manager.start("path", str(self.executable), None, str(self.model), 4096, 0)
         self.assertEqual(self.manager.status()["state"], "error")
         self.assertIsNone(self.manager.managed_launch(f"http://{SERVER_HOST}:{SERVER_PORT}/v1"))
         process.terminate.assert_called_once()
 
-    def test_winget_installs_fixed_package_then_uses_located_executable(self):
+    def test_winget_source_launches_existing_package_executable(self):
         process = MagicMock()
         process.poll.return_value = None
         with patch("backend.llama_server.sys.platform", "win32"), \
-                patch("backend.llama_server.shutil.which", return_value="C:/Windows/winget.exe"), \
-                patch("backend.llama_server.subprocess.run",
-                      return_value=subprocess.CompletedProcess([], 0, "installed")) as run, \
                 patch("backend.llama_server.LlamaServerManager._find_installed_executable",
-                      return_value=self.executable), \
+                      return_value=self.executable) as find_executable, \
                 patch("backend.llama_server.LlamaServerManager._ensure_port_available"), \
                 patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=True), \
                 patch("backend.llama_server.subprocess.Popen", return_value=process):
-            result = self.manager.start("winget", "", str(self.model), 32768, 0)
+            result = self.manager.start("winget", "", "custom.fork", str(self.model), 32768, 0)
         self.assertEqual(result["state"], "running")
-        self.assertIn("ggml.llamacpp", run.call_args.args[0])
-        self.assertFalse(run.call_args.kwargs["shell"])
+        find_executable.assert_called_once_with("custom.fork")
+        self.assertEqual(result["configuration"]["package_id"], "custom.fork")
 
-    def test_winget_requires_command_and_handles_install_failure(self):
+    def test_winget_source_requires_valid_id_and_finds_existing_package(self):
         with patch("backend.llama_server.sys.platform", "win32"), \
-                patch("backend.llama_server.shutil.which", return_value=None):
-            with self.assertRaisesRegex(LlamaServerError, "winget was not found"):
-                self.manager.start("winget", "", str(self.model), 32768, 0)
-        with patch("backend.llama_server.sys.platform", "win32"), \
-                patch("backend.llama_server.shutil.which", return_value="winget"), \
-                patch("backend.llama_server.subprocess.run",
-                      return_value=subprocess.CompletedProcess([], 1, "package unavailable")):
-            with self.assertRaisesRegex(LlamaServerError, "package unavailable"):
-                self.manager.start("winget", "", str(self.model), 32768, 0)
+                patch("backend.llama_server.LlamaServerManager._ensure_port_available"):
+            with self.assertRaisesRegex(LlamaServerError, "package ID"):
+                self.manager.start("winget", "", "../../fork", str(self.model), 32768, 0)
+        self.assertEqual(LlamaServerManager._validate_package_id("ggml.llamacpp"), "ggml.llamacpp")
+        self.assertEqual(LlamaServerManager._validate_package_id("vendor.custom-fork_3"), "vendor.custom-fork_3")
+
+    def test_finds_server_executable_under_selected_winget_package(self):
+        package_root = (
+            self.root / "Microsoft" / "WinGet" / "Packages" /
+            "vendor.custom-fork_1.0.0_x64")
+        package_root.mkdir(parents=True)
+        executable = package_root / "bin" / "llama-server.exe"
+        executable.parent.mkdir()
+        executable.touch()
+        with patch.dict("os.environ", {"LOCALAPPDATA": str(self.root)}):
+            found = LlamaServerManager._find_installed_executable("vendor.custom-fork")
+        self.assertEqual(found, executable)
 
 
 if __name__ == "__main__":
