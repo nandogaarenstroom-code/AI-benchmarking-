@@ -388,6 +388,25 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(scores["categories"]["Mathematics"], 10)
         self.assertEqual(scores["overall"], 10)
 
+    def test_execution_reports_attempt_progress_and_live_feed_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            events = []
+            test = {"id": "math-001", "category": "Mathematics", "difficulty": "Easy",
+                    "prompt": "What is 2 + 2?", "expected_answer": "4",
+                    "evaluation_method": "numeric", "max_score": 10}
+            result = manager._execute({"demo": True}, test, progress_callback=events.append)
+        self.assertEqual([event["event"] for event in events],
+                         ["attempt_started", "attempt_completed"])
+        self.assertEqual(events[-1]["status"], "PASS")
+        self.assertIn("latency_s", events[-1])
+        live = BenchmarkManager._live_test_record(result)
+        self.assertEqual(live["id"], "math-001")
+        self.assertEqual(live["status"], "PASS")
+        self.assertEqual(len(live["attempts"]), 1)
+        self.assertEqual(live["evaluation"]["explanation"],
+                         result["evaluation"]["explanation"])
+
     def test_code_evaluation_rejects_invalid_or_oversized_tests(self):
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
                 patch("backend.evaluation.subprocess.run") as run:

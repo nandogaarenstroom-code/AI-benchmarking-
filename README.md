@@ -119,6 +119,17 @@ Each test also has a model-relative solve meter based on its evaluator score and
 It describes only the selected model's result under that run's settings: it is not a calibrated or
 universal difficulty estimate. Demo answers are explicitly marked as demo-only, and tests that could
 not be evaluated are marked not measured rather than counted as failures.
+While a run is active, the dashboard also shows a bounded live feed of the most recently completed
+primary tests, including prompts, answers, evaluator evidence, attempts, and observed request timings.
+Users can rate or flag these records immediately; feedback remains browser-local and does not affect
+scores or exported results. Current attempt/repeat, elapsed work-item time, and available TTFT and
+generation measurements appear as telemetry. Any displayed phase ETA is a rough estimate from
+current-run progress, not a real-world performance guarantee.
+
+**Finish current work item, then pause** requests graceful cancellation: an active request and its
+current test/repeats finish before the next checkpoint. Completed tests are preserved for resume;
+performance samples restart if cancellation occurred in the performance phase. The UI does not offer
+silent skip controls, so unrun tests are not mistaken for scored results.
 Checks that could not run (for example, unavailable Docker or a model-server timeout) are
 distinguished from incorrect answers and excluded from quality scoring. If there are no valid
 measurements, the affected score is shown as unavailable rather than as zero.

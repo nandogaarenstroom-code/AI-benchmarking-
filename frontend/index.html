@@ -41,6 +41,10 @@ fieldset label{display:block;font-size:14px;color:#dce7f4}
 .category-picker label,.feedback-controls label{display:flex;align-items:center;gap:8px}
 .category-picker input,.feedback-controls input{width:auto;margin:4px}
 .prompt-preview{max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.live-feed{max-height:620px;overflow:auto;margin-top:14px}
+.live-feed-entry{border:1px solid var(--line);border-radius:9px;padding:12px;margin:10px 0;background:#0e1b2a}
+.live-feed-entry summary{font-weight:700}
+.live-telemetry{border-left:3px solid var(--blue);padding:8px 12px;background:#101f30}
 .model-meter{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:12px 0;background:#101f30}
 .model-meter-label{display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:700}
 .model-meter progress{margin:8px 0 2px}
@@ -270,8 +274,13 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <p id="activity" class="muted"></p>
   <progress id="bar" value="0" max="1" aria-label="Current benchmark phase progress"></progress>
   <p id="live"></p>
+  <p id="telemetry" class="live-telemetry" aria-live="polite"></p>
+  <h3>Live completed-test feed</h3>
+  <p class="muted">The latest completed primary tests, answers, evaluator evidence, retries, and measured timings appear here. Feedback is saved only in this browser and does not change scores.</p>
+  <div id="live-test-feed" class="live-feed"></div>
   <p class="muted">Keep this page open to follow each phase. Completed results will appear below.</p>
-  <button class="secondary" id="cancel" type="button" hidden>Cancel run</button>
+  <button class="secondary" id="cancel" type="button" hidden>Finish current work item, then pause</button>
+  <p id="cancel-note" class="muted" hidden>Cancellation is graceful: the active request and current test/repeats finish first. Completed work is checkpointed; resume continues with unfinished work. No tests are silently skipped.</p>
 </section>
 <section id="history-section" class="station-history">
   <div class="toolbar"><h2>Saved benchmark results</h2><button class="secondary" id="refresh-results" type="button">Refresh results</button></div>
@@ -335,6 +344,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 <script>
 let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false;
 let selectedCompatible=false;
+let liveFeedRunId=null,liveFeedIds=new Set();
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
@@ -475,6 +485,64 @@ function setRunning(running){
   $('check-model').disabled=running||!selected||Boolean(selected.demo);
   $('resume').disabled=running||!resumeAvailable;
   $('cancel').hidden=!running;
+  $('cancel-note').hidden=!running;
+}
+function appendLiveTests(status){
+  const runId=status.live_run_id||'active-run',container=$('live-test-feed');
+  if(liveFeedRunId!==runId){
+    liveFeedRunId=runId;liveFeedIds=new Set();container.replaceChildren();
+  }
+  (status.live_tests||[]).forEach(test=>{
+    if(liveFeedIds.has(test.id))return;
+    if(!container.childElementCount)container.replaceChildren();
+    liveFeedIds.add(test.id);
+    const record=document.createElement('details'),heading=document.createElement('summary');
+    heading.textContent=`${test.id} · ${test.category} · ${test.difficulty||'Unclassified'} · ${test.status}`+
+      (test.score===null||test.score===undefined?'':` · ${test.score}/${test.max_score}`);
+    record.className='live-feed-entry';record.append(heading);
+    addTestField(record,'Prompt',test.prompt,true);
+    if(test.prompt_truncated)addTestField(record,'Prompt note','Prompt preview shortened in live status.');
+    addTestField(record,'Answer',test.answer,true);
+    if(test.answer_truncated)addTestField(record,'Answer note','Answer shortened in live status.');
+    addTestField(record,'Evaluator criteria',test.evaluation?.criteria);
+    addTestField(record,'Evaluation evidence',test.evaluation?.explanation);
+    if(test.evaluation?.checks?.length)addTestField(record,'Criterion checks',JSON.stringify(test.evaluation.checks,null,2),true);
+    addTestField(record,'Timing',`TTFT ${formatSeconds(test.ttft_s)} · generation ${formatSeconds(test.generation_s)} · total ${formatSeconds(test.latency_s)}${test.timing_is_estimated?' (estimated)':''}`);
+    (test.attempts||[]).forEach(attempt=>{
+      const detail=document.createElement('details'),summary=document.createElement('summary');
+      summary.textContent=`Attempt ${attempt.attempt}: ${attempt.status} · ${formatSeconds(attempt.latency_s)}`;
+      detail.append(summary);
+      if(attempt.answer)addTestField(detail,'Attempt answer',attempt.answer,true);
+      if(attempt.error)addTestField(detail,'Error code',attempt.error);
+      addTestField(detail,'Attempt evaluation',attempt.evaluation?.explanation);
+      record.append(detail);
+    });
+    addUserFeedback(record,test,runId);
+    container.prepend(record);
+  });
+  if(!container.childElementCount)container.textContent='Waiting for the first primary test to finish…';
+}
+function formatSeconds(value){
+  return Number.isFinite(Number(value))?`${Number(value).toFixed(2)}s`:'not available';
+}
+function updateTelemetry(status){
+  const elapsed=status.current_test_started_at
+    ?Math.max(0,Date.now()/1000-status.current_test_started_at):null;
+  const timeText=elapsed===null?'':`Current work item elapsed ${formatSeconds(elapsed)}. `;
+  const attemptText=status.current_attempt
+    ?`Attempt ${status.current_attempt}/3${status.current_repeat>1?` · repeat ${status.current_repeat}`:''}`+
+      (status.current_attempt_status?` · latest attempt ${status.current_attempt_status}`:'')+'. ':'';
+  const metricText=status.current_attempt
+    ?`Latest request: TTFT ${formatSeconds(status.current_ttft_s)}, generation ${formatSeconds(status.current_generation_s)}`+
+      `${status.current_timing_is_estimated?' (estimated)':''}. `:'';
+  const progress=Number(status.progress)||0,total=Number(status.total)||0;
+  let eta='ETA unavailable until this phase has enough completed samples.';
+  if(progress>=2&&total>progress&&status.phase_started_at){
+    const phaseElapsed=Math.max(0,Date.now()/1000-status.phase_started_at);
+    const estimate=phaseElapsed/progress*(total-progress);
+    eta=`Rough phase ETA ${formatSeconds(estimate)}; request durations vary and this is not a performance guarantee.`;
+  }else if(progress>=total&&total>0)eta='Current phase work complete.';
+  $('telemetry').textContent=`${timeText}${attemptText}${metricText}${eta}`;
 }
 async function poll(){
   const response=await fetch('/api/status');
@@ -485,13 +553,15 @@ async function poll(){
     $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
     $('phase').textContent=status.phase||'Benchmark running';
     $('activity').textContent=status.activity||'The local model is working.';
+    appendLiveTests(status);updateTelemetry(status);
     if(lastPollActivity!==status.activity){lastPollActivity=status.activity;lastActivityAt=Date.now()}
     const stalled=Date.now()-lastActivityAt>20000?' · Waiting for the model; this request may take a while.':'';
-    $('live').textContent=`${status.progress||0} / ${status.total||0} in this phase · ${status.current_category||'benchmark'} · ${status.passed||0} passed · ${status.failed||0} failed · ${status.not_run||0} not run${stalled}`;
+    $('live').textContent=`Phase: ${status.progress||0} / ${status.total||0} · current: ${status.current_category||'benchmark'}${status.current_test?' / '+status.current_test:''} · run totals: ${status.passed||0} passed · ${status.failed||0} failed · ${status.not_run||0} not run${stalled}`;
     if(status.result_directory)$('results-directory').textContent=status.result_directory;
     setRunning(true);
     setTimeout(()=>poll().catch(error=>displayError(error.message)),650);
   }else if(status.state==='complete'){
+    appendLiveTests(status);
     const resultResponse=await fetch('/api/results/'+encodeURIComponent(status.result_id));
     if(!resultResponse.ok)throw new Error('The benchmark finished, but its result could not be loaded.');
     show(await resultResponse.json(),status.result_directory);
@@ -502,14 +572,20 @@ async function poll(){
     setRunning(false);
     loadResults().catch(()=>{});
   }else if(status.state==='error'){
+    appendLiveTests(status);
     $('progress').hidden=false;$('phase').textContent='Benchmark stopped';
     $('activity').textContent=status.error||'The benchmark could not finish.';
     $('run-state').textContent='ERROR';$('run-state').style.color='var(--danger)';
     setRunning(false);
   }else if(status.state==='cancelled'){
+    appendLiveTests(status);
     $('progress').hidden=false;$('phase').textContent='Benchmark cancelled';
-    $('activity').textContent='The run was cancelled. Completed tests are available to resume.';
+    const checkpoint=status.resume_phase||'latest checkpoint';
+    $('activity').textContent=`Paused at the ${checkpoint.replaceAll('_',' ')} checkpoint. `+
+      `${status.primary_completed_count||0} primary tests are preserved. Resume continues with unfinished work; `+
+      'performance samples restart if cancellation occurred during that phase.';
     $('run-state').textContent='PAUSED';$('bar').value=0;
+    $('telemetry').textContent='Saved progress is available to resume. No tests were skipped or removed from scoring.';
     setRunning(false);
   }else{
     setRunning(false);
@@ -743,7 +819,7 @@ function renderTestResults(result){
     addTestField(record,'Outcome explanation',evaluation.explanation||
       (test.status==='NOT RUN'?'The evaluator could not run this test.':
        test.status==='PASS'?'The evaluation criteria passed.':'The evaluation criteria did not pass.'));
-    addUserFeedback(record,test,result.id);
+    addUserFeedback(record,test,result.configuration?.live_run_id||result.id);
     if(test.error)addTestField(record,'Failure code',test.error);
     (test.attempts||[]).forEach(attempt=>{
       const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');

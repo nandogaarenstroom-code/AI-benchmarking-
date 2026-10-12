@@ -793,7 +793,7 @@ class BenchmarkManager:
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
             "progress": 0, "total": 0, "passed": 0, "failed": 0,
-            "result_directory": str(self.root.resolve()),
+            "result_directory": str(self.root.resolve()), "live_tests": [],
         }
 
     def status(self):
@@ -804,6 +804,8 @@ class BenchmarkManager:
 
     def _update_status(self, **values):
         with self._status_lock:
+            if "phase" in values and values["phase"] != self._status.get("phase"):
+                values.setdefault("phase_started_at", time.time())
             self._status.update(values)
 
     def list_results(self):
@@ -869,9 +871,13 @@ class BenchmarkManager:
                 return False
             self.running = True
             self.cancel_requested.clear()
+            payload.setdefault("live_run_id", uuid.uuid4().hex)
             self._update_status(state="running", phase="Starting benchmark",
                                 activity="Preparing the local model and test suite.",
-                                progress=0, total=1)
+                                progress=0, total=1, live_run_id=payload["live_run_id"],
+                                live_tests=[], current_test=None, current_category=None,
+                                current_attempt=0, current_test_started_at=None,
+                                cancel_requested=False)
             worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
             try:
                 worker.start()
@@ -903,6 +909,9 @@ class BenchmarkManager:
         if not self.running:
             return False
         self.cancel_requested.set()
+        self._update_status(
+            cancel_requested=True,
+            activity="Cancellation requested; finishing the current work item and saving a resume checkpoint.")
         return True
 
     def _answer(self, model, test, history=None, generation_options=None):
@@ -939,7 +948,8 @@ class BenchmarkManager:
         response = ask_model(model, test["prompt"], history=history, options=generation_options)
         return response
 
-    def _execute(self, model, test, history=None, generation_options=None):
+    def _execute(self, model, test, history=None, generation_options=None,
+                 progress_callback=None):
         criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
         if test.get("evaluation_method") == "code" and not code_evaluator_available():
             evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -959,6 +969,8 @@ class BenchmarkManager:
         last_metrics = {}
         last_latency = 0
         for attempt in range(1, 4):
+            if progress_callback:
+                progress_callback({"event": "attempt_started", "attempt": attempt})
             started = time.perf_counter()
             try:
                 answer = self._answer(model, test, history, generation_options)
@@ -982,7 +994,20 @@ class BenchmarkManager:
             attempts.append({"attempt": attempt, "status": attempt_status,
                              "error": error, "answer": attempt_answer,
                              "answer_truncated": len(str(answer)) > 4000,
-                             "evaluation": evaluation})
+                             "evaluation": evaluation, "latency_s": latency,
+                             "ttft_s": response_metrics.get("ttft_s", latency),
+                             "generation_s": response_metrics.get("generation_s", latency),
+                             "timing_is_estimated": not bool(
+                                 response_metrics and "ttft_s" in response_metrics and
+                                 "generation_s" in response_metrics)})
+            if progress_callback:
+                progress_callback({"event": "attempt_completed", "attempt": attempt,
+                                   "status": attempt_status, "latency_s": latency,
+                                   "ttft_s": response_metrics.get("ttft_s", latency),
+                                   "generation_s": response_metrics.get("generation_s", latency),
+                                   "timing_is_estimated": not bool(
+                                       response_metrics and "ttft_s" in response_metrics and
+                                       "generation_s" in response_metrics)})
             if evaluation["passed"] is True:
                 return {**test, "answer": answer, "evaluation": evaluation,
                         "passed": True, "score": evaluation.get("score", 10),
@@ -1024,6 +1049,39 @@ class BenchmarkManager:
                             "output_tokens", max(1, len(last_answer.split()))),
                         "error": "EVALUATION_FAILED", "context_reset": history is None,
                         "attempts": attempts, "status": "FAILED"}
+
+    @staticmethod
+    def _live_test_record(item):
+        evaluation = item.get("evaluation") or {}
+        attempts = [{
+            "attempt": attempt.get("attempt"),
+            "status": attempt.get("status"),
+            "error": attempt.get("error"),
+            "answer": str(attempt.get("answer", ""))[:1200],
+            "evaluation": {
+                "explanation": str((attempt.get("evaluation") or {}).get("explanation", ""))[:1000],
+                "criteria": str((attempt.get("evaluation") or {}).get("criteria", ""))[:1000],
+            },
+            "latency_s": attempt.get("latency_s"),
+            "ttft_s": attempt.get("ttft_s"),
+            "generation_s": attempt.get("generation_s"),
+            "timing_is_estimated": attempt.get("timing_is_estimated", True),
+        } for attempt in item.get("attempts", [])]
+        return {
+            "id": item.get("id"), "category": item.get("category"),
+            "difficulty": item.get("difficulty"), "status": item.get("status"),
+            "score": item.get("score"), "max_score": item.get("max_score", 10),
+            "prompt": str(item.get("prompt", ""))[:3000],
+            "prompt_truncated": len(str(item.get("prompt", ""))) > 3000,
+            "answer": str(item.get("answer", ""))[:4000],
+            "answer_truncated": len(str(item.get("answer", ""))) > 4000,
+            "evaluation": {"explanation": str(evaluation.get("explanation", ""))[:1500],
+                           "criteria": str(evaluation.get("criteria", ""))[:1500],
+                           "checks": (evaluation.get("checks") or [])[:12]},
+            "attempts": attempts, "latency_s": item.get("latency_s"),
+            "ttft_s": item.get("ttft_s"), "generation_s": item.get("generation_s"),
+            "timing_is_estimated": item.get("timing_is_estimated", True),
+        }
 
     @staticmethod
     def _failure_code(exc):
@@ -1071,6 +1129,9 @@ class BenchmarkManager:
         payload["repeat_runs"] = repeat_runs
         tests = make_tests(profile, seed, categories=categories, count=test_count)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
+        live_tests = [self._live_test_record(item) for item in completed[-12:]]
+        self._update_status(live_run_id=payload.get("live_run_id"), live_tests=live_tests,
+                            primary_completed_count=len(completed))
         failures = list(payload.get("failures", []))
         not_run = list(payload.get("not_run", []))
         warmup_errors = list(payload.get("warmup_errors", []))
@@ -1086,6 +1147,8 @@ class BenchmarkManager:
                 "not_run": not_run, "warmup_errors": warmup_errors,
                 "context_results": context_results, "accumulated_results": accumulated_results,
             })
+            self._update_status(resume_phase=phase, checkpointed_at=time.time(),
+                                primary_completed_count=len(completed))
 
         self._update_status(state="running", phase="Warming up the model",
                             activity="Sending 3 warm-up requests; their answers are discarded.",
@@ -1121,12 +1184,42 @@ class BenchmarkManager:
                 return
             if test["id"] in done: continue
             self._update_status(current_category=test["category"], current_test=test["id"],
+                                current_test_started_at=time.time(), current_attempt=0,
+                                current_repeat=1,
                                 activity=f"Evaluating {test['category']} · {test['difficulty']} test.")
             repetitions = []
             for repeat_index in range(repeat_runs):
                 run_options = dict(generation_options)
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
-                repetitions.append(self._execute(model, test, generation_options=run_options))
+                self._update_status(current_repeat=repeat_index + 1)
+                def report_attempt(event, repeat_number=repeat_index + 1):
+                    attempt_number = event["attempt"]
+                    repeat_text = (f" · repeat {repeat_number}/{repeat_runs}"
+                                   if repeat_runs > 1 else "")
+                    if event["event"] == "attempt_started":
+                        cancel_note = (" · pausing after this test" if self.cancel_requested.is_set()
+                                       else "")
+                        self._update_status(
+                            current_attempt=attempt_number,
+                            current_attempt_status=None, current_ttft_s=None,
+                            current_generation_s=None, current_timing_is_estimated=True,
+                            activity=(f"{test['category']} · {test['difficulty']} · "
+                                      f"attempt {attempt_number}/3{repeat_text}{cancel_note}"))
+                    else:
+                        cancel_note = (" · pausing after this test" if self.cancel_requested.is_set()
+                                       else "")
+                        self._update_status(
+                            current_attempt=attempt_number,
+                            current_attempt_status=event["status"],
+                            current_latency_s=event["latency_s"],
+                            current_ttft_s=event["ttft_s"],
+                            current_generation_s=event["generation_s"],
+                            current_timing_is_estimated=event.get("timing_is_estimated", True),
+                            activity=(f"{test['category']} · {test['difficulty']} · "
+                                      f"attempt {attempt_number}/3{repeat_text} completed{cancel_note}"))
+                repetitions.append(self._execute(
+                    model, test, generation_options=run_options,
+                    progress_callback=report_attempt))
             if repeat_runs > 1:
                 if any(entry["status"] == "NOT RUN" for entry in repetitions):
                     item = {**repetitions[0], "replicates": [
@@ -1165,6 +1258,8 @@ class BenchmarkManager:
             else:
                 item = repetitions[0]
             completed.append(item)
+            live_tests.append(self._live_test_record(item))
+            live_tests = live_tests[-12:]
             if item["status"] == "NOT RUN":
                 not_run.append({"test_id": test["id"],
                                 "reason": item.get("error") or "EVALUATOR_UNAVAILABLE",
@@ -1175,7 +1270,14 @@ class BenchmarkManager:
                                                      "attempts": item["attempts"]})
             self._update_status(progress=len(completed),
                                 passed=sum(x["passed"] is True for x in completed),
-                                failed=len(failures), not_run=len(not_run))
+                                failed=len(failures), not_run=len(not_run),
+                                live_tests=live_tests, current_attempt=0,
+                                current_test_started_at=None,
+                                current_attempt_status=item.get("status"),
+                                current_latency_s=item.get("latency_s"),
+                                current_ttft_s=item.get("ttft_s"),
+                                current_generation_s=item.get("generation_s"),
+                                current_timing_is_estimated=item.get("timing_is_estimated", True))
             save_checkpoint("primary")
         if self.cancel_requested.is_set():
             save_checkpoint("fresh_context")
@@ -1204,6 +1306,8 @@ class BenchmarkManager:
             if test["id"] in context_done:
                 continue
             self._update_status(current_test=test["id"],
+                                current_category="Context Scaling",
+                                current_test_started_at=time.time(),
                                 activity=f"Testing a fresh {test['context_size']:,}-token prompt.")
             context_results.append(self._execute(model, test, generation_options=generation_options))
             self._update_status(progress=len(context_results))
@@ -1231,6 +1335,8 @@ class BenchmarkManager:
             if test["id"] in accumulated_done:
                 continue
             self._update_status(current_test=test["id"],
+                                current_category="Context Scaling",
+                                current_test_started_at=time.time(),
                                 activity=f"Accumulating history through {test['context_size']:,} tokens.")
             item = self._execute(model, test, history=history, generation_options=generation_options)
             accumulated_results.append(item)
@@ -1280,6 +1386,7 @@ class BenchmarkManager:
                   "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
+                  "live_run_id": payload.get("live_run_id"),
                   "categories": categories or CATEGORIES, "test_count": len(tests),
                   "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
                   "top_p": generation_options["top_p"], "generation_options": generation_options,
