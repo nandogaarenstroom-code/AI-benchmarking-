@@ -172,9 +172,12 @@ def discover_models():
         "demo": True,
     }]
     ollama = _get("http://localhost:11434/api/tags")
-    if ollama:
-        for item in ollama.get("models", []):
-            models.append({"id": item.get("name"), "name": item.get("name"),
+    if ollama and isinstance(ollama.get("models"), list):
+        for item in ollama["models"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("name"), str) or
+                    not item["name"].strip()):
+                continue
+            models.append({"id": item["name"], "name": item["name"],
                            "backend": "Ollama", "endpoint": "http://localhost:11434",
                            "size": item.get("size", "Unknown"), "digest": item.get("digest"),
                            "modified": item.get("modified_at"),
@@ -183,10 +186,13 @@ def discover_models():
     for name, endpoint in (("LM Studio", "http://localhost:1234/v1"),
                            ("OpenAI-compatible", "http://127.0.0.1:8080/v1")):
         data = _get(endpoint + "/models")
-        if data:
+        if data and isinstance(data.get("data"), list):
             runtime_details = _llama_runtime_details(endpoint)
-            for item in data.get("data", []):
-                model = {"id": item.get("id"), "name": item.get("id"),
+            for item in data["data"]:
+                if (not isinstance(item, dict) or not isinstance(item.get("id"), str) or
+                        not item["id"].strip()):
+                    continue
+                model = {"id": item["id"], "name": item["id"],
                          "backend": name, "endpoint": endpoint, "size": "Unknown",
                          **runtime_details,
                          "capabilities": {"streaming": True, "structured_output": "Unknown",

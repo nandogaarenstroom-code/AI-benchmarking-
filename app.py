@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import CATEGORIES, COUNTS, BenchmarkManager, make_tests
-from backend.discovery import discover_engine_status, discover_models, resolve_model
+from backend.discovery import AdapterError, ask_model, discover_engine_status, discover_models, resolve_model
 from backend.llama_server import LlamaServerConflict, LlamaServerError, llama_server_manager
 
 ROOT = Path(__file__).parent
@@ -164,7 +164,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in (
                 "/api/benchmark", "/api/resume", "/api/cancel",
-                "/api/llama-server/start", "/api/llama-server/stop"):
+                "/api/llama-server/start", "/api/llama-server/stop",
+                "/api/model-compatibility"):
             return self.send_error(404)
         if not self._valid_host() or not self._valid_origin():
             return self._json({"error": "forbidden origin"}, 403)
@@ -230,6 +231,18 @@ class Handler(BaseHTTPRequestHandler):
             if not manager.start(clean_payload):
                 return self._json({"error": "benchmark already running"}, 409)
             return self._json({"started": True})
+        if path == "/api/model-compatibility":
+            try:
+                model = resolve_model(payload.get("model"))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            if model.get("demo"):
+                return self._json({"compatible": True, "demo": True})
+            try:
+                ask_model(model, "Reply with exactly READY.", options={"max_tokens": 8})
+            except AdapterError as exc:
+                return self._json({"compatible": False, "error": str(exc)}, 502)
+            return self._json({"compatible": True})
         if path == "/api/resume":
             if manager.resume():
                 return self._json({"started": True})

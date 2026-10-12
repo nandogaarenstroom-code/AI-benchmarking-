@@ -128,6 +128,30 @@ class ApiSecurityTests(unittest.TestCase):
         })
         self.assertEqual(status, 400)
 
+    def test_real_model_requires_successful_chat_compatibility_check(self):
+        model = {"id": "test-model", "backend": "LM Studio",
+                 "endpoint": "http://localhost:1234/v1", "demo": False}
+        with patch.object(app, "resolve_model", return_value=model), \
+                patch.object(app, "ask_model", return_value={"text": "READY"}) as ask:
+            status, body = self.request("/api/model-compatibility", json.dumps({"model": model}), {
+                "Origin": f"http://127.0.0.1:{self.server.server_port}",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": app.CSRF_TOKEN,
+            })
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["compatible"])
+        ask.assert_called_once_with(model, "Reply with exactly READY.", options={"max_tokens": 8})
+
+        with patch.object(app, "resolve_model", return_value=model), \
+                patch.object(app, "ask_model", side_effect=app.AdapterError("CONNECTION_ERROR", "offline")):
+            status, body = self.request("/api/model-compatibility", json.dumps({"model": model}), {
+                "Origin": f"http://127.0.0.1:{self.server.server_port}",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": app.CSRF_TOKEN,
+            })
+        self.assertEqual(status, 502)
+        self.assertFalse(json.loads(body)["compatible"])
+
     def test_preview_returns_generated_prompt_for_supported_category(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
         connection.request("GET", "/api/benchmark-preview?category=Coding",
@@ -137,7 +161,7 @@ class ApiSecurityTests(unittest.TestCase):
         connection.close()
         self.assertEqual(response.status, 200)
         self.assertEqual(body["previews"][0]["category"], "Coding")
-        self.assertIn("Return Python code only.", body["previews"][0]["prompt"])
+        self.assertIn("Output Python code only.", body["previews"][0]["prompt"])
 
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({

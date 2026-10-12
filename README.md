@@ -84,10 +84,27 @@ fail during model loading. The saved benchmark result separately records this ap
 and any runtime values llama.cpp actually reports through `/props`. The launcher is Windows-only;
 on other platforms, start llama.cpp yourself and refresh model discovery.
 
+## Engine discovery and benchmark setup
+
+The dashboard probes only local Ollama (`localhost:11434`), LM Studio (`localhost:1234/v1`),
+and OpenAI-compatible (`127.0.0.1:8080/v1`) model-list APIs. Each engine is shown as detected,
+unavailable, or returning an error, alongside its listed model IDs. Detection confirms the local
+model-list API only; after selecting a real model, use **Check chat compatibility** to send a short
+local request before benchmarking is enabled. Model cards show reported capabilities and runtime
+details; unknown capability values stay unknown. A server on a different address or port is not
+automatically detected or accepted as a benchmark target. To use another engine, expose a compatible
+API at one of the supported local endpoints.
+
+Choose one or more benchmark categories, a primary test count from 1 to 252, and a profile before
+starting. The profile fills in its usual test count, which you can change. Prompt previews come from
+the generated test set; users cannot submit arbitrary prompts or executable test code. The chosen
+categories and count are saved in result configuration. Context and performance experiments remain
+separate from the selected primary categories.
+
 ## Automated behavior
 
-Selecting a model and pressing **Run benchmark** starts the selected profile without further
-questions. The dashboard reports warm-up, primary tests, fresh and accumulated context tests,
+Selecting a model, categories, and test count, then pressing **Run benchmark** starts the configured
+profile. The dashboard reports warm-up, primary tests, fresh and accumulated context tests,
 performance measurements, and file-saving phases, with phase progress and pass/fail counts.
 Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
 Completed files are saved under `results/` with a generated name such as
@@ -107,6 +124,9 @@ distinguished from incorrect answers and excluded from quality scoring. If there
 measurements, the affected score is shown as unavailable rather than as zero.
 The interface reports observable answers and evaluator evidence; it does not ask models to disclose
 hidden chain-of-thought.
+Users can also privately rate an answer and flag a questionable evaluation on each test record.
+This feedback is stored only in the current browser, is not included in result files, and never
+changes deterministic scores.
 
 Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
 maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,

@@ -259,7 +259,9 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <p class="muted" id="settings-note">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
     </fieldset>
   </details>
+  <button class="secondary" id="check-model" type="button" disabled>Check chat compatibility</button>
   <button class="primary" id="run" disabled>Choose a model to run</button><button class="secondary" id="resume" disabled>Resume previous run</button>
+  <p id="compatibility-status" class="muted" role="status" aria-live="polite">Select a detected model; real engines must pass a chat compatibility check before a run.</p>
   <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
   <p id="run-error" role="alert" hidden></p>
 </section>
@@ -332,6 +334,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 </section>
 <script>
 let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false;
+let selectedCompatible=false;
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
@@ -344,7 +347,7 @@ function selectedCategories(){
 }
 function updateRunAvailability(){
   const count=Number($('test-count').value),validCount=Number.isInteger(count)&&count>=1&&count<=252;
-  $('run').disabled=!selected||!selectedCategories().length||!validCount;
+  $('run').disabled=!selected||!selectedCompatible||!selectedCategories().length||!validCount;
 }
 function renderCategoryPicker(){
   const container=$('category-picker');
@@ -414,7 +417,8 @@ async function load(){
     if(!response.ok)throw new Error('The local model scan failed. Check that the app is still running.');
     const data=await response.json(),container=$('models');
     renderEngines(data.engines||[]);
-    selected=null;$('run').disabled=true;$('run').textContent='Choose a model to run';
+    selected=null;selectedCompatible=false;$('run').disabled=true;$('run').textContent='Choose a model to run';
+    $('check-model').disabled=true;$('compatibility-status').textContent='Select a detected model; real engines must pass a chat compatibility check before a run.';
     container.replaceChildren();
     data.models.forEach(model=>{
       const card=document.createElement('div');
@@ -434,6 +438,11 @@ async function load(){
       const choose=()=>{
         document.querySelectorAll('.model').forEach(item=>{item.classList.remove('selected');item.setAttribute('aria-pressed','false')});
         card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);
+        selectedCompatible=Boolean(model.demo);
+        $('check-model').disabled=Boolean(model.demo);
+        $('compatibility-status').textContent=model.demo
+          ?'Demo mode is ready; it does not check or measure a real model.'
+          :'Model list detected. Check chat compatibility before starting a benchmark.';
         $('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';updateRunAvailability();
         $('discovery-status').textContent=model.demo?'Demo results test the app only; they are not model measurements.':'Selected local model: '+model.name;
       };
@@ -461,7 +470,10 @@ function displayError(message){
   setRunning(false);
 }
 function setRunning(running){
-  $('run').disabled=running||!selected;$('resume').disabled=running||!resumeAvailable;
+  if(running)$('run').disabled=true;
+  else updateRunAvailability();
+  $('check-model').disabled=running||!selected||Boolean(selected.demo);
+  $('resume').disabled=running||!resumeAvailable;
   $('cancel').hidden=!running;
 }
 async function poll(){
@@ -893,6 +905,29 @@ $('run').onclick=()=>{
   }
   const generation_options=Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,Number($(id).value)]));
   startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value),categories,test_count:testCount});
+};
+$('check-model').onclick=async()=>{
+  if(!selected)return;
+  const checkedModel=selected;
+  selectedCompatible=false;updateRunAvailability();$('check-model').disabled=true;
+  $('compatibility-status').textContent='Sending a small local chat request to verify adapter compatibility…';
+  try{
+    const response=await fetch('/api/model-compatibility',{
+      method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},
+      body:JSON.stringify({model:checkedModel})
+    });
+    const data=await response.json();
+    if(!response.ok||!data.compatible)throw new Error(data.error||'The local server did not confirm chat compatibility.');
+    if(selected!==checkedModel)return;
+    selectedCompatible=true;
+    $('compatibility-status').textContent='Chat compatibility confirmed with a short local test request. You can start the benchmark.';
+  }catch(error){
+    if(selected===checkedModel)
+      $('compatibility-status').textContent=`Compatibility not confirmed: ${error.message} Benchmarking remains disabled.`;
+  }finally{
+    $('check-model').disabled=!selected||Boolean(selected.demo);
+    updateRunAvailability();
+  }
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
 function updateLlamaSource(){
