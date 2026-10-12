@@ -11,6 +11,10 @@ MAX_TEST_COUNT = 20
 MAX_TEST_SIZE = 2_000
 
 
+class EvaluatorUnavailable(RuntimeError):
+    """The code sandbox could not be started, so the model answer was not graded."""
+
+
 def code_evaluator_available():
     return shutil.which("docker") is not None
 
@@ -310,7 +314,7 @@ def _run_code(source, tests):
         return False
     docker = shutil.which("docker")
     if not docker:
-        return False
+        raise EvaluatorUnavailable("Docker executable is unavailable.")
     try:
         completed = subprocess.run(
             [docker, "run", "--rm", "--pull=never", "--network=none", "--cpus=0.5",
@@ -318,7 +322,24 @@ def _run_code(source, tests):
              "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--ipc=none",
              "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--workdir=/tmp",
              "python:3-alpine", "python", "-I", "-c", harness],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=3, check=False)
+        stderr = completed.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        infrastructure_errors = (
+            "cannot connect to the docker daemon", "error during connect",
+            "is the docker daemon running", "no such image",
+            "pull access denied", "failed to resolve reference",
+            "permission denied while trying to connect", "error response from daemon",
+            "executable file not found",
+        )
+        if completed.returncode in (125, 126, 127) or any(
+               marker in stderr.casefold() for marker in infrastructure_errors):
+            raise EvaluatorUnavailable("Docker could not start the code evaluator.")
         return completed.returncode == 0
-    except (subprocess.SubprocessError, OSError):
+    except subprocess.TimeoutExpired:
         return False
+    except EvaluatorUnavailable:
+        raise
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise EvaluatorUnavailable("Docker could not start the code evaluator.") from exc

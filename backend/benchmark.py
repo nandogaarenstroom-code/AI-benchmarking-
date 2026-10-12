@@ -20,7 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import hardware_info, model_info, normalize_generation_options, resolve_model
-from .evaluation import code_evaluator_available, evaluation_criteria, evaluate_with_details
+from .evaluation import (
+    EvaluatorUnavailable, code_evaluator_available, evaluation_criteria, evaluate_with_details,
+)
 from .reporting import write_pdf, write_chart
 
 CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
@@ -991,8 +993,18 @@ class BenchmarkManager:
             else:
                 response_metrics = answer if isinstance(answer, dict) else {}
                 answer = response_metrics.get("text", answer)
-                evaluation = evaluate_with_details(test, answer)
-                attempt_status = evaluation["status"]
+                try:
+                    evaluation = evaluate_with_details(test, answer)
+                except EvaluatorUnavailable:
+                    evaluation = {
+                        "passed": None, "status": "NOT RUN", "criteria": criteria,
+                        "error": "EVALUATOR_UNAVAILABLE",
+                        "explanation": ("The code sandbox could not start (Docker daemon or "
+                                        "required image unavailable); generated code was not graded."),
+                    }
+                    attempt_status = "NOT RUN"
+                else:
+                    attempt_status = evaluation["status"]
                 last_answer, last_evaluation, last_metrics = answer, evaluation, response_metrics
             latency = time.perf_counter() - started
             if error is None:
@@ -1029,6 +1041,21 @@ class BenchmarkManager:
                         "error": None,
                         "context_reset": history is None, "attempts": attempts,
                         "status": "PASS"}
+            if evaluation.get("error") == "EVALUATOR_UNAVAILABLE":
+                return {**test, "answer": answer, "evaluation": evaluation,
+                        "passed": None, "score": None, "latency_s": latency,
+                        "ttft_s": response_metrics.get("ttft_s", latency),
+                        "generation_s": response_metrics.get("generation_s", latency),
+                        "timing_is_estimated": not bool(
+                            response_metrics and "ttft_s" in response_metrics and
+                            "generation_s" in response_metrics),
+                        "token_count_is_estimated": True,
+                        "prompt_tokens": response_metrics.get(
+                            "prompt_tokens", max(1, len(test["prompt"]) // 4)),
+                        "output_tokens": response_metrics.get(
+                            "output_tokens", max(1, len(str(answer).split()))),
+                        "error": "EVALUATOR_UNAVAILABLE", "context_reset": history is None,
+                        "attempts": attempts, "status": "NOT RUN"}
             if attempt == 3:
                 if last_evaluation is None:
                     evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,

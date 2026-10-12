@@ -133,6 +133,11 @@ silent skip controls, so unrun tests are not mistaken for scored results.
 Checks that could not run (for example, unavailable Docker or a model-server timeout) are
 distinguished from incorrect answers and excluded from quality scoring. If there are no valid
 measurements, the affected score is shown as unavailable rather than as zero.
+For coding checks, a Docker executable alone does not prove the evaluator is ready: if the daemon,
+required preloaded image, or container runtime cannot start, the generated answer is retained and
+the check is marked **NOT RUN**, not as a model failure. Assertion or execution failures inside a
+successfully started sandbox remain scored test outcomes. The evaluator does not pull images or
+expose raw Docker diagnostics.
 The interface reports observable answers and evaluator evidence; it does not ask models to disclose
 hidden chain-of-thought.
 

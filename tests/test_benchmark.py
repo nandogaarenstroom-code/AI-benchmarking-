@@ -14,7 +14,7 @@ from backend.discovery import (
     AdapterError, _engine_probe, _get, _llama_runtime_details, ask_model, discover_models,
     model_info, normalize_generation_options, resolve_model,
 )
-from backend.evaluation import evaluate, evaluate_with_details
+from backend.evaluation import EvaluatorUnavailable, _run_code, evaluate, evaluate_with_details
 from backend.reporting import write_chart, write_pdf
 
 
@@ -221,6 +221,41 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--read-only", command)
         self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
+
+    def test_code_evaluator_distinguishes_runtime_unavailable_from_assertion_failure(self):
+        with patch("backend.evaluation.shutil.which", return_value=None):
+            with self.assertRaises(EvaluatorUnavailable):
+                _run_code("def add(a, b): return a + b", ["assert add(1, 2) == 3"])
+
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run", return_value=CompletedProcess(
+                    args=[], returncode=125, stderr=b"Unable to find image 'python:3-alpine' locally")):
+            with self.assertRaises(EvaluatorUnavailable):
+                _run_code("def add(a, b): return a + b", ["assert add(1, 2) == 3"])
+
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run", return_value=CompletedProcess(
+                    args=[], returncode=1, stderr=b"AssertionError")):
+            self.assertFalse(_run_code("def add(a, b): return a + b", ["assert add(1, 2) == 4"]))
+
+    def test_docker_infrastructure_failure_makes_code_test_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "coding-001", "category": "Coding", "difficulty": "Easy",
+                    "prompt": "Implement add.", "evaluation_method": "code",
+                    "tests": ["assert add(1, 2) == 3"], "max_score": 10}
+            with patch.object(manager, "_answer", return_value="def add(a, b): return a + b"), \
+                    patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run", return_value=CompletedProcess(
+                        args=[], returncode=125, stderr=b"Cannot connect to the Docker daemon")):
+                result = manager._execute({"demo": False}, test)
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["passed"])
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
+        self.assertTrue(result["answer"])
+        self.assertEqual(len(result["attempts"]), 1)
+        self.assertIsNone(manager._scores([result])["categories"]["Coding"])
 
     def test_openai_compatible_adapter_integrates_with_loopback_server(self):
         captured = []
