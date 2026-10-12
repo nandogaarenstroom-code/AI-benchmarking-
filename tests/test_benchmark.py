@@ -10,7 +10,10 @@ from unittest.mock import patch
 from backend.benchmark import (
     EVALUATOR_VERSION, TASK_SET_VERSION, BenchmarkManager, make_context_tests, make_tests,
 )
-from backend.discovery import AdapterError, _get, _llama_runtime_details, ask_model, normalize_generation_options, resolve_model
+from backend.discovery import (
+    AdapterError, _get, _llama_runtime_details, ask_model, discover_models,
+    model_info, normalize_generation_options, resolve_model,
+)
 from backend.evaluation import evaluate, evaluate_with_details
 from backend.reporting import write_chart, write_pdf
 
@@ -41,6 +44,28 @@ class BenchmarkTests(unittest.TestCase):
                 _llama_runtime_details("http://localhost:8080/v1")["generation_defaults"],
                 {"temperature": 0.7},
             )
+
+    def test_discovered_model_includes_only_managed_server_startup_settings(self):
+        launch = {
+            "source": "path", "model_file": "model.gguf",
+            "context_size_requested": 65536, "gpu_layers_requested": 24,
+            "host": "127.0.0.1", "port": 8080,
+        }
+
+        def fake_get(url, timeout=0.7):
+            if url == "http://127.0.0.1:8080/v1/models":
+                return {"data": [{"id": "local-model"}]}
+            return None
+
+        with patch("backend.discovery._get", side_effect=fake_get), \
+                patch("backend.discovery._llama_runtime_details", return_value={
+                    "llama_cpp": True, "context_length": 65536}), \
+                patch("backend.discovery.llama_server_manager.managed_launch",
+                      return_value=launch):
+            models = discover_models()
+        model = next(item for item in models if item.get("id") == "local-model")
+        self.assertEqual(model["managed_launch"], launch)
+        self.assertEqual(model_info(model)["managed_launch"], launch)
 
     def test_generation_options_are_normalized(self):
         options = normalize_generation_options({

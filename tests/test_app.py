@@ -105,6 +105,51 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertNotIn("tests", self.manager.payload)
         self.assertNotIn("completed_tests", self.manager.payload)
 
+    def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
+        body = json.dumps({
+            "source": "path", "executable_path": "C:\\models\\llama-server.exe",
+            "model_path": "C:\\models\\test.gguf", "context_size": 65536,
+            "gpu_layers": 24, "tests": [{"id": "caller-controlled"}],
+        })
+        headers = {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        }
+        with patch.object(app.llama_server_manager, "start", return_value={
+                "state": "running", "message": "ready"} ) as start:
+            status, body_bytes = self.request("/api/llama-server/start", body, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body_bytes), {"state": "running", "message": "ready"})
+        start.assert_called_once_with(
+            "path", "C:\\models\\llama-server.exe", "C:\\models\\test.gguf", 65536, 24)
+
+        headers.pop("X-CSRF-Token")
+        with patch.object(app.llama_server_manager, "start") as start:
+            status, _ = self.request("/api/llama-server/start", body, headers)
+        self.assertEqual(status, 403)
+        start.assert_not_called()
+
+    def test_llama_server_status_and_stop_routes(self):
+        with patch.object(app.llama_server_manager, "status", return_value={
+                "state": "running", "message": "ready"}):
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            connection.request("GET", "/api/llama-server/status",
+                               headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+            response = connection.getresponse()
+            self.assertEqual(json.loads(response.read()), {"state": "running", "message": "ready"})
+            connection.close()
+        with patch.object(app.llama_server_manager, "stop", return_value={
+                "state": "stopped", "message": "stopped"}) as stop:
+            status, body = self.request("/api/llama-server/stop", "{}", {
+                "Origin": f"http://127.0.0.1:{self.server.server_port}",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": app.CSRF_TOKEN,
+            })
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["state"], "stopped")
+        stop.assert_called_once_with()
+
     def test_frontend_receives_per_process_csrf_token(self):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
         connection.request("GET", "/", headers={"Host": f"127.0.0.1:{self.server.server_port}"})

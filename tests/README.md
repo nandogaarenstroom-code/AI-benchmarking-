@@ -51,6 +51,10 @@ Test-result coverage verifies
 prompt/evaluator explanations, answer traces, and that unavailable evaluators produce unscored
 NOT RUN outcomes.
 
+Managed llama.cpp launcher tests mock Windows process creation and winget; they do not install a
+package, run a real `llama-server.exe`, or validate actual GPU/context capacity. Live Windows testing
+is still required for those behaviors.
+
 ### `test_domain_evaluators`
 
 Verifies representative evaluator behavior:

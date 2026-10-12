@@ -67,6 +67,19 @@ an installed model. For real models, start Ollama, LM Studio, llama.cpp, or anot
 server before opening the dashboard. Discovery never invents metadata: unavailable values are
 reported as `Unknown`.
 
+On Windows, the dashboard can also start an app-managed llama.cpp server. Choose an existing
+`llama-server.exe` path or install the fixed `ggml.llamacpp` package through winget, then enter the
+full path to a local `.gguf` model, a requested context size, and GPU layer count. The app binds that
+server to `127.0.0.1:8080`, waits for its health endpoint, and offers a stop control; a server already
+using that port must be stopped first. The app starts only the process it owns and stops it when the
+app exits normally. It does not download model files.
+
+The displayed startup context and GPU-layer values are the requested command-line settings; they do
+not guarantee the model or available memory can support them. A high context or offload request may
+fail during model loading. The saved benchmark result separately records this app-managed request
+and any runtime values llama.cpp actually reports through `/props`. The launcher is Windows-only;
+on other platforms, start llama.cpp yourself and refresh model discovery.
+
 ## Automated behavior
 
 Selecting a model and pressing **Run benchmark** starts the selected profile without further

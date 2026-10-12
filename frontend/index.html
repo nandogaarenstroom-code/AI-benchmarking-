@@ -70,6 +70,33 @@ a{color:#87ecc3}.demo{color:#fbbf24;font-weight:800}.notice{border-left:3px soli
 <h1>Local AI Benchmark</h1>
 <p class="muted">A private, local-only evaluation dashboard for your models.</p>
 <section>
+  <h2>Start llama.cpp server (Windows)</h2>
+  <p class="muted">The app can start a local llama-server on 127.0.0.1:8080. You must already have a GGUF model file.
+    Context size is a requested startup value, not a promise that the model or your hardware can support it.</p>
+  <div class="settings">
+    <label>Install / executable source
+      <select id="llama-source"><option value="path">I have llama-server.exe</option><option value="winget">Install with winget</option></select>
+    </label>
+    <label id="llama-executable-row">Full path to llama-server.exe
+      <input id="llama-executable" type="text" placeholder="C:\path\to\llama-server.exe" autocomplete="off">
+    </label>
+    <label>Full path to GGUF model file
+      <input id="llama-model" type="text" placeholder="C:\models\model.gguf" autocomplete="off">
+    </label>
+    <label>Requested context tokens
+      <input id="llama-context" type="number" min="512" max="2147483647" step="1" value="32768">
+    </label>
+    <label>GPU layers (0 = CPU)
+      <input id="llama-gpu-layers" type="number" min="0" max="1000" step="1" value="0">
+    </label>
+  </div>
+  <p class="muted">The winget option installs the fixed package <code>ggml.llamacpp</code>. Installation may take several minutes.
+    High context sizes or GPU offload settings can exceed available memory. This app-managed server uses port 8080.</p>
+  <button class="primary" id="start-llama-server" type="button">Start llama-server</button>
+  <button class="secondary" id="stop-llama-server" type="button" disabled>Stop app-managed server</button>
+  <p id="llama-server-status" class="muted" role="status" aria-live="polite">Checking managed server…</p>
+</section>
+<section>
   <div class="toolbar"><h2>Detected local models</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
   <div id="models">Scanning local AI servers…</div>
   <p id="discovery-status" class="muted" role="status"></p>
@@ -196,7 +223,8 @@ async function load(){
       const settingLabels={temperature:'temp',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat penalty',max_tokens:'max tokens',seed:'seed'};
       const defaults=Object.entries(reported).map(([key,value])=>`${settingLabels[key]||key} ${value}`);
       meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`+
-        (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'');
+        (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'')+
+        (model.managed_launch?` · app-started · requested context ${model.managed_launch.context_size_requested}`:'');
       card.append(title,document.createElement('br'),meta);
       const choose=()=>{
         document.querySelectorAll('.model').forEach(item=>{item.classList.remove('selected');item.setAttribute('aria-pressed','false')});
@@ -361,7 +389,8 @@ function show(result,resultDirectory){
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
     ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload],
-    ['llama.cpp server defaults',result.model.generation_defaults]];
+    ['llama.cpp server defaults',result.model.generation_defaults],
+    ['App-managed server startup request',result.model.managed_launch]];
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
   const uncertainty=result.uncertainty||{};
@@ -632,6 +661,59 @@ $('run').onclick=()=>{
   startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
+function updateLlamaSource(){
+  $('llama-executable-row').hidden=$('llama-source').value==='winget';
+}
+async function updateLlamaServerStatus(){
+  try{
+    const response=await fetch('/api/llama-server/status');
+    const status=await response.json();
+    $('llama-server-status').textContent=status.message||status.state;
+    $('stop-llama-server').disabled=status.state!=='running'&&status.state!=='starting';
+  }catch(error){
+    $('llama-server-status').textContent='Unable to read managed server status.';
+  }
+}
+$('llama-source').onchange=updateLlamaSource;
+$('start-llama-server').onclick=async()=>{
+  const button=$('start-llama-server');
+  button.disabled=true;
+  $('llama-server-status').textContent=$('llama-source').value==='winget'
+    ?'Installing llama.cpp with winget, then starting the server…'
+    :'Starting llama-server and waiting for its health check…';
+  try{
+    const response=await fetch('/api/llama-server/start',{
+      method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},
+      body:JSON.stringify({
+        source:$('llama-source').value,executable_path:$('llama-executable').value,
+        model_path:$('llama-model').value,context_size:Number($('llama-context').value),
+        gpu_layers:Number($('llama-gpu-layers').value)
+      })
+    });
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Could not start llama-server.');
+    $('llama-server-status').textContent=data.message;
+    await updateLlamaServerStatus();
+    await load();
+  }catch(error){
+    $('llama-server-status').textContent=error.message;
+  }finally{button.disabled=false}
+};
+$('stop-llama-server').onclick=async()=>{
+  const button=$('stop-llama-server');button.disabled=true;
+  try{
+    const response=await fetch('/api/llama-server/stop',{
+      method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:'{}'
+    });
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Could not stop llama-server.');
+    $('llama-server-status').textContent=data.message;
+    await load();
+  }catch(error){$('llama-server-status').textContent=error.message}
+  finally{await updateLlamaServerStatus()}
+};
+updateLlamaSource();
+updateLlamaServerStatus();
 load();
 loadResults();
 poll().catch(error=>displayError(error.message));

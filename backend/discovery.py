@@ -9,6 +9,8 @@ import codecs
 import math
 from datetime import datetime, timezone
 
+from .llama_server import llama_server_manager
+
 MAX_MODEL_RESPONSE_BYTES = 1_048_576
 MAX_DISCOVERY_RESPONSE_BYTES = 1_048_576
 
@@ -140,16 +142,20 @@ def discover_models():
                            "capabilities": {"streaming": True, "structured_output": "Unknown",
                                             "tools": "Unknown"}, "demo": False})
     for name, endpoint in (("LM Studio", "http://localhost:1234/v1"),
-                           ("OpenAI-compatible", "http://localhost:8080/v1")):
+                           ("OpenAI-compatible", "http://127.0.0.1:8080/v1")):
         data = _get(endpoint + "/models")
         if data:
             runtime_details = _llama_runtime_details(endpoint)
             for item in data.get("data", []):
-                models.append({"id": item.get("id"), "name": item.get("id"),
-                               "backend": name, "endpoint": endpoint, "size": "Unknown",
-                               **runtime_details,
-                               "capabilities": {"streaming": True, "structured_output": "Unknown",
-                                                "tools": "Unknown"}, "demo": False})
+                model = {"id": item.get("id"), "name": item.get("id"),
+                         "backend": name, "endpoint": endpoint, "size": "Unknown",
+                         **runtime_details,
+                         "capabilities": {"streaming": True, "structured_output": "Unknown",
+                                          "tools": "Unknown"}, "demo": False}
+                managed_launch = llama_server_manager.managed_launch(endpoint)
+                if managed_launch:
+                    model["managed_launch"] = managed_launch
+                models.append(model)
     return models
 
 
@@ -188,6 +194,7 @@ def model_info(model):
         "llama_cpp": model.get("llama_cpp", False),
         "generation_defaults": model.get("generation_defaults", {}),
         "capabilities": model.get("capabilities", {}),
+        "managed_launch": model.get("managed_launch"),
     }
 
 
