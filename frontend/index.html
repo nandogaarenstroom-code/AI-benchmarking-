@@ -123,9 +123,10 @@ fieldset legend{padding:0 8px;color:var(--blue);font:700 11px ui-monospace,SFMon
 .history-item{padding:13px 10px;border-bottom-color:#2a383c;font-size:13px}
 .history-item:nth-child(odd){background:#ffffff04}
 .history-item input{accent-color:var(--accent)}
-.grid>.metric,.grid>div{min-width:0}
-.grid>.metric{font-size:26px}
-#difficulty-summary>.grid>div,#difficulty-summary>div{padding:13px;border:1px solid var(--line);border-radius:7px;background:#10191c}
+.grid>div{min-width:0}
+.station-report>.grid>div,#difficulty-summary>div{padding:15px;border:1px solid var(--line);border-radius:7px;background:#10191c}
+.station-report>.grid>div{font:700 12px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.station-report .metric{margin-top:8px;font-size:27px;color:var(--accent)}
 .metric{font-weight:750;letter-spacing:-.04em}
 .notice{border-left-color:var(--amber);background:#f3bd6e0c;padding:12px 14px}
 .demo{color:var(--amber)}
@@ -140,6 +141,7 @@ progress::-moz-progress-bar{background:linear-gradient(90deg,#92bc43,#c4ed68)}
 .lab{border-color:#526260;border-radius:8px;background-color:#0b1214}
 #voxel-detail{border-color:#687e77;background:#0b1214f2;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
 table{font-variant-numeric:tabular-nums}
+.station-report table{max-width:100%}
 th{color:var(--blue)}
 td,th{border-bottom-color:#2d3b3e}
 summary{color:var(--blue)}
