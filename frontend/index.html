@@ -33,6 +33,14 @@ fieldset label{display:block;font-size:14px;color:#dce7f4}
 .test-record{border:1px solid var(--line);border-radius:9px;padding:12px;margin:10px 0;background:#0e1b2a}
 .test-record summary{color:var(--text)}
 .test-record pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#09111d;padding:10px;border-radius:6px}
+.engine{padding:10px 12px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#0e1b2a}
+.engine-status{font-weight:700;text-transform:capitalize}
+.engine-status[data-status="detected"]{color:var(--accent)}
+.engine-status[data-status="error"]{color:var(--danger)}
+.category-picker{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px 12px}
+.category-picker label,.feedback-controls label{display:flex;align-items:center;gap:8px}
+.category-picker input,.feedback-controls input{width:auto;margin:4px}
+.prompt-preview{max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
 .model-meter{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:12px 0;background:#101f30}
 .model-meter-label{display:flex;align-items:center;justify-content:space-between;gap:10px;font-weight:700}
 .model-meter progress{margin:8px 0 2px}
@@ -207,7 +215,10 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <p id="llama-server-status" class="muted" role="status" aria-live="polite">Checking managed server…</p>
 </section>
 <section class="station-config">
-  <div class="toolbar"><h2>Detected local models</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
+  <div class="toolbar"><h2>Local engine discovery</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
+  <p class="muted">Scans only supported local endpoints: Ollama, LM Studio, and the OpenAI-compatible API at 127.0.0.1:8080. Other setups must expose a compatible local API at one of these endpoints to be detected; remote endpoints are not accepted.</p>
+  <div id="engines" aria-live="polite">Checking supported local endpoints…</div>
+  <h3>Detected local models</h3>
   <div id="models">Scanning local AI servers…</div>
   <p id="discovery-status" class="muted" role="status"></p>
   <div class="controls">
@@ -219,6 +230,18 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <option value="custom">Custom</option>
   </select></label>
   </div>
+  <fieldset>
+    <legend>Choose benchmark scope</legend>
+    <p class="muted">Select at least one category and a test count (1–252). The preview uses generated prompts; user-supplied code or tests are not accepted.</p>
+    <div id="category-picker" class="category-picker"></div>
+    <label>Number of primary tests
+      <input id="test-count" type="number" min="1" max="252" step="1" value="100">
+    </label>
+    <details>
+      <summary>Preview representative prompts</summary>
+      <div id="prompt-previews" class="muted">Select categories to preview generated prompts.</div>
+    </details>
+  </fieldset>
   <details>
     <summary>Advanced settings</summary>
     <fieldset>
@@ -312,6 +335,75 @@ let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=D
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
+const benchmarkCategories=['Reasoning','Mathematics','Coding','Instruction Following','Structured Output','Knowledge','Hallucination Resistance','Long Context','Summarization','Multilingual','Creative Generation','Consistency','Context Retrieval'];
+const profileCounts={QUICK:25,STANDARD:100,FULL:252,PERFORMANCE:25,QUALITY:100,REASONING:40,CODING:40,'LONG CONTEXT':30};
+let previewSequence=0,previewTimer=null;
+
+function selectedCategories(){
+  return [...$('category-picker').querySelectorAll('input:checked')].map(input=>input.value);
+}
+function updateRunAvailability(){
+  const count=Number($('test-count').value),validCount=Number.isInteger(count)&&count>=1&&count<=252;
+  $('run').disabled=!selected||!selectedCategories().length||!validCount;
+}
+function renderCategoryPicker(){
+  const container=$('category-picker');
+  benchmarkCategories.forEach((category,index)=>{
+    const label=document.createElement('label'),input=document.createElement('input');
+    input.type='checkbox';input.value=category;input.checked=true;input.id=`category-${index}`;
+    input.addEventListener('change',()=>{updateRunAvailability();schedulePromptPreview()});
+    label.htmlFor=input.id;label.append(input,document.createTextNode(category));container.append(label);
+  });
+  $('profile').addEventListener('change',()=>{
+    $('test-count').value=profileCounts[$('profile').value]||100;
+    updateRunAvailability();
+  });
+  $('test-count').addEventListener('input',updateRunAvailability);
+  updateRunAvailability();
+  schedulePromptPreview();
+}
+function schedulePromptPreview(){
+  clearTimeout(previewTimer);
+  previewTimer=setTimeout(loadPromptPreview,180);
+}
+async function loadPromptPreview(){
+  const sequence=++previewSequence,categories=selectedCategories(),container=$('prompt-previews');
+  container.replaceChildren();
+  if(!categories.length){container.textContent='Select one or more categories to preview prompts.';return}
+  container.textContent='Loading generated prompt previews…';
+  const query=new URLSearchParams();
+  categories.forEach(category=>query.append('category',category));
+  try{
+    const response=await fetch('/api/benchmark-preview?'+query.toString());
+    const data=await response.json();
+    if(sequence!==previewSequence)return;
+    if(!response.ok)throw new Error(data.error||'Unable to load prompt previews.');
+    container.replaceChildren();
+    data.previews.forEach(item=>{
+      const details=document.createElement('details'),summary=document.createElement('summary');
+      const prompt=document.createElement('pre');
+      summary.textContent=item.category+' · representative generated prompt';
+      prompt.className='prompt-preview';prompt.textContent=item.prompt+(item.truncated?'\n[Preview shortened; benchmark prompt may be longer.]':'');
+      details.append(summary,prompt);container.append(details);
+    });
+  }catch(error){
+    if(sequence===previewSequence)container.textContent=error.message;
+  }
+}
+function renderEngines(engines){
+  const container=$('engines');container.replaceChildren();
+  engines.forEach(engine=>{
+    const card=document.createElement('div'),name=document.createElement('b'),detail=document.createElement('p');
+    card.className='engine';name.textContent=engine.name;
+    const status=document.createElement('span');status.className='engine-status';
+    status.dataset.status=engine.status;status.textContent=` · ${engine.status}`;
+    detail.className='muted';
+    const models=engine.models.length?engine.models.join(', '):engine.status==='detected'?'Endpoint responds; no compatible models listed.':'No compatible models detected.';
+    detail.textContent=`${engine.endpoint} · ${models} · API: ${engine.capabilities.join(', ')}`+
+      (engine.error?` · ${engine.error}`:'');
+    card.append(name,status,detail);container.append(card);
+  });
+}
 
 async function load(){
   const button=$('refresh-models');
@@ -321,6 +413,7 @@ async function load(){
     const response=await fetch('/api/models');
     if(!response.ok)throw new Error('The local model scan failed. Check that the app is still running.');
     const data=await response.json(),container=$('models');
+    renderEngines(data.engines||[]);
     selected=null;$('run').disabled=true;$('run').textContent='Choose a model to run';
     container.replaceChildren();
     data.models.forEach(model=>{
@@ -332,14 +425,16 @@ async function load(){
       const reported=model.generation_defaults||{};
       const settingLabels={temperature:'temp',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat penalty',max_tokens:'max tokens',seed:'seed'};
       const defaults=Object.entries(reported).map(([key,value])=>`${settingLabels[key]||key} ${value}`);
+      const capabilities=Object.entries(model.capabilities||{}).map(([name,value])=>`${name}: ${value}`);
       meta.textContent=`${escapeText(model.backend)} · ${escapeText(model.size||'Unknown')}`+
-        (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'')+
-        (model.managed_launch?` · app-started · requested context ${model.managed_launch.context_size_requested}`:'');
+       (model.llama_cpp?` · llama.cpp${defaults.length?` · server defaults: ${defaults.join(', ')}`:''}`:'')+
+       (model.managed_launch?` · app-started · requested context ${model.managed_launch.context_size_requested}`:'')+
+       (capabilities.length?` · capabilities: ${capabilities.join(', ')}`:'');
       card.append(title,document.createElement('br'),meta);
       const choose=()=>{
         document.querySelectorAll('.model').forEach(item=>{item.classList.remove('selected');item.setAttribute('aria-pressed','false')});
         card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);
-        $('run').disabled=false;$('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';
+        $('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';updateRunAvailability();
         $('discovery-status').textContent=model.demo?'Demo results test the app only; they are not model measurements.':'Selected local model: '+model.name;
       };
       card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
@@ -567,6 +662,30 @@ function addModelSolveMeter(container,test,demo){
   const detail=document.createElement('p');detail.className='muted';detail.textContent=meter.detail;
   section.append(detail);container.append(section);
 }
+function addUserFeedback(container,test,resultId){
+  const key=`ai-benchmark-feedback:${resultId}:${test.id}`;
+  let saved={};
+  try{saved=JSON.parse(localStorage.getItem(key)||'{}')||{}}catch(_){}
+  const section=document.createElement('fieldset'),legend=document.createElement('legend');
+  section.className='feedback-controls';legend.textContent='Your private review (not part of the benchmark score)';
+  const ratingLabel=document.createElement('label'),rating=document.createElement('select');
+  ratingLabel.append(document.createTextNode('Answer helpfulness (1–5): '));
+  [['','Not rated'],['1','1 · Not helpful'],['2','2'],['3','3'],['4','4'],['5','5 · Very helpful']].forEach(([value,label])=>{
+    const option=document.createElement('option');option.value=value;option.textContent=label;rating.append(option);
+  });
+  rating.value=String(saved.rating||'');ratingLabel.append(rating);
+  const flagLabel=document.createElement('label'),flag=document.createElement('input');
+  flag.type='checkbox';flag.checked=Boolean(saved.flagged);
+  flagLabel.append(flag,document.createTextNode('Flag a questionable evaluation'));
+  const status=document.createElement('span');status.className='muted';status.setAttribute('role','status');
+  const save=()=>{
+    saved={rating:rating.value||null,flagged:flag.checked};
+    try{localStorage.setItem(key,JSON.stringify(saved));status.textContent='Saved in this browser only.'}
+    catch(_){status.textContent='Browser storage is unavailable; this review will not persist.'}
+  };
+  rating.addEventListener('change',save);flag.addEventListener('change',save);
+  section.append(legend,ratingLabel,flagLabel,status);container.append(section);
+}
 function renderTestResults(result){
   const tests=result.tests||[],difficulty=$('difficulty-filter').value,outcome=$('outcome-filter').value;
   const counts=result.summary?.by_difficulty||{};
@@ -612,6 +731,7 @@ function renderTestResults(result){
     addTestField(record,'Outcome explanation',evaluation.explanation||
       (test.status==='NOT RUN'?'The evaluator could not run this test.':
        test.status==='PASS'?'The evaluation criteria passed.':'The evaluation criteria did not pass.'));
+    addUserFeedback(record,test,result.id);
     if(test.error)addTestField(record,'Failure code',test.error);
     (test.attempts||[]).forEach(attempt=>{
       const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');
@@ -767,8 +887,12 @@ async function startRun(endpoint,payload){
 }
 $('run').onclick=()=>{
   if(!selected){displayError('Select a detected model before starting a benchmark.');return}
+  const categories=selectedCategories(),testCount=Number($('test-count').value);
+  if(!categories.length||!Number.isInteger(testCount)||testCount<1||testCount>252){
+    displayError('Select at least one category and enter a test count from 1 to 252.');return;
+  }
   const generation_options=Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,Number($(id).value)]));
-  startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
+  startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value),categories,test_count:testCount});
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
 function updateLlamaSource(){
@@ -827,6 +951,7 @@ $('stop-llama-server').onclick=async()=>{
 };
 updateLlamaSource();
 updateLlamaServerStatus();
+renderCategoryPicker();
 load();
 loadResults();
 poll().catch(error=>displayError(error.message));

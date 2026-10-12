@@ -105,6 +105,40 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertNotIn("tests", self.manager.payload)
         self.assertNotIn("completed_tests", self.manager.payload)
 
+    def test_benchmark_accepts_validated_category_scope_and_count(self):
+        status, _ = self.request("/api/benchmark", json.dumps({
+            "profile": "QUICK", "categories": ["Coding", "Knowledge"], "test_count": 7,
+            "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
+        }), {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(self.manager.payload["categories"], ["Coding", "Knowledge"])
+        self.assertEqual(self.manager.payload["test_count"], 7)
+
+        status, _ = self.request("/api/benchmark", json.dumps({
+            "profile": "QUICK", "categories": ["Unknown"], "test_count": 0,
+            "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
+        }), {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        })
+        self.assertEqual(status, 400)
+
+    def test_preview_returns_generated_prompt_for_supported_category(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        connection.request("GET", "/api/benchmark-preview?category=Coding",
+                           headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["previews"][0]["category"], "Coding")
+        self.assertIn("Return Python code only.", body["previews"][0]["prompt"])
+
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({
             "source": "path", "executable_path": "C:\\models\\llama-server.exe",

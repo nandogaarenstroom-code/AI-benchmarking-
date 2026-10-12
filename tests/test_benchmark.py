@@ -11,7 +11,7 @@ from backend.benchmark import (
     EVALUATOR_VERSION, TASK_SET_VERSION, BenchmarkManager, make_context_tests, make_tests,
 )
 from backend.discovery import (
-    AdapterError, _get, _llama_runtime_details, ask_model, discover_models,
+    AdapterError, _engine_probe, _get, _llama_runtime_details, ask_model, discover_models,
     model_info, normalize_generation_options, resolve_model,
 )
 from backend.evaluation import evaluate, evaluate_with_details
@@ -170,6 +170,24 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIsNone(_get("http://localhost/model", timeout=0.1))
         with patch("backend.discovery._open", return_value=Response(b"[]")):
             self.assertIsNone(_get("http://localhost/model", timeout=0.1))
+
+    def test_engine_probe_reports_detected_models_and_malformed_responses(self):
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self, size): return self.body
+
+        with patch("backend.discovery._open", return_value=Response(
+                b'{"data":[{"id":"local-model"},{}]}')):
+            status = _engine_probe("LM Studio", "http://localhost:1234/v1",
+                                   "http://localhost:1234/v1/models", "data")
+        self.assertEqual(status["status"], "detected")
+        self.assertEqual(status["models"], ["local-model"])
+        with patch("backend.discovery._open", return_value=Response(b"not-json")):
+            status = _engine_probe("LM Studio", "http://localhost:1234/v1",
+                                   "http://localhost:1234/v1/models", "data")
+        self.assertEqual(status["status"], "error")
 
     def test_openai_adapter_omits_llama_cpp_only_sampler_options(self):
         class Response:
@@ -379,6 +397,11 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
+        selected = make_tests("STANDARD", 7, categories=["Coding", "Knowledge"], count=5)
+        self.assertEqual(len(selected), 5)
+        self.assertEqual({item["category"] for item in selected}, {"Coding", "Knowledge"})
+        self.assertEqual(selected, make_tests(
+            "STANDARD", 7, categories=["Coding", "Knowledge"], count=5))
         quick = make_tests("QUICK", 7)
         self.assertEqual({item["difficulty"] for item in quick},
                          {"Easy", "Medium", "Hard", "Uncalibrated"})

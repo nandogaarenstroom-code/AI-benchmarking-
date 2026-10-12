@@ -79,7 +79,7 @@ def _get(url, timeout=0.7):
 
 def _engine_probe(name, endpoint, models_url, model_key):
     engine = {"name": name, "endpoint": endpoint, "status": "unavailable",
-              "models": [], "capabilities": ["chat completions", "streaming"]}
+              "models": [], "capabilities": ["local model-list API"]}
     try:
         with _open(models_url, timeout=0.7) as response:
             body = response.read(MAX_DISCOVERY_RESPONSE_BYTES + 1)
@@ -96,9 +96,9 @@ def _engine_probe(name, endpoint, models_url, model_key):
             isinstance(item.get("name") if model_key == "models" else item.get("id"), str)
         ]
         if name == "Ollama":
-            engine["capabilities"] = ["generate", "streaming"]
+            engine["capabilities"] = ["Ollama model-list API"]
         return engine
-    except (urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+    except (urllib.error.HTTPError, ValueError, json.JSONDecodeError):
         engine["status"] = "error"
         engine["error"] = "The local endpoint returned an invalid or unsuccessful response."
         return engine
