@@ -77,6 +77,45 @@ def _get(url, timeout=0.7):
         return None
 
 
+def _engine_probe(name, endpoint, models_url, model_key):
+    engine = {"name": name, "endpoint": endpoint, "status": "unavailable",
+              "models": [], "capabilities": ["chat completions", "streaming"]}
+    try:
+        with _open(models_url, timeout=0.7) as response:
+            body = response.read(MAX_DISCOVERY_RESPONSE_BYTES + 1)
+        if len(body) > MAX_DISCOVERY_RESPONSE_BYTES:
+            raise ValueError("response too large")
+        data = json.loads(body)
+        values = data.get(model_key) if isinstance(data, dict) else None
+        if not isinstance(values, list):
+            raise ValueError("unexpected model-list response")
+        engine["status"] = "detected"
+        engine["models"] = [
+            item.get("name") if model_key == "models" else item.get("id")
+            for item in values if isinstance(item, dict) and
+            isinstance(item.get("name") if model_key == "models" else item.get("id"), str)
+        ]
+        if name == "Ollama":
+            engine["capabilities"] = ["generate", "streaming"]
+        return engine
+    except (urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        engine["status"] = "error"
+        engine["error"] = "The local endpoint returned an invalid or unsuccessful response."
+        return engine
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return engine
+
+
+def discover_engine_status():
+    """Report compatibility status for the fixed local engine endpoints."""
+    return [
+        _engine_probe("Ollama", "http://localhost:11434", "http://localhost:11434/api/tags", "models"),
+        _engine_probe("LM Studio", "http://localhost:1234/v1", "http://localhost:1234/v1/models", "data"),
+        _engine_probe("OpenAI-compatible (127.0.0.1:8080)", "http://127.0.0.1:8080/v1",
+                      "http://127.0.0.1:8080/v1/models", "data"),
+    ]
+
+
 def _llama_runtime_details(endpoint):
     base_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
     props = _get(base_endpoint + "/props")

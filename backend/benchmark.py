@@ -727,13 +727,14 @@ def _test(category, i, rng, difficulty=None):
             "evaluation_method": "contains_all", "required_terms": ["ok"]}
 
 
-def make_tests(profile, seed):
+def make_tests(profile, seed, categories=None, count=None):
     rng = random.Random(seed)
-    count = COUNTS.get(profile.upper(), COUNTS["STANDARD"])
+    count = count if count is not None else COUNTS.get(profile.upper(), COUNTS["STANDARD"])
+    selected_categories = categories or CATEGORIES
     tests, seen = [], set()
     while len(tests) < count:
         index = len(tests)
-        category = CATEGORIES[index % len(CATEGORIES)]
+        category = selected_categories[index % len(selected_categories)]
         difficulty = DIFFICULTIES[index % len(DIFFICULTIES)]
         test = _test(category, index + rng.randint(0, 10000), rng, difficulty)
         if (test["category"], test["prompt"].lower()) in seen:
@@ -1046,6 +1047,17 @@ class BenchmarkManager:
         except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("invalid benchmark seed") from exc
         profile = profile_value.upper()
+        categories = payload.get("categories")
+        if categories is not None and (
+                not isinstance(categories, list) or not categories or
+                any(category not in CATEGORIES for category in categories) or
+                len(set(categories)) != len(categories)):
+            raise ValueError("invalid benchmark categories")
+        test_count = payload.get("test_count")
+        if test_count is not None and (
+                isinstance(test_count, bool) or not isinstance(test_count, int) or
+                not 1 <= test_count <= COUNTS["FULL"]):
+            raise ValueError("invalid benchmark test count")
         model = resolve_model(payload.get("model") or {
             "id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
             "endpoint": "local://demo", "demo": True})
@@ -1057,7 +1069,7 @@ class BenchmarkManager:
         except (TypeError, ValueError):
             repeat_runs = 1
         payload["repeat_runs"] = repeat_runs
-        tests = make_tests(profile, seed)
+        tests = make_tests(profile, seed, categories=categories, count=test_count)
         completed = list(payload.get("completed_tests", [])); done = {x["id"] for x in completed}
         failures = list(payload.get("failures", []))
         not_run = list(payload.get("not_run", []))
@@ -1268,6 +1280,7 @@ class BenchmarkManager:
                   "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
+                  "categories": categories or CATEGORIES, "test_count": len(tests),
                   "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
                   "top_p": generation_options["top_p"], "generation_options": generation_options,
                   "repeat_runs": repeat_runs,

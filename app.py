@@ -16,8 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from backend.benchmark import BenchmarkManager
-from backend.discovery import discover_models, resolve_model
+from backend.benchmark import CATEGORIES, COUNTS, BenchmarkManager, make_tests
+from backend.discovery import discover_engine_status, discover_models, resolve_model
 from backend.llama_server import LlamaServerConflict, LlamaServerError, llama_server_manager
 
 ROOT = Path(__file__).parent
@@ -121,7 +121,19 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self._static("index.html")
         if path == "/api/models":
-            return self._json({"models": discover_models()})
+            return self._json({"models": discover_models(), "engines": discover_engine_status()})
+        if path == "/api/benchmark-preview":
+            categories = parse_qs(urlparse(self.path).query).get("category", [])
+            if (not categories or len(categories) > len(CATEGORIES) or
+                    any(category not in CATEGORIES for category in categories) or
+                    len(set(categories)) != len(categories)):
+                return self._json({"error": "invalid preview categories"}, 400)
+            previews = []
+            for category in categories:
+                test = make_tests("QUICK", 12345, categories=[category], count=1)[0]
+                previews.append({"category": category, "prompt": test["prompt"][:3000],
+                                 "truncated": len(test["prompt"]) > 3000})
+            return self._json({"previews": previews})
         if path == "/api/llama-server/status":
             return self._json(llama_server_manager.status())
         if path == "/api/status":
@@ -190,11 +202,24 @@ class Handler(BaseHTTPRequestHandler):
                     "QUICK", "STANDARD", "FULL", "PERFORMANCE", "QUALITY", "REASONING",
                     "CODING", "LONG CONTEXT"):
                 return self._json({"error": "invalid benchmark profile"}, 400)
+            categories = payload.get("categories")
+            if categories is not None and (
+                    not isinstance(categories, list) or not categories or
+                    any(not isinstance(category, str) or category not in CATEGORIES
+                        for category in categories) or
+                    len(set(categories)) != len(categories)):
+                return self._json({"error": "invalid benchmark categories"}, 400)
+            test_count = payload.get("test_count")
+            if test_count is not None and (
+                    isinstance(test_count, bool) or not isinstance(test_count, int) or
+                    not 1 <= test_count <= COUNTS["FULL"]):
+                return self._json({"error": "invalid benchmark test count"}, 400)
             clean_payload = {
                 "model": model, "profile": profile.upper(),
                 "seed": payload.get("seed", 12345),
                 "generation_options": payload.get("generation_options", {}),
                 "repeat_runs": payload.get("repeat_runs", 1),
+                "categories": categories, "test_count": test_count,
             }
             try:
                 clean_payload["seed"] = int(clean_payload["seed"])
