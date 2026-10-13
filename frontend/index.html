@@ -496,7 +496,7 @@ function show(result,resultDirectory){
     ?'Demo data validates the application flow and must not be interpreted as model performance.'
     :'These are controlled local benchmark measurements, not universal performance guarantees.'+
       (notRun.length?` ${notRun.length} test(s) could not be evaluated and were excluded from quality scoring; server/adapter failures are not scored as model errors. `+
-        Object.entries(result.summary?.operational_errors||{}).map(([code,count])=>`${code}: ${count}`).join(' · ')+
+        Object.entries(result.summary?.not_run_by_code||{}).map(([code,count])=>`${code}: ${count}`).join(' · ')+
         ' See individual attempts for safe diagnostics.':'');
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],

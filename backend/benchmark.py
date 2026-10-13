@@ -1341,7 +1341,7 @@ class BenchmarkManager:
             "passed": sum(item["status"] == "PASS" for item in completed),
             "failed": sum(item["status"] == "FAILED" for item in completed),
             "not_run": sum(item["status"] == "NOT RUN" for item in completed),
-            "operational_errors": {
+            "not_run_by_code": {
                 code: sum(item["status"] == "NOT RUN" and item.get("error") == code
                           for item in completed)
                 for code in sorted({item.get("error") for item in completed

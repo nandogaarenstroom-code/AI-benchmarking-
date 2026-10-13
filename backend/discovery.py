@@ -105,6 +105,16 @@ def _sse_data_events(response):
         elif line.startswith(":"):
             continue
         elif line.startswith("data:"):
+            if data_lines:
+                previous = finish_event()
+                try:
+                    json.loads(previous)
+                    previous_is_complete = True
+                except json.JSONDecodeError:
+                    previous_is_complete = previous.strip() == "[DONE]"
+                if previous_is_complete:
+                    yield previous
+                    data_lines.clear()
             value = line[5:]
             data_lines.append(value[1:] if value.startswith(" ") else value)
     event = finish_event()
@@ -329,6 +339,8 @@ def ask_model(model, prompt, history=None, options=None):
                 item = json.loads(event)
                 if not isinstance(item, dict):
                     raise ValueError("invalid OpenAI-compatible response")
+                if item.get("error"):
+                    raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
                 choices = item.get("choices", [])
                 if not isinstance(choices, list):
                     raise ValueError("invalid OpenAI-compatible choices")

@@ -305,7 +305,7 @@ class BenchmarkTests(unittest.TestCase):
 
             comparison = manager.compare(["first", "second"])
 
-        self.assertIsNone(comparison["best_overall"])
+        self.assertEqual(comparison["best_overall"], "first")
         self.assertTrue(any("task set" in warning for warning in comparison["comparison_warnings"]))
         self.assertTrue(any("unavailable score" in warning
                             for warning in comparison["comparison_warnings"]))
@@ -326,7 +326,9 @@ class BenchmarkTests(unittest.TestCase):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *_): return False
-            def __iter__(self): return iter([b'data: [DONE]\n'])
+            def __iter__(self):
+                return iter([b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+                             b'data: [DONE]\n'])
 
         captured = {}
         def fake_urlopen(request, timeout):
@@ -688,6 +690,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(data["summary"]["passed"], 25)
             self.assertEqual(data["summary"]["failed"], 0)
             self.assertEqual(data["summary"]["not_run"], 0)
+            self.assertEqual(data["summary"]["not_run_by_code"], {})
             self.assertTrue(data["demo"])
             self.assertEqual(data["configuration"]["generation_options"]["temperature"], 0.6)
             self.assertEqual(data["task_set_version"], TASK_SET_VERSION)
@@ -715,6 +718,11 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIn("prompt", csv_header)
             self.assertIn("subcategory", csv_header)
             self.assertIn("item_fingerprint", csv_header)
+            self.assertIn("failure_code", csv_header)
+            pdf_text = (Path(directory) / f"{data['id']}.pdf").read_bytes()
+            self.assertIn(b"Not-run reasons: none recorded", pdf_text)
+            chart = (Path(directory) / f"{data['id']}_quality.svg").read_text()
+            self.assertIn("<svg", chart)
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:

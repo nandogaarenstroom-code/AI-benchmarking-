@@ -105,6 +105,9 @@ not be evaluated are marked not measured rather than counted as failures.
 Checks that could not run (for example, unavailable Docker or a model-server timeout) are
 distinguished from incorrect answers and excluded from quality scoring. If there are no valid
 measurements, the affected score is shown as unavailable rather than as zero.
+Completed empty responses, malformed/incomplete streams, HTTP errors, timeouts, and dropped
+connections are treated as adapter failures, not incorrect model answers. Their error codes and
+safe diagnostics appear in the saved attempt records and result summary.
 The interface reports observable answers and evaluator evidence; it does not ask models to disclose
 hidden chain-of-thought.
 
@@ -151,7 +154,11 @@ use generated identifiers rather than model names.
 Real adapters use streaming requests where supported. The result records an estimated TTFT from
 the first streamed content chunk, generation time after that chunk, estimated prompt tokens, and
 output tokens. Servers that do not provide compatible streaming responses are recorded as adapter
-failures rather than silently presenting a fabricated streaming metric.
+failures rather than silently presenting a fabricated streaming metric. The adapters tolerate
+fragmented UTF-8/SSE events, check completion markers, and reject empty output; a local loopback test
+does not establish compatibility with every live server or server version. Verify the specific
+server/version before relying on its measurements. Result comparisons warn when task/evaluator
+versions, profiles, generation settings, repeat counts, demo status, or available scores differ.
 
 ## What models are tested on?
 
