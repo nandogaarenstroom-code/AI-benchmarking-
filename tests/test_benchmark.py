@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import tempfile
 import unittest
@@ -19,6 +20,41 @@ from backend.reporting import write_chart, write_pdf
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_checkpoint_replace_retries_transient_access_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager.state_file.write_text('{"previous": true}')
+            real_replace = os.replace
+            attempts = 0
+
+            def replace_with_transient_denial(source, destination):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError(13, "Access is denied", str(destination))
+                return real_replace(source, destination)
+
+            with patch("backend.benchmark.os.replace", side_effect=replace_with_transient_denial), \
+                    patch("backend.benchmark.time.sleep"):
+                manager._atomic_state_write({"saved": True})
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(json.loads(manager.state_file.read_text()), {"saved": True})
+            self.assertEqual(list(Path(directory).glob("benchmark-*.tmp")), [])
+
+    def test_checkpoint_replace_preserves_previous_state_after_access_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager.state_file.write_text('{"previous": true}')
+            with patch("backend.benchmark.os.replace",
+                       side_effect=PermissionError(13, "Access is denied")), \
+                    patch("backend.benchmark.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    manager._atomic_state_write({"saved": True})
+
+            self.assertEqual(json.loads(manager.state_file.read_text()), {"previous": True})
+            self.assertEqual(list(Path(directory).glob("benchmark-*.tmp")), [])
+
     def test_llama_runtime_details_only_include_reported_values(self):
         with patch("backend.discovery._get", return_value={
                 "version": "b1234", "default_generation_settings": {
