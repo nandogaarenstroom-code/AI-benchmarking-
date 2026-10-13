@@ -197,7 +197,7 @@ no score, and is excluded from quality averages. Categories without completed ap
 recorded as `null`/not tested rather than zero.
 
 Task and evaluator revisions increment their respective recorded version identifiers. This task-set
-revision is `pilot-3` and the evaluator revision is `pilot-2`. Scores from different versions should not be treated as directly comparable without
+revision is `pilot-4` and the evaluator revision is `pilot-2`. Scores from different versions should not be treated as directly comparable without
 reviewing the changes. Calibration reports also separate task-family subcategories so mixed task
 families do not conceal different difficulty patterns.
 
@@ -235,20 +235,28 @@ The context suite is separate from the primary quality score. It targets:
 - 128K
 - 256K when explicitly supported
 
-Each context test:
+Each context test searches a seeded corpus of **32 separate synthetic text files**. Three files are
+targeted, with one near the beginning, middle, and end of the ordered corpus. Each target asks for
+four exact facts: filename, assigned analyst, current status, and reference code. The corpus also
+contains superseded notes and unrelated records to distinguish current facts from distractors.
+Unrelated audit text is added to reach each target prompt length. All three positions are queried at
+every size, with different target records at each size to prevent accumulated tests from copying
+their previous answers.
 
-1. Creates a seeded marker.
-2. Adds deterministic distractor text.
-3. Places the marker at the beginning, middle, or end.
-4. Rotates marker positions among beginning, middle, and end across target sizes. Prompt tokens are
-   estimated from text length, not measured with the tested model's tokenizer.
-5. Asks the model to retrieve the marker.
-6. Records latency, estimated prompt tokens, answer, and pass/fail status.
+The evaluator parses JSON and checks the exact requested keys and all 12 expected field values.
+Results include one fresh and one accumulated probe at each supported size, estimated input tokens,
+the answer, and pass/fail status. Prompt sizing uses UTF-8 text length divided by four rather than
+the tested model's tokenizer. Exact accuracy is all-or-nothing per context size; field-level
+partial credit is also retained. These synthetic documents are included in the prompt: this does
+not test filesystem access, external search, or tool calling. There is one sample per size, not a
+repeated accuracy estimate.
 
 Two variants are recorded:
 
 - **Fresh:** every context test is an independent request.
-- **Accumulated:** prior user and assistant messages are included in the next request.
+- **Accumulated:** prior user and assistant messages are included in the next request for both
+  Ollama and OpenAI-compatible adapters. A test is marked **NOT RUN** rather than submitted when
+  estimated total history would exceed the advertised context limit.
 
 The result reports fresh score, accumulated score, and degradation between them. Context sizes
 larger than the model's reported limit are skipped and listed in `context_skipped`. If the limit

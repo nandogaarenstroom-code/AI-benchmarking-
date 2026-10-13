@@ -213,10 +213,17 @@ def ask_model(model, prompt, history=None, options=None):
     messages = list(history or []) + [{"role": "user", "content": prompt}]
     try:
         if model.get("backend") == "Ollama":
+            context_prompt = prompt
+            if history:
+                transcript = "\n\n".join(
+                    f"{message.get('role', 'user')}: {message.get('content', '')}"
+                    for message in history if isinstance(message, dict)
+                )
+                context_prompt = transcript + "\n\n" + prompt
             request = urllib.request.Request(
                 model["endpoint"] + "/api/generate",
                 data=json.dumps({
-                    "model": model["id"], "prompt": prompt, "stream": True,
+                    "model": model["id"], "prompt": context_prompt, "stream": True,
                     "options": {
                         "temperature": options["temperature"], "top_p": options["top_p"],
                         "top_k": options["top_k"], "min_p": options["min_p"],
@@ -243,7 +250,7 @@ def ask_model(model, prompt, history=None, options=None):
                     if item.get("done"):
                         break
                 answer = "".join(chunks).strip()[:50_000]
-                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+                return {"text": answer, "prompt_tokens": _estimate_tokens(context_prompt),
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
                         "generation_s": time.perf_counter() - (first_token_at or started)}
@@ -275,7 +282,11 @@ def ask_model(model, prompt, history=None, options=None):
                         first_token_at = time.perf_counter()
                     chunks.append(text)
             answer = "".join(chunks).strip()[:50_000]
-            return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+            context_text = "\n".join(
+                str(message.get("content", ""))
+                for message in messages if isinstance(message, dict)
+            )
+            return {"text": answer, "prompt_tokens": _estimate_tokens(context_text),
                     "output_tokens": _estimate_tokens(answer),
                     "ttft_s": (first_token_at or time.perf_counter()) - started,
                     "generation_s": time.perf_counter() - (first_token_at or started)}

@@ -13,7 +13,7 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
   while retaining exact values in an accessible table
 - Discovery for Ollama, LM Studio, and OpenAI-compatible endpoints, plus a clearly marked demo model
 - Seeded benchmark generation, automatic scoring, retries, cancellation, and resumable progress
-- Fresh and accumulated context experiments with advertised-limit handling
+- Fresh and accumulated context experiments that search 32-file text corpora at increasing context sizes
 - Warm-ups, latency/throughput measurements, and concurrency samples
 - JSON, CSV, PDF, and SVG result exports and result comparison
 - A small automated regression suite for core evaluators, deterministic generation, demo execution,
@@ -243,17 +243,29 @@ will always behave this way in a real application. Context accumulation is measu
 fresh-context quality rather than being mixed into the primary quality score.
 
 Each run also records a separate context-scaling result with fresh and accumulated variants at
-4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. Marker positions rotate
-between beginning, middle, and end. Prompt sizes are estimated from text length rather than measured
-with each model's tokenizer, and each size/position is sampled only once. The accumulated variant deliberately reuses the
-conversation history so context degradation can be observed; it is not mixed into the primary
-fresh-context quality score.
+4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. It searches the
+same 32-file corpus at every size, querying different records near the beginning, middle, and end
+to prevent simply copying an earlier answer. Prompt sizes are estimated from text length rather
+than measured with each model's tokenizer, and each size is sampled only once. The accumulated
+variant deliberately reuses the conversation history so context degradation can be observed; it
+is not mixed into the primary fresh-context quality score.
+
+Each context probe searches 32 synthetic text files and returns 12 requested facts from target
+records placed near the beginning, middle, and end of the file list. The same seeded corpus is used
+at each size, with a different set of target records and unrelated audit text added to reach the
+target prompt length. This is a
+controlled multi-file retrieval task, not filesystem or tool-use testing. Saved results report
+exact retrieval accuracy separately at each context size; one probe is run per size, so these
+values are not repeated-sample estimates. Prompt length is estimated from UTF-8 text length, not
+the model's tokenizer.
 
 The suite never blindly exceeds the model's advertised context limit. If metadata reports a
-smaller limit, larger sizes are skipped and recorded in `context_skipped`. If the limit is
-unknown, the conservative 128K ceiling is used; 256K is only attempted when explicitly
-advertised. This makes large-context results transparent rather than turning an overflow into a
-misleading quality failure.
+smaller limit, larger fresh prompts are skipped and recorded in `context_skipped`. Accumulated
+tests include prior prompts and answers for both Ollama and OpenAI-compatible adapters; tests
+whose estimated full history exceeds the advertised limit are marked not run and listed in
+`accumulated_context_skipped`. If the limit is unknown, the conservative 128K ceiling is used;
+256K is only attempted when explicitly advertised. This makes large-context results transparent
+rather than turning an overflow into a misleading quality failure.
 
 Performance runs perform three warm-ups, discard their outputs, then collect latency samples,
 streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.

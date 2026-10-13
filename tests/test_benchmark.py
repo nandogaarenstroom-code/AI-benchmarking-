@@ -91,13 +91,19 @@ class BenchmarkTests(unittest.TestCase):
 
         options = {"temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
+        history = [{"role": "user", "content": "Earlier question"},
+                   {"role": "assistant", "content": "Earlier answer"}]
         with patch("backend.discovery._open", side_effect=fake_urlopen):
-            ask_model({"backend": "Ollama", "endpoint": "http://localhost:11434", "id": "model"},
-                      "prompt", options=options)
+            result = ask_model(
+                {"backend": "Ollama", "endpoint": "http://localhost:11434", "id": "model"},
+                "Current question", history=history, options=options)
         self.assertEqual(captured["options"], {
             "temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
             "repeat_penalty": 1.2, "num_predict": 64, "seed": 23,
         })
+        self.assertEqual(captured["prompt"],
+                         "user: Earlier question\n\nassistant: Earlier answer\n\nCurrent question")
+        self.assertGreater(result["prompt_tokens"], len("Current question") // 4)
 
     def test_generation_options_reach_openai_compatible_adapter(self):
         class Response:
@@ -114,9 +120,13 @@ class BenchmarkTests(unittest.TestCase):
 
         options = {"temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
                    "repeat_penalty": 1.2, "max_tokens": 64, "seed": 23}
+        history = [{"role": "user", "content": "Earlier question"},
+                   {"role": "assistant", "content": "Earlier answer"}]
         with patch("backend.discovery._open", side_effect=fake_urlopen):
-            ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
-                       "id": "model", "llama_cpp": True}, "prompt", options=options)
+            result = ask_model(
+                {"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                 "id": "model", "llama_cpp": True}, "Current question",
+                history=history, options=options)
         self.assertEqual(captured["temperature"], 0.4)
         self.assertEqual(captured["top_p"], 0.9)
         self.assertEqual(captured["top_k"], 20)
@@ -125,6 +135,9 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(captured["max_tokens"], 64)
         self.assertEqual(captured["seed"], 23)
         self.assertTrue(captured["stream"])
+        self.assertEqual(captured["messages"], history + [
+            {"role": "user", "content": "Current question"}])
+        self.assertGreater(result["prompt_tokens"], len("Current question") // 4)
 
     def test_openai_streaming_metrics_use_first_content_chunk(self):
         class Response:
@@ -416,11 +429,24 @@ class BenchmarkTests(unittest.TestCase):
                          [4096, 8192, 16384, 32768])
         context_tests = make_context_tests(7, 32768)
         self.assertEqual([item["context_position"] for item in context_tests],
-                         ["beginning", "middle", "end", "beginning"])
+                         ["beginning, middle, end"] * 4)
+        self.assertTrue(all(item["file_count"] == 32 for item in context_tests))
+        self.assertTrue(all(item["prompt"].count("FILE: ") == 32 for item in context_tests))
+        self.assertTrue(all(item["evaluation_method"] == "fact_fields" and
+                            len(item["expected_fields"]) == 12 for item in context_tests))
+        self.assertTrue(all(len(item["prompt"]) == item["context_size"] * 4
+                            for item in context_tests))
+        self.assertEqual(len({item["expected_fields"]["beginning_reference_code"][0]
+                              for item in context_tests}), len(context_tests))
         self.assertTrue(all(item["context_size"] * 0.99 <= item["estimated_prompt_tokens"]
                             <= item["context_size"] for item in context_tests))
-        self.assertTrue(all(item["id"].endswith(item["context_position"])
-                            for item in context_tests))
+        for item in context_tests:
+            correct = {field: acceptable[0]
+                       for field, acceptable in item["expected_fields"].items()}
+            self.assertTrue(evaluate(item, json.dumps(correct)))
+            wrong = dict(correct)
+            wrong["middle_reference_code"] = "REF-incorrect"
+            self.assertFalse(evaluate(item, json.dumps(wrong)))
         knowledge = [item for seed in range(40) for item in make_tests("FULL", seed)
                      if item["category"] == "Knowledge"]
         self.assertGreaterEqual(len({item["subcategory"] for item in knowledge}), 4)
@@ -546,6 +572,12 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["context_reset"] for item in data["tests"]))
             self.assertIn("fresh", data["context_scaling"])
             self.assertIn("accumulated", data["context_scaling"])
+            retrieval = data["multi_file_retrieval"]
+            self.assertEqual(retrieval["files_per_prompt"], 32)
+            self.assertEqual(retrieval["targets_per_prompt"], 3)
+            self.assertTrue(retrieval["by_context_size"])
+            self.assertTrue(all(item["fresh"]["exact_accuracy_percent"] == 100
+                                for item in retrieval["by_context_size"]))
             self.assertEqual(data["performance"]["measured_runs"], 5)
             self.assertTrue(data["performance"]["token_count_is_estimated"])
             self.assertIn("output tokens", data["performance"]["throughput_basis"])
@@ -560,10 +592,63 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["evaluation"]["criteria"] for item in data["tests"]))
             self.assertTrue(all(item["evaluation"]["explanation"] for item in data["tests"]))
             self.assertTrue(all(item["difficulty_rationale"] for item in data["tests"]))
+            compared = manager.compare([data["id"]])["results"][0]
+            self.assertEqual(compared["retrieval_by_context_size"]["4096"]["fresh"], 100.0)
+            self.assertEqual(compared["retrieval_by_context_size"]["4096"]["accumulated"], 100.0)
             csv_header = (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0]
             self.assertIn("prompt", csv_header)
             self.assertIn("subcategory", csv_header)
             self.assertIn("item_fingerprint", csv_header)
+
+    def test_context_limit_skip_is_not_scored_as_an_incorrect_answer(self):
+        test = make_context_tests(19, 4096)[0]
+        skipped = BenchmarkManager._context_limit_result(test, 4097)
+        summary = BenchmarkManager._multi_file_retrieval_summary(
+            [dict(test, passed=True, score=10, status="PASS")], [skipped])
+        self.assertEqual(skipped["status"], "NOT RUN")
+        self.assertEqual(skipped["error"], "CONTEXT_LIMIT_SKIPPED")
+        self.assertEqual(summary["by_context_size"][0]["fresh"]["exact_accuracy_percent"], 100.0)
+        self.assertIsNone(summary["by_context_size"][0]["accumulated"]["exact_accuracy_percent"])
+        self.assertEqual(summary["by_context_size"][0]["accumulated"]["estimated_input_tokens"], 4097)
+
+    def test_accumulated_multifile_probes_skip_when_history_exceeds_model_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            model = {"id": "stub", "name": "Stub", "backend": "OpenAI-compatible",
+                     "endpoint": "http://localhost:8080/v1", "context_length": 8192}
+            executed = []
+
+            def execute(_model, test, history=None, generation_options=None):
+                executed.append((test["context_size"], history is not None))
+                answer = {field: values[0]
+                          for field, values in test["expected_fields"].items()}
+                return {
+                    **test, "answer": json.dumps(answer), "passed": True, "score": 10,
+                    "status": "PASS", "latency_s": 0.1, "ttft_s": 0.1,
+                    "generation_s": 0.1, "prompt_tokens": test["estimated_prompt_tokens"],
+                    "estimated_context_tokens": test["estimated_prompt_tokens"],
+                    "output_tokens": 20, "timing_is_estimated": True,
+                    "token_count_is_estimated": True, "context_reset": history is None,
+                    "evaluation": {"passed": True, "status": "PASS", "criteria": "exact facts",
+                                   "explanation": "All fields matched."},
+                    "attempts": [],
+                }
+
+            with patch("backend.benchmark.resolve_model", return_value=model), \
+                    patch("backend.benchmark.make_tests", return_value=[]), \
+                    patch.object(manager, "_answer", return_value="warm"), \
+                    patch.object(manager, "_execute", side_effect=execute), \
+                    patch.object(manager, "_performance", return_value={"score": 50}), \
+                    patch("backend.benchmark.hardware_info", return_value={}):
+                manager._run({"profile": "QUICK", "model": model})
+
+            result_path = next(Path(directory).glob("benchmark_*.json"))
+            result = json.loads(result_path.read_text())
+            self.assertEqual(executed, [(4096, False), (8192, False), (4096, True)])
+            self.assertEqual(result["configuration"]["accumulated_context_skipped"], [8192])
+            self.assertIsNone(
+                result["multi_file_retrieval"]["by_context_size"][1]["accumulated"][
+                    "exact_accuracy_percent"])
 
     def test_repeated_demo_run_records_quality_variability(self):
         with tempfile.TemporaryDirectory() as directory:

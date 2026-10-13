@@ -304,7 +304,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   </div>
   <div id="test-records"></div>
   <h3>Context experiment results</h3>
-  <p class="muted">Fresh and accumulated context probes are separate from the primary quality score. Prompts are loaded only when a record is opened because long-context prompts can be very large.</p>
+  <p class="muted">Fresh and accumulated probes search 32 synthetic text files and retrieve 12 exact facts from files near the beginning, middle, and end. Accuracy is separate from primary quality; prompt sizes are estimates, and one probe per size is not a repeated-sample guarantee. Prompts load only when a record is opened because they can be very large.</p>
   <div id="context-records"></div>
 </section>
 <script>
@@ -638,19 +638,51 @@ function renderTestResults(result){
 function renderContextResults(result){
   const container=$('context-records');container.replaceChildren();
   const filter=$('outcome-filter').value,scaling=result.context_scaling||{};
+  const retrieval=result.multi_file_retrieval;
+  if(retrieval?.by_context_size?.length){
+    const caption=document.createElement('p');
+    caption.className='muted';
+    caption.textContent=`Exact 32-file retrieval accuracy by target prompt size. A pass requires all ${retrieval.targets_per_prompt*retrieval.fields_per_target} requested fields; each size has one prompt.`;
+    container.append(caption);
+    const table=document.createElement('table'),head=document.createElement('thead'),body=document.createElement('tbody');
+    const header=document.createElement('tr');
+    ['Target prompt tokens','Files','Fresh exact accuracy','Fresh estimated input','Accumulated exact accuracy','Accumulated estimated input']
+      .forEach(label=>{const cell=document.createElement('th');cell.textContent=label;header.append(cell)});
+    head.append(header);table.append(head);
+    retrieval.by_context_size.forEach(row=>{
+      const line=document.createElement('tr');
+      const values=[
+        Number(row.context_size).toLocaleString(),
+        String(retrieval.files_per_prompt),
+        row.fresh.exact_accuracy_percent===null?'NOT RUN':`${row.fresh.exact_accuracy_percent}%`,
+        row.fresh.estimated_input_tokens==null?'Unknown':Number(row.fresh.estimated_input_tokens).toLocaleString(),
+        row.accumulated.exact_accuracy_percent===null?'NOT RUN':`${row.accumulated.exact_accuracy_percent}%`,
+        row.accumulated.estimated_input_tokens==null?'Unknown':Number(row.accumulated.estimated_input_tokens).toLocaleString()
+      ];
+      values.forEach(value=>{const cell=document.createElement('td');cell.textContent=value;line.append(cell)});
+      body.append(line);
+    });
+    table.append(body);container.append(table);
+  }
   const records=[
     ...(scaling.fresh||[]).map(test=>({...test,context_variant:'Fresh context'})),
     ...(scaling.accumulated||[]).map(test=>({...test,context_variant:'Accumulated context'})),
   ].filter(test=>filter==='all'||test.status===filter);
-  if(!records.length){container.textContent='No context tests match this outcome filter.';return}
+  if(!records.length){
+    const empty=document.createElement('p');empty.textContent='No context tests match this outcome filter.';
+    container.append(empty);return
+  }
   records.forEach(test=>{
     const detail=document.createElement('details'),heading=document.createElement('summary');
-    heading.textContent=`${test.context_variant} · ${test.context_size?.toLocaleString()||'Unknown'} target tokens · ${test.context_position||'position unknown'} · ${test.status||'unknown'}`;
+    const inputTokens=test.estimated_context_tokens??test.prompt_tokens;
+    const inputLabel=inputTokens==null?'Unknown estimated input':`${Number(inputTokens).toLocaleString()} estimated input tokens`;
+    const fileLabel=test.file_count?`${test.file_count} files · `:'';
+    heading.textContent=`${test.context_variant} · ${inputLabel} · ${test.context_size?.toLocaleString()||'Unknown'} target prompt tokens · ${fileLabel}${test.context_position||'position unknown'} · ${test.status||'unknown'}`;
     detail.className='test-record';detail.append(heading);
-    addTestField(detail,'Marker expected',test.expected_answer);
+    addTestField(detail,'Expected information',JSON.stringify(test.expected_fields||test.expected_answer));
     addTestField(detail,'Model answer',test.answer,true);
     addTestField(detail,'Outcome explanation',test.evaluation?.explanation||
-      (test.status==='PASS'?'The required marker was found.':'The required marker was not found.'));
+      (test.status==='PASS'?'All requested fields were correct.':'One or more requested fields were incorrect.'));
     (test.attempts||[]).forEach(attempt=>{
       const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');
       attemptHeading.textContent=`Attempt ${attempt.attempt}: ${attempt.status}`;
@@ -711,14 +743,25 @@ $('compare-results').onclick=async()=>{
     const response=await fetch('/api/compare?'+query.toString());
     if(!response.ok)throw new Error('Could not compare the selected results.');
     const data=await response.json(),table=document.createElement('table');
+    const contextSizes=[...new Set(data.results.flatMap(item=>Object.keys(item.retrieval_by_context_size||{})))]
+      .map(Number).filter(Number.isFinite).sort((a,b)=>a-b);
     const header=document.createElement('tr');
-    ['Model','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
+    ['Model','Quality','Performance','Overall',
+      ...contextSizes.map(size=>`Multi-file ${size>=1024?`${size/1024}K`:size} (fresh/accumulated)`),
+      'Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
     table.append(header);
     const comparable=data.results.filter(item=>Number.isFinite(item.overall));
     const best=comparable.length?comparable.reduce((current,item)=>item.overall>current.overall?item:current).id:null;
     data.results.forEach(item=>{
       const row=document.createElement('tr');
-      [item.model,item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
+      const retrieval=item.retrieval_by_context_size||{};
+      const contextScores=contextSizes.map(size=>{
+        const scores=retrieval[String(size)];
+        const format=value=>value===null||value===undefined?'N/T':`${value}%`;
+        return scores?`${format(scores.fresh)} / ${format(scores.accumulated)}`:'N/T';
+      });
+      [item.model,item.quality,item.performance,item.overall,...contextScores,item.id===best?'Yes':'']
+        .forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
       table.append(row);
     });
     $('comparison').replaceChildren(table);

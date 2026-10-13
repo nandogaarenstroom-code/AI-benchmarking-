@@ -30,8 +30,10 @@ CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
 COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
-TASK_SET_VERSION = "pilot-3"
+TASK_SET_VERSION = "pilot-4"
 EVALUATOR_VERSION = "pilot-2"
+MULTI_FILE_COUNT = 32
+CONTEXT_SIZES = (4096, 8192, 16384, 32768, 65536, 131072, 262144)
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
     "Medium": "A routine task with a larger input or an additional constraint.",
@@ -760,26 +762,114 @@ def make_tests(profile, seed):
 
 def make_context_tests(seed, max_context=131072):
     rng = random.Random(seed)
+    locations = rng.sample(range(1000, 9999), MULTI_FILE_COUNT)
+    analyst_ids = rng.sample(range(1000, 9999), MULTI_FILE_COUNT)
+    reference_ids = rng.sample(range(10000, 99999), MULTI_FILE_COUNT)
+    statuses = ("monitoring", "escalated", "restored", "closed")
+    files = []
+    for index in range(MULTI_FILE_COUNT):
+        status = rng.choice(statuses)
+        previous_status = rng.choice([item for item in statuses if item != status])
+        files.append({
+            "filename": f"case-{index + 1:02d}.txt",
+            "location": f"SITE-{locations[index]}",
+            "analyst": f"Analyst-{analyst_ids[index]}",
+            "status": status,
+            "reference_code": f"REF-{reference_ids[index]}",
+            "previous_status": previous_status,
+            "previous_reference": f"OLD-{rng.randint(10000, 99999)}",
+            "service": rng.choice(("scanner", "checkout", "upload", "notification")),
+            "previous_date": f"2024-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
+            "current_date": f"2025-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}",
+        })
+
+    sampled_targets = rng.sample(files, 3 * len(CONTEXT_SIZES))
+    target_sets = [
+        sampled_targets[index * 3:index * 3 + 3]
+        for index in range(len(CONTEXT_SIZES))
+    ]
+    filler_unit = "Routine audit note: no change was approved for this service.\n"
     tests = []
-    marker_positions = ("beginning", "middle", "end")
-    filler_unit = " neutral distractor information."
-    for index, size in enumerate((4096, 8192, 16384, 32768, 65536, 131072, 262144)):
+    for size_index, size in enumerate(CONTEXT_SIZES):
         if size > max_context:
             continue
-        marker = f"CTX-{rng.randint(1000, 9999)}"
-        position = marker_positions[index % len(marker_positions)]
-        fixed_text = f"{marker}\n\nReturn the marker."
-        filler_count = max(0, (size * 4 - len(fixed_text)) // len(filler_unit))
-        filler = filler_unit * filler_count
-        prompt = f"{marker}\n{filler}\nReturn the marker." if position == "beginning" else (
-            f"{filler[:len(filler)//2]}{marker}{filler[len(filler)//2:]}\nReturn the marker."
-            if position == "middle" else f"{filler}\n{marker}\nReturn the marker.")
-        tests.append({"id": f"context-{size}-{position}", "category": "Context Scaling",
-                      "context_size": size, "context_position": position, "prompt": prompt,
-                      "estimated_prompt_tokens": max(1, len(prompt) // 4),
-                      "expected_answer": marker, "evaluation_method": "contains_all",
-                      "required_terms": [marker], "max_score": 10})
+        target_files = target_sets[size_index]
+        remaining_files = [item for item in files if item not in target_files]
+        ordered_files = ([target_files[0]] + remaining_files[:15] +
+                         [target_files[1]] + remaining_files[15:] + [target_files[2]])
+        targets = dict(zip(("beginning", "middle", "end"), target_files))
+        expected_fields = {}
+        questions = []
+        for position, item in targets.items():
+            expected_fields.update({
+                f"{position}_file": [item["filename"]],
+                f"{position}_analyst": [item["analyst"]],
+                f"{position}_status": [item["status"]],
+                f"{position}_reference_code": [item["reference_code"]],
+            })
+            questions.append(
+                f"For the file near the {position} of the file list at {item['location']}, return "
+                f"the filename, currently assigned analyst, current status, and current reference code.")
+        instructions = (
+            f"Search all {MULTI_FILE_COUNT} separate text files below. Treat superseded notes and "
+            "unrelated records as distractors. Find the current verified record for each requested "
+            "location. Return only one valid JSON object with exactly these keys: " +
+            ", ".join(expected_fields) + "."
+        )
+        blocks = [
+            (f"FILE: {item['filename']}\n"
+             f"Service location: {item['location']}. Service: {item['service']}.\n"
+             f"Superseded note from {item['previous_date']}: the status was "
+             f"{item['previous_status']} and the reference was {item['previous_reference']}.\n"
+             f"Current verified entry from {item['current_date']}: assigned analyst "
+             f"{item['analyst']}; current status {item['status']}; reference code "
+             f"{item['reference_code']}.")
+            for item in ordered_files
+        ]
+        question = "Questions:\n- " + "\n- ".join(questions)
+        base_prompt = instructions + "\n\n" + "\n\n".join(blocks) + "\n\n" + question
+        target_chars = size * 4
+        padding_chars = target_chars - len(base_prompt)
+        if padding_chars < 0:
+            raise ValueError("multi-file retrieval prompt exceeds its target context size")
+        filler_count, filler_remainder = divmod(padding_chars, len(filler_unit))
+        padded_blocks = []
+        for index, block in enumerate(blocks):
+            block_fillers = filler_count // MULTI_FILE_COUNT
+            if index < filler_count % MULTI_FILE_COUNT:
+                block_fillers += 1
+            padding = filler_unit * block_fillers
+            if index == MULTI_FILE_COUNT - 1:
+                padding += filler_unit[:filler_remainder]
+            padded_blocks.append(block + padding)
+        prompt = instructions + "\n\n" + "\n\n".join(padded_blocks) + "\n\n" + question
+        tests.append({
+            "id": f"multifile-context-{size}",
+            "category": "Multi-file Retrieval",
+            "context_size": size,
+            "context_position": "beginning, middle, end",
+            "target_positions": ["beginning", "middle", "end"],
+            "file_count": MULTI_FILE_COUNT,
+            "prompt": prompt,
+            "estimated_prompt_tokens": len(prompt.encode("utf-8")) // 4,
+            "expected_answer": "JSON object with the requested current file, analyst, status, and reference facts.",
+            "evaluation_method": "fact_fields",
+            "expected_fields": expected_fields,
+            "task_set_version": TASK_SET_VERSION,
+            "evaluator_version": EVALUATOR_VERSION,
+            "max_score": 10,
+        })
     return tests
+
+
+def _estimate_context_tokens(prompt, history=None):
+    contents = [
+        str(message.get("content", ""))
+        for message in (history or [])
+        if isinstance(message, dict)
+    ]
+    contents.append(str(prompt))
+    return max(1, len("\n".join(contents).encode("utf-8")) // 4)
 
 
 class BenchmarkManager:
@@ -839,10 +929,19 @@ class BenchmarkManager:
         for result_id in result_ids:
             result = self.load_result(result_id)
             if result:
+                retrieval = result.get("multi_file_retrieval", {})
+                retrieval_by_size = {
+                    str(item["context_size"]): {
+                        "fresh": item.get("fresh", {}).get("exact_accuracy_percent"),
+                        "accumulated": item.get("accumulated", {}).get("exact_accuracy_percent"),
+                    }
+                    for item in retrieval.get("by_context_size", [])
+                }
                 rows.append({"id": result["id"], "model": result["model"]["name"],
                              "quality": result["scores"]["quality"],
                              "performance": result["scores"]["performance"],
-                             "overall": result["scores"]["overall"]})
+                             "overall": result["scores"]["overall"],
+                             "retrieval_by_context_size": retrieval_by_size})
         comparable = [row for row in rows if row["overall"] is not None]
         return {"results": rows,
                 "best_overall": max(comparable, key=lambda x: x["overall"])["id"]
@@ -940,13 +1039,18 @@ class BenchmarkManager:
 
     def _execute(self, model, test, history=None, generation_options=None):
         criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
+        estimated_context_tokens = (
+            test.get("estimated_prompt_tokens", _estimate_context_tokens(test["prompt"]))
+            if model.get("demo") else _estimate_context_tokens(test["prompt"], history)
+        )
         if test.get("evaluation_method") == "code" and not code_evaluator_available():
             evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
                           "explanation": "Docker is unavailable; generated code was not executed."}
             return {**test, "answer": "", "evaluation": evaluation, "passed": None,
                     "score": None, "latency_s": 0, "ttft_s": 0, "generation_s": 0,
                     "timing_is_estimated": True, "token_count_is_estimated": True,
-                    "prompt_tokens": max(1, len(test["prompt"]) // 4), "output_tokens": 0,
+                    "prompt_tokens": estimated_context_tokens,
+                    "estimated_context_tokens": estimated_context_tokens, "output_tokens": 0,
                     "error": "EVALUATOR_UNAVAILABLE", "context_reset": history is None,
                     "attempts": [{"attempt": 0, "status": "NOT RUN",
                                   "error": "EVALUATOR_UNAVAILABLE",
@@ -991,7 +1095,8 @@ class BenchmarkManager:
                             response_metrics and "ttft_s" in response_metrics and
                             "generation_s" in response_metrics),
                         "token_count_is_estimated": True,
-                        "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
+                        "prompt_tokens": response_metrics.get("prompt_tokens", estimated_context_tokens),
+                        "estimated_context_tokens": estimated_context_tokens,
                         "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))),
                         "error": None,
                         "context_reset": history is None, "attempts": attempts,
@@ -1004,7 +1109,8 @@ class BenchmarkManager:
                             "passed": None, "score": None, "latency_s": 0, "ttft_s": 0,
                             "generation_s": 0, "timing_is_estimated": True,
                             "token_count_is_estimated": True,
-                            "prompt_tokens": max(1, len(test["prompt"]) // 4),
+                            "prompt_tokens": estimated_context_tokens,
+                            "estimated_context_tokens": estimated_context_tokens,
                             "output_tokens": 0, "error": error, "context_reset": history is None,
                             "attempts": attempts, "status": "NOT RUN"}
                 return {**test, "answer": last_answer, "evaluation": last_evaluation,
@@ -1017,12 +1123,31 @@ class BenchmarkManager:
                             "generation_s" in last_metrics),
                         "token_count_is_estimated": True,
                         "prompt_tokens": last_metrics.get(
-                            "prompt_tokens", test.get("estimated_prompt_tokens",
-                                                      max(1, len(test["prompt"]) // 4))),
+                            "prompt_tokens", estimated_context_tokens),
+                        "estimated_context_tokens": estimated_context_tokens,
                         "output_tokens": last_metrics.get(
                             "output_tokens", max(1, len(last_answer.split()))),
                         "error": "EVALUATION_FAILED", "context_reset": history is None,
                         "attempts": attempts, "status": "FAILED"}
+
+    @staticmethod
+    def _context_limit_result(test, estimated_context_tokens):
+        criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
+        evaluation = {
+            "passed": None, "status": "NOT RUN", "criteria": criteria,
+            "explanation": ("Skipped because estimated accumulated input would exceed the "
+                            "model's advertised context limit."),
+        }
+        return {
+            **test, "answer": "", "evaluation": evaluation, "passed": None, "score": None,
+            "latency_s": 0, "ttft_s": 0, "generation_s": 0, "timing_is_estimated": True,
+            "token_count_is_estimated": True, "prompt_tokens": estimated_context_tokens,
+            "estimated_context_tokens": estimated_context_tokens, "output_tokens": 0,
+            "error": "CONTEXT_LIMIT_SKIPPED", "context_reset": False,
+            "attempts": [{"attempt": 0, "status": "NOT RUN", "error": "CONTEXT_LIMIT_SKIPPED",
+                          "evaluation": evaluation}],
+            "status": "NOT RUN",
+        }
 
     @staticmethod
     def _failure_code(exc):
@@ -1181,7 +1306,7 @@ class BenchmarkManager:
         context_tests = make_context_tests(seed, max_context=max_context)
         context_sizes = [test["context_size"] for test in context_tests]
         self._update_status(phase="Testing fresh context windows",
-                            activity="Sending independent prompts at increasing context sizes.",
+                            activity="Searching 32-file corpora at increasing prompt sizes.",
                             total=len(context_tests), progress=len(context_results))
         context_done = {item["id"] for item in context_results}
         for index, test in enumerate(context_tests):
@@ -1202,6 +1327,8 @@ class BenchmarkManager:
             return
         history = []
         for test, item in zip(context_tests, accumulated_results):
+            if item.get("error") == "CONTEXT_LIMIT_SKIPPED":
+                continue
             history.extend([
                 {"role": "user", "content": test["prompt"] if not model.get("demo")
                  else f"[context test {test['context_size']} tokens]"},
@@ -1218,13 +1345,24 @@ class BenchmarkManager:
                 return
             if test["id"] in accumulated_done:
                 continue
+            estimated_context_tokens = (
+                test["estimated_prompt_tokens"] if model.get("demo") else
+                _estimate_context_tokens(test["prompt"], history)
+            )
             self._update_status(current_test=test["id"],
-                                activity=f"Accumulating history through {test['context_size']:,} tokens.")
-            item = self._execute(model, test, history=history, generation_options=generation_options)
+                                activity=(f"Accumulating history to about "
+                                          f"{estimated_context_tokens:,} estimated tokens."))
+            if not model.get("demo") and estimated_context_tokens > max_context:
+                item = self._context_limit_result(test, estimated_context_tokens)
+            else:
+                item = self._execute(
+                    model, test, history=history, generation_options=generation_options)
+                item["estimated_context_tokens"] = estimated_context_tokens
             accumulated_results.append(item)
-            history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
-                            else f"[context test {test['context_size']} tokens]"},
-                            {"role": "assistant", "content": item["answer"]}])
+            if item.get("error") != "CONTEXT_LIMIT_SKIPPED":
+                history.extend([{"role": "user", "content": test["prompt"] if not model.get("demo")
+                                else f"[context test {test['context_size']} tokens]"},
+                                {"role": "assistant", "content": item["answer"]}])
             self._update_status(progress=len(accumulated_results))
             save_checkpoint("accumulated_context")
         if self.cancel_requested.is_set():
@@ -1262,7 +1400,7 @@ class BenchmarkManager:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
             return
-        result = {"benchmark_version": "2.1.0", "task_set_version": TASK_SET_VERSION,
+        result = {"benchmark_version": "2.2.0", "task_set_version": TASK_SET_VERSION,
                   "evaluator_version": EVALUATOR_VERSION,
                   "difficulty_calibration_status": "not empirically calibrated",
                   "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1275,10 +1413,15 @@ class BenchmarkManager:
                   "context_reset_per_test": True, "context_suite": context_sizes,
                   "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
                   "difficulty_calibration_status": "not empirically calibrated",
-                  "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
+                  "context_skipped": [size for size in CONTEXT_SIZES
                                       if size not in context_sizes],
+                  "accumulated_context_skipped": [
+                      item["context_size"] for item in accumulated_results
+                      if item.get("error") == "CONTEXT_LIMIT_SKIPPED"],
                   "local_only": True}, "performance": perf, "quality": quality,
                   "context_scaling": {"fresh": context_results, "accumulated": accumulated_results},
+                  "multi_file_retrieval": self._multi_file_retrieval_summary(
+                      context_results, accumulated_results),
                   "tests": completed, "failures": failures, "not_run": not_run,
                   "warmup_errors": warmup_errors,
                   "scores": {"quality": quality["overall"], "fresh_context_quality": quality["overall"],
@@ -1350,6 +1493,45 @@ class BenchmarkManager:
         return {"fresh": fresh_score, "accumulated": accumulated_score,
                 "degradation": round(fresh_score - accumulated_score, 2)
                 if fresh_score is not None and accumulated_score is not None else None}
+
+    @staticmethod
+    def _multi_file_retrieval_summary(fresh, accumulated):
+        def by_size(items):
+            return {item["context_size"]: item for item in items}
+
+        def measure(item):
+            if not item or item.get("status") == "NOT RUN":
+                return {
+                    "exact_accuracy_percent": None,
+                    "field_score_percent": None,
+                    "status": item.get("status", "NOT RUN") if item else "NOT RUN",
+                    "estimated_input_tokens": item.get("estimated_context_tokens",
+                                                       item.get("prompt_tokens")) if item else None,
+                }
+            score = item.get("score")
+            return {
+                "exact_accuracy_percent": 100.0 if item.get("passed") is True else 0.0,
+                "field_score_percent": round(score * 10, 2) if score is not None else None,
+                "status": item.get("status", "unknown"),
+                "estimated_input_tokens": item.get("estimated_context_tokens",
+                                                   item.get("prompt_tokens")),
+            }
+
+        fresh_by_size, accumulated_by_size = by_size(fresh), by_size(accumulated)
+        sizes = sorted(set(fresh_by_size) | set(accumulated_by_size))
+        return {
+            "files_per_prompt": MULTI_FILE_COUNT,
+            "targets_per_prompt": 3,
+            "fields_per_target": 4,
+            "accuracy_basis": ("One test per context size; exact accuracy is 100 only when all "
+                               "12 requested fields are correct. Results are not repeated samples."),
+            "by_context_size": [
+                {"context_size": size,
+                 "fresh": measure(fresh_by_size.get(size)),
+                 "accumulated": measure(accumulated_by_size.get(size))}
+                for size in sizes
+            ],
+        }
 
     def _atomic_state_write(self, state):
         fd, name = tempfile.mkstemp(prefix="benchmark-", suffix=".tmp", dir=self.root)
