@@ -842,9 +842,28 @@ class BenchmarkManager:
                 rows.append({"id": result["id"], "model": result["model"]["name"],
                              "quality": result["scores"]["quality"],
                              "performance": result["scores"]["performance"],
-                             "overall": result["scores"]["overall"]})
+                             "overall": result["scores"]["overall"],
+                             "demo": bool(result.get("demo")),
+                             "task_set_version": result.get("task_set_version"),
+                             "evaluator_version": result.get("evaluator_version"),
+                             "profile": (result.get("configuration") or {}).get("profile"),
+                             "generation_options": (result.get("configuration") or {}).get(
+                                 "generation_options"),
+                             "repeat_runs": (result.get("configuration") or {}).get("repeat_runs", 1)})
         comparable = [row for row in rows if row["overall"] is not None]
+        warnings = []
+        for field, label in (
+                ("task_set_version", "task set"), ("evaluator_version", "evaluator"),
+                ("profile", "profile"), ("generation_options", "generation settings"),
+                ("repeat_runs", "repeat count"), ("demo", "demo/real run type")):
+            values = {json.dumps(row.get(field), sort_keys=True) for row in rows}
+            if len(values) > 1:
+                warnings.append(f"Selected results differ in {label}; scores may not be directly comparable.")
+        if any(row["quality"] is None or row["performance"] is None or row["overall"] is None
+               for row in rows):
+            warnings.append("One or more selected results have unavailable score measurements.")
         return {"results": rows,
+                "comparison_warnings": warnings,
                 "best_overall": max(comparable, key=lambda x: x["overall"])["id"]
                 if comparable else None}
 
@@ -957,6 +976,7 @@ class BenchmarkManager:
         last_evaluation = None
         last_metrics = {}
         last_latency = 0
+        last_diagnostic = None
         for attempt in range(1, 4):
             started = time.perf_counter()
             try:
@@ -964,9 +984,11 @@ class BenchmarkManager:
                 error = None
             except Exception as exc:
                 answer, error = "", getattr(exc, "code", self._failure_code(exc))
+                diagnostic = getattr(
+                    exc, "diagnostic", "The model request failed before a response could be evaluated.")
                 response_metrics = {}
                 evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
-                              "explanation": f"No answer was evaluated because the model request failed ({error})."}
+                              "explanation": f"No answer was evaluated because the model request failed: {diagnostic}"}
                 attempt_status = "ERROR"
             else:
                 response_metrics = answer if isinstance(answer, dict) else {}
@@ -974,12 +996,16 @@ class BenchmarkManager:
                 evaluation = evaluate_with_details(test, answer)
                 attempt_status = evaluation["status"]
                 last_answer, last_evaluation, last_metrics = answer, evaluation, response_metrics
+                diagnostic = None
             latency = time.perf_counter() - started
             if error is None:
                 last_latency = latency
+            else:
+                last_diagnostic = diagnostic
             attempt_answer = str(answer)[:4000]
             attempts.append({"attempt": attempt, "status": attempt_status,
                              "error": error, "answer": attempt_answer,
+                             "diagnostic": diagnostic,
                              "answer_truncated": len(str(answer)) > 4000,
                              "evaluation": evaluation})
             if evaluation["passed"] is True:
@@ -1006,6 +1032,7 @@ class BenchmarkManager:
                             "token_count_is_estimated": True,
                             "prompt_tokens": max(1, len(test["prompt"]) // 4),
                             "output_tokens": 0, "error": error, "context_reset": history is None,
+                            "diagnostic": last_diagnostic,
                             "attempts": attempts, "status": "NOT RUN"}
                 return {**test, "answer": last_answer, "evaluation": last_evaluation,
                         "passed": False, "score": last_evaluation.get("score", 0),
@@ -1022,6 +1049,7 @@ class BenchmarkManager:
                         "output_tokens": last_metrics.get(
                             "output_tokens", max(1, len(last_answer.split()))),
                         "error": "EVALUATION_FAILED", "context_reset": history is None,
+                        "diagnostic": None,
                         "attempts": attempts, "status": "FAILED"}
 
     @staticmethod
@@ -1094,7 +1122,10 @@ class BenchmarkManager:
                                  generation_options=generation_options)
                 except Exception as exc:
                     warmup_errors.append({"attempt": warmup + 1,
-                                          "error": getattr(exc, "code", self._failure_code(exc))})
+                                          "error": getattr(exc, "code", self._failure_code(exc)),
+                                          "diagnostic": getattr(
+                                              exc, "diagnostic",
+                                              "The warm-up request failed before completion.")})
                     activity = f"Warm-up request {warmup + 1} failed; continuing to tested prompts."
                 else:
                     activity = f"Warm-up request {warmup + 1} of 3 complete."
@@ -1310,6 +1341,12 @@ class BenchmarkManager:
             "passed": sum(item["status"] == "PASS" for item in completed),
             "failed": sum(item["status"] == "FAILED" for item in completed),
             "not_run": sum(item["status"] == "NOT RUN" for item in completed),
+            "operational_errors": {
+                code: sum(item["status"] == "NOT RUN" and item.get("error") == code
+                          for item in completed)
+                for code in sorted({item.get("error") for item in completed
+                                    if item["status"] == "NOT RUN" and item.get("error")})
+            },
             "by_difficulty": {
                 level: {
                     "passed": sum(item["difficulty"] == level and item["status"] == "PASS"
@@ -1467,7 +1504,8 @@ class BenchmarkManager:
                       "item_fingerprint", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
                       "evaluation_checks",
-                      "score", "status", "attempt_count", "attempts", "repeats", "latency_s"]
+                      "score", "status", "failure_code", "failure_diagnostic",
+                      "attempt_count", "attempts", "repeats", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
             writer.writerows({
                 "id": self._csv_cell(row.get("id")),
@@ -1490,6 +1528,8 @@ class BenchmarkManager:
                 "evaluation_checks": self._csv_cell(json.dumps(
                     (row.get("evaluation") or {}).get("checks", []), ensure_ascii=False)),
                 "score": row.get("score"), "status": row.get("status"),
+                "failure_code": row.get("error"),
+                "failure_diagnostic": self._csv_cell(row.get("diagnostic")),
                 "attempt_count": len(row.get("attempts", [])),
                 "attempts": self._csv_cell(json.dumps(row.get("attempts", []), ensure_ascii=False)),
                 "repeats": self._csv_cell(json.dumps(row.get("replicates", []), ensure_ascii=False)),

@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import json
+import http.client
 import urllib.request
 import urllib.error
 import time
 import codecs
 import math
+import socket
 from datetime import datetime, timezone
 
 from .llama_server import llama_server_manager
@@ -59,10 +61,55 @@ class AdapterError(RuntimeError):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+        self.diagnostic = message
 
 
 def _estimate_tokens(text):
     return max(1, len(text.encode("utf-8")) // 4) if text else 0
+
+
+def _response_lines(response):
+    """Decode bounded response chunks into complete UTF-8 lines."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    response_size = 0
+    for raw in response:
+        response_size += len(raw)
+        if response_size > MAX_MODEL_RESPONSE_BYTES:
+            raise AdapterError(
+                "RESPONSE_TOO_LARGE", "The local model response exceeded the configured size limit.")
+        buffer += decoder.decode(raw)
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            yield line.rstrip("\r")
+    buffer += decoder.decode(b"", final=True)
+    if buffer:
+        yield buffer.rstrip("\r")
+
+
+def _sse_data_events(response):
+    """Yield data payloads from SSE, including events split across read chunks."""
+    data_lines = []
+
+    def finish_event():
+        if not data_lines:
+            return None
+        return "\n".join(data_lines)
+
+    for line in _response_lines(response):
+        if not line:
+            event = finish_event()
+            data_lines.clear()
+            if event is not None:
+                yield event
+        elif line.startswith(":"):
+            continue
+        elif line.startswith("data:"):
+            value = line[5:]
+            data_lines.append(value[1:] if value.startswith(" ") else value)
+    event = finish_event()
+    if event is not None:
+        yield event
 
 
 def _get(url, timeout=0.7):
@@ -228,21 +275,33 @@ def ask_model(model, prompt, history=None, options=None):
             started = time.perf_counter()
             with _open(request, timeout=60) as response:
                 chunks, first_token_at = [], None
-                response_size = 0
-                for line in response:
-                    response_size += len(line)
-                    if response_size > MAX_MODEL_RESPONSE_BYTES:
-                        raise ValueError("model response too large")
+                completed = False
+                for line in _response_lines(response):
                     if not line.strip():
                         continue
                     item = json.loads(line)
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid Ollama response")
+                    if item.get("error"):
+                        raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
                     text = item.get("response", "")
+                    if not isinstance(text, str):
+                        raise ValueError("invalid Ollama response content")
                     if text and first_token_at is None:
                         first_token_at = time.perf_counter()
                     chunks.append(text)
                     if item.get("done"):
+                        completed = True
                         break
                 answer = "".join(chunks).strip()[:50_000]
+                if not completed:
+                    raise AdapterError(
+                        "INCOMPLETE_STREAM",
+                        "Ollama ended the response before its completion marker.")
+                if not answer:
+                    raise AdapterError(
+                        "EMPTY_RESPONSE",
+                        "The model server completed the request without generated text.")
                 return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
@@ -260,28 +319,74 @@ def ask_model(model, prompt, history=None, options=None):
             headers={"Content-Type": "application/json"})
         started = time.perf_counter()
         with _open(request, timeout=60) as response:
-            decoder, chunks, first_token_at = codecs.getincrementaldecoder("utf-8")(), [], None
-            response_size = 0
-            for raw in response:
-                response_size += len(raw)
-                if response_size > MAX_MODEL_RESPONSE_BYTES:
-                    raise ValueError("model response too large")
-                for line in decoder.decode(raw).splitlines():
-                    if not line.startswith("data:") or line.strip() == "data: [DONE]":
-                        continue
-                    item = json.loads(line[5:].strip())
-                    text = item.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
-                    if text and first_token_at is None:
-                        first_token_at = time.perf_counter()
-                    chunks.append(text)
+            chunks, first_token_at = [], None
+            completed = False
+            finish_reason = None
+            for event in _sse_data_events(response):
+                if event.strip() == "[DONE]":
+                    completed = True
+                    break
+                item = json.loads(event)
+                if not isinstance(item, dict):
+                    raise ValueError("invalid OpenAI-compatible response")
+                choices = item.get("choices", [])
+                if not isinstance(choices, list):
+                    raise ValueError("invalid OpenAI-compatible choices")
+                if not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    raise ValueError("invalid OpenAI-compatible choice")
+                content_source = choice.get("delta", choice.get("message", {}))
+                if isinstance(content_source, str):
+                    text = content_source
+                elif isinstance(content_source, dict):
+                    text = content_source.get("content", choice.get("text", ""))
+                else:
+                    raise ValueError("invalid OpenAI-compatible content")
+                if isinstance(text, list):
+                    text = "".join(part.get("text", "") for part in text
+                                   if isinstance(part, dict) and isinstance(part.get("text"), str))
+                if text is None:
+                    text = ""
+                if not isinstance(text, str):
+                    raise ValueError("invalid OpenAI-compatible content")
+                if text and first_token_at is None:
+                    first_token_at = time.perf_counter()
+                chunks.append(text)
+                if choice.get("finish_reason") is not None:
+                    finish_reason = str(choice["finish_reason"])
+                    completed = True
             answer = "".join(chunks).strip()[:50_000]
+            if not completed:
+                raise AdapterError(
+                    "INCOMPLETE_STREAM",
+                    "The response stream ended without a completion marker.")
+            if not answer:
+                raise AdapterError(
+                    "EMPTY_RESPONSE",
+                    "The model server completed the request without generated text.")
             return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
                     "output_tokens": _estimate_tokens(answer),
                     "ttft_s": (first_token_at or time.perf_counter()) - started,
-                    "generation_s": time.perf_counter() - (first_token_at or started)}
-    except TimeoutError as exc:
-        raise AdapterError("TIMEOUT", str(exc)) from exc
+                    "generation_s": time.perf_counter() - (first_token_at or started),
+                    "finish_reason": finish_reason}
+    except AdapterError:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise AdapterError("HTTP_ERROR", f"Local model server returned HTTP {exc.code}.") from exc
     except urllib.error.URLError as exc:
-        raise AdapterError("CONNECTION_ERROR", str(exc)) from exc
-    except (ValueError, KeyError, json.JSONDecodeError) as exc:
-        raise AdapterError("SERVER_ERROR", str(exc)) from exc
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise AdapterError(
+                "TIMEOUT", "The local model server timed out before completing the response.") from exc
+        raise AdapterError(
+            "CONNECTION_ERROR", "Could not connect to the local model server.") from exc
+    except TimeoutError as exc:
+        raise AdapterError(
+            "TIMEOUT", "The local model server timed out before completing the response.") from exc
+    except (ConnectionError, OSError, http.client.HTTPException) as exc:
+        raise AdapterError(
+            "CONNECTION_ERROR", "The connection to the local model server failed during streaming.") from exc
+    except (ValueError, KeyError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AdapterError(
+            "SERVER_ERROR", "The local model server returned a malformed response stream.") from exc

@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.error
 import threading
 import tempfile
 import unittest
@@ -194,6 +195,120 @@ class BenchmarkTests(unittest.TestCase):
             with self.assertRaises(AdapterError) as caught:
                 ask_model(model, "prompt")
         self.assertEqual(caught.exception.code, "SERVER_ERROR")
+
+    def test_openai_stream_handles_fragmented_events_and_finish_reason(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self):
+                payload = (
+                    'data: {"choices":[{"delta":{"content":"café"}}]}\n\n'
+                    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                ).encode()
+                return iter([payload[:43], payload[43:46], payload[46:]])
+
+        with patch("backend.discovery._open", return_value=Response()):
+            result = ask_model({"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                                "id": "model"}, "prompt")
+        self.assertEqual(result["text"], "café")
+        self.assertEqual(result["finish_reason"], "stop")
+
+    def test_empty_and_incomplete_streams_are_not_successful_answers(self):
+        model = {"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                 "id": "model"}
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self): return iter(self.body)
+
+        for body, expected_code in (
+                ([b"data: [DONE]\n\n"], "EMPTY_RESPONSE"),
+                ([b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'],
+                 "INCOMPLETE_STREAM")):
+            with self.subTest(expected_code=expected_code), \
+                    patch("backend.discovery._open", return_value=Response(body)):
+                with self.assertRaises(AdapterError) as caught:
+                    ask_model(model, "prompt")
+                self.assertEqual(caught.exception.code, expected_code)
+
+        with patch("backend.discovery._open", return_value=Response([
+                b'{"response":"","done":true}\n'])):
+            with self.assertRaises(AdapterError) as caught:
+                ask_model({"backend": "Ollama", "endpoint": "http://localhost:11434",
+                           "id": "model"}, "prompt")
+        self.assertEqual(caught.exception.code, "EMPTY_RESPONSE")
+
+    def test_adapter_classifies_stream_disconnect_and_http_status(self):
+        model = {"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                 "id": "model"}
+
+        class DisconnectedResponse:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"part"}}]}\n\n'
+                raise ConnectionResetError("socket reset")
+
+        with patch("backend.discovery._open", return_value=DisconnectedResponse()):
+            with self.assertRaises(AdapterError) as caught:
+                ask_model(model, "prompt")
+        self.assertEqual(caught.exception.code, "CONNECTION_ERROR")
+        self.assertNotIn("socket reset", caught.exception.diagnostic)
+
+        with patch("backend.discovery._open", side_effect=urllib.error.HTTPError(
+                "http://localhost:8080/v1/chat/completions", 503, "unavailable", {}, None)):
+            with self.assertRaises(AdapterError) as caught:
+                ask_model(model, "prompt")
+        self.assertEqual(caught.exception.code, "HTTP_ERROR")
+        self.assertIn("503", caught.exception.diagnostic)
+
+    def test_adapter_errors_are_unscored_not_model_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            model = {"backend": "OpenAI-compatible", "endpoint": "http://localhost:8080/v1",
+                     "id": "model"}
+            test = {"id": "sample", "prompt": "Return ok", "evaluation_method": "exact_any",
+                    "acceptable_answers": ["ok"], "expected_answer": "ok"}
+            with patch("backend.discovery.ask_model", side_effect=AdapterError(
+                    "EMPTY_RESPONSE", "The model server completed the request without generated text.")):
+                result = manager._execute(model, test)
+
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["error"], "EMPTY_RESPONSE")
+        self.assertEqual(len(result["attempts"]), 3)
+        self.assertEqual(result["attempts"][0]["status"], "ERROR")
+        self.assertIn("without generated text", result["diagnostic"])
+
+    def test_result_comparison_warns_about_incompatible_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            base = {
+                "id": "first", "model": {"name": "model-a"},
+                "scores": {"quality": 70, "performance": 50, "overall": 64},
+                "task_set_version": "pilot-1", "evaluator_version": "pilot-1",
+                "demo": False,
+                "configuration": {"profile": "QUICK", "repeat_runs": 1,
+                                  "generation_options": {"temperature": 0}},
+            }
+            other = {
+                **base, "id": "second", "model": {"name": "model-b"},
+                "scores": {"quality": None, "performance": 42, "overall": None},
+                "task_set_version": "pilot-2",
+                "configuration": {"profile": "STANDARD", "repeat_runs": 2,
+                                  "generation_options": {"temperature": 0.5}},
+            }
+            for result in (base, other):
+                (Path(directory) / f"{result['id']}.json").write_text(json.dumps(result))
+
+            comparison = manager.compare(["first", "second"])
+
+        self.assertIsNone(comparison["best_overall"])
+        self.assertTrue(any("task set" in warning for warning in comparison["comparison_warnings"]))
+        self.assertTrue(any("unavailable score" in warning
+                            for warning in comparison["comparison_warnings"]))
 
     def test_discovery_rejects_oversized_and_non_object_responses(self):
         class Response:
