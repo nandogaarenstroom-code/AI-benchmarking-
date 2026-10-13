@@ -2,6 +2,7 @@ import http.client
 import json
 import threading
 import unittest
+from unittest.mock import Mock
 from unittest.mock import patch
 
 import app
@@ -44,6 +45,22 @@ class ApiSecurityTests(unittest.TestCase):
         result = response.status, response.read()
         connection.close()
         return result
+
+    def test_json_response_ignores_client_disconnect_during_write(self):
+        for failure_point in ("end_headers", "write"):
+            for error in (BrokenPipeError(), ConnectionAbortedError(), ConnectionResetError()):
+                with self.subTest(failure_point=failure_point, error=type(error).__name__):
+                    handler = object.__new__(app.Handler)
+                    handler.send_response = Mock()
+                    handler.send_header = Mock()
+                    handler.end_headers = Mock()
+                    handler.wfile = Mock()
+                    if failure_point == "end_headers":
+                        handler.end_headers.side_effect = error
+                    else:
+                        handler.wfile.write.side_effect = error
+
+                    handler._json({"models": []})
 
     def test_cross_origin_and_missing_token_posts_are_rejected(self):
         body = json.dumps({"profile": "QUICK"})

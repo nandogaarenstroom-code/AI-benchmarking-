@@ -1358,7 +1358,14 @@ class BenchmarkManager:
                 json.dump(state, stream)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(name, self.state_file)
+            for attempt in range(5):
+                try:
+                    os.replace(name, self.state_file)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.1 * (2 ** attempt))
         finally:
             if os.path.exists(name):
                 os.unlink(name)
