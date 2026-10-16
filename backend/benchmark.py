@@ -34,7 +34,7 @@ COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
 TASK_SET_VERSION = "pilot-3"
-EVALUATOR_VERSION = "pilot-2"
+EVALUATOR_VERSION = "pilot-3"
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
     "Medium": "A routine task with a larger input or an additional constraint.",
@@ -820,7 +820,10 @@ class BenchmarkManager:
             if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
                 continue
             try:
-                data = json.loads(path.read_text())
+                raw = self._read_result_file(path.name)
+                if raw is None:
+                    continue
+                data = json.loads(raw)
             except (OSError, json.JSONDecodeError):
                 continue
             model = data.get("model") if isinstance(data, dict) else {}
@@ -831,16 +834,74 @@ class BenchmarkManager:
         return results
 
     def load_result(self, result_id):
-        root = self.root.resolve()
+        if (not isinstance(result_id, str) or
+                re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id) is None or
+                result_id == "current"):
+            return None
         for path in self.root.glob("*.json"):
-            if (path.name != "current.json" and path.stem == result_id and
-                    not path.is_symlink() and path.resolve().parent == root):
+            if path.name == f"{result_id}.json" and not path.is_symlink():
                 try:
-                    data = json.loads(path.read_text())
+                    raw = self._read_result_file(path.name)
+                    if raw is None:
+                        return None
+                    data = json.loads(raw)
                 except (OSError, json.JSONDecodeError):
                     return None
                 return data if isinstance(data, dict) else None
         return None
+
+    def _read_result_file(self, filename):
+        if (not isinstance(filename, str) or
+                re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.json", filename) is None or
+                filename == "current.json"):
+            return None
+        root = self.root.resolve()
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            finally:
+                os.close(directory_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    return stream.read().decode("utf-8")
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        path = self.root / filename
+        if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+            return None
+        return path.read_text()
+
+    def read_artifact(self, filename):
+        if (not isinstance(filename, str) or
+                re.fullmatch(
+                    r"benchmark_[0-9]{8}_[0-9]{6}_[a-f0-9]{32}"
+                    r"(?:\.json|\.csv|\.pdf|_quality\.svg)", filename) is None):
+            return None
+        root = self.root.resolve()
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            finally:
+                os.close(directory_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    return stream.read()
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        path = self.root / filename
+        if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+            return None
+        return path.read_bytes()
 
     def compare(self, result_ids):
         rows = []
@@ -1097,11 +1158,14 @@ class BenchmarkManager:
             if test["evaluation_method"] == "rubric":
                 count = test.get("exact_words", test.get("minimum_words", 4))
                 words = list(test.get("required_terms", []))[:count]
+                target_topic_words = max(0, count - 1) if test.get("minimum_topic_terms") else count
                 for term in test.get("topic_terms", []):
-                    if len(words) >= count:
+                    if len(words) >= target_topic_words:
                         break
                     if term not in words:
                         words.append(term)
+                if test.get("minimum_topic_terms") and len(words) < count:
+                    words.append("builds")
                 words.extend(["careful", "reliable", "local", "testing"][:count - len(words)])
                 return " ".join(words)
             if test["evaluation_method"] == "contains_all":
@@ -1301,41 +1365,57 @@ class BenchmarkManager:
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
                 repetitions.append(self._execute(model, test, generation_options=run_options))
             if repeat_runs > 1:
-                if any(entry["status"] == "NOT RUN" for entry in repetitions):
-                    item = {**repetitions[0], "replicates": [
-                        {"seed": (generation_options["seed"] + index) % 2147483648,
-                         "score": entry["score"], "passed": entry["passed"],
-                         "status": entry["status"], "answer": entry["answer"],
-                         "evaluation": entry["evaluation"], "error": entry.get("error"),
-                         "diagnostic": entry.get("diagnostic"), "attempts": entry["attempts"]}
-                        for index, entry in enumerate(repetitions)]}
-                else:
-                    item = {
-                    **repetitions[0],
-                    "score": round(statistics.mean(entry["score"] for entry in repetitions), 2),
-                    "passed": all(entry["passed"] for entry in repetitions),
-                    "status": "PASS" if all(entry["passed"] for entry in repetitions) else "FAILED",
-                    "latency_s": round(statistics.mean(entry["latency_s"] for entry in repetitions), 4),
-                    "ttft_s": round(statistics.mean(entry["ttft_s"] for entry in repetitions), 4),
-                    "generation_s": round(statistics.mean(entry["generation_s"] for entry in repetitions), 4),
-                    "prompt_tokens": round(statistics.mean(entry["prompt_tokens"] for entry in repetitions)),
-                    "output_tokens": round(statistics.mean(entry["output_tokens"] for entry in repetitions)),
-                    "replicates": [
-                        {"seed": (generation_options["seed"] + index) % 2147483648,
-                         "score": entry["score"], "passed": entry["passed"],
-                         "status": entry["status"], "latency_s": entry["latency_s"],
-                         "answer": entry["answer"], "evaluation": entry["evaluation"],
-                         "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
-                         "attempts": entry["attempts"]}
-                        for index, entry in enumerate(repetitions)
-                    ],
-                    }
+                measured_repeats = [
+                    entry for entry in repetitions
+                    if entry["status"] != "NOT RUN" and entry.get("score") is not None
+                ]
+                representative = measured_repeats[0] if measured_repeats else repetitions[0]
+                replicate_records = [
+                    {"seed": (generation_options["seed"] + index) % 2147483648,
+                     "score": entry["score"], "passed": entry["passed"],
+                     "status": entry["status"], "latency_s": entry["latency_s"],
+                     "answer": entry["answer"], "evaluation": entry["evaluation"],
+                     "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
+                     "attempts": entry["attempts"]}
+                    for index, entry in enumerate(repetitions)
+                ]
+                missing_repeats = repeat_runs - len(measured_repeats)
+                aggregate_passed = (
+                    all(entry["passed"] for entry in measured_repeats)
+                    if measured_repeats else None)
+                item = {
+                    **representative,
+                    "score": round(statistics.mean(entry["score"] for entry in measured_repeats), 2)
+                    if measured_repeats else None,
+                    "passed": aggregate_passed,
+                    "status": ("PASS" if aggregate_passed is True else
+                               "FAILED" if aggregate_passed is False else "NOT RUN"),
+                    "latency_s": round(statistics.mean(
+                        entry["latency_s"] for entry in measured_repeats), 4)
+                    if measured_repeats else 0,
+                    "ttft_s": round(statistics.mean(
+                        entry["ttft_s"] for entry in measured_repeats), 4)
+                    if measured_repeats else 0,
+                    "generation_s": round(statistics.mean(
+                        entry["generation_s"] for entry in measured_repeats), 4)
+                    if measured_repeats else 0,
+                    "prompt_tokens": round(statistics.mean(
+                        entry["prompt_tokens"] for entry in measured_repeats))
+                    if measured_repeats else max(1, len(test["prompt"]) // 4),
+                    "output_tokens": round(statistics.mean(
+                        entry["output_tokens"] for entry in measured_repeats))
+                    if measured_repeats else 0,
+                    "replicates": replicate_records,
+                    "missing_repeat_count": missing_repeats,
+                }
+                if measured_repeats:
                     item["evaluation"] = {
-                        "passed": item["passed"], "status": item["status"],
-                        "criteria": repetitions[0]["evaluation"]["criteria"],
-                        "explanation": (f"{sum(entry['passed'] for entry in repetitions)} of "
-                                        f"{repeat_runs} repeated answers passed; all repeats must "
-                                        "pass for the aggregate test to pass."),
+                        "passed": aggregate_passed, "status": item["status"],
+                        "criteria": representative["evaluation"]["criteria"],
+                        "explanation": (
+                            f"{sum(entry['passed'] is True for entry in measured_repeats)} of "
+                            f"{len(measured_repeats)} measured repeats passed; "
+                            f"{missing_repeats} repeat(s) were NOT RUN."),
                     }
             else:
                 item = repetitions[0]
@@ -1451,6 +1531,7 @@ class BenchmarkManager:
             return
         result = {"benchmark_version": "2.1.0", "task_set_version": TASK_SET_VERSION,
                   "evaluator_version": EVALUATOR_VERSION,
+                  "quality_aggregation": "equal-weighted mean of available category scores",
                   "difficulty_calibration_status": "not empirically calibrated",
                   "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
@@ -1503,6 +1584,17 @@ class BenchmarkManager:
             "passed": sum(item["status"] == "PASS" for item in completed),
             "failed": sum(item["status"] == "FAILED" for item in completed),
             "not_run": sum(item["status"] == "NOT RUN" for item in completed),
+            "repeat_outcomes": {
+                "requested_per_test": repeat_runs,
+                "scored": sum(
+                    replicate.get("score") is not None
+                    for item in completed for replicate in
+                    (item.get("replicates") or [item])),
+                "not_run": sum(
+                    replicate.get("status") == "NOT RUN"
+                    for item in completed for replicate in
+                    (item.get("replicates") or [item])),
+            },
             "not_run_by_code": dict(sorted(not_run_by_code.items())),
             "by_difficulty": {
                 level: {
@@ -1533,7 +1625,8 @@ class BenchmarkManager:
             categories[category] = round(statistics.mean(values), 2) if values else None
         measured = [value for value in categories.values() if value is not None]
         categories["overall"] = round(statistics.mean(measured), 2) if measured else None
-        return {"categories": categories, "overall": categories["overall"], "method": "objective category evaluators"}
+        return {"categories": categories, "overall": categories["overall"],
+                "method": "equal-weighted mean of available category scores"}
 
     @staticmethod
     def _context_score(fresh, accumulated):
@@ -1662,7 +1755,7 @@ class BenchmarkManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
-            fields = ["id", "category", "subcategory", "difficulty", "difficulty_calibration_status",
+            fields = ["run_type", "id", "category", "subcategory", "difficulty", "difficulty_calibration_status",
                       "task_set_version", "evaluator_version", "item_instance_id",
                       "item_fingerprint", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
@@ -1671,6 +1764,7 @@ class BenchmarkManager:
                       "attempt_count", "attempts", "repeats", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
             writer.writerows({
+                "run_type": "DEMO DATA" if result.get("demo") else "MODEL DATA",
                 "id": self._csv_cell(row.get("id")),
                 "category": self._csv_cell(row.get("category")),
                 "subcategory": self._csv_cell(row.get("subcategory")),

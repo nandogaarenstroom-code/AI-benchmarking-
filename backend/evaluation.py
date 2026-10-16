@@ -5,10 +5,15 @@ import json
 import re
 import subprocess
 import shutil
+import uuid
 
 MAX_CODE_SIZE = 20_000
 MAX_TEST_COUNT = 20
 MAX_TEST_SIZE = 2_000
+DOCKER_PYTHON_IMAGE = (
+    "python:3-alpine@sha256:"
+    "618e7b661a89d05565fb402a5e1eab8b1b4e5df1f5ea3dc494998d092ffe1213"
+)
 
 
 def code_evaluator_available():
@@ -107,7 +112,7 @@ def evaluation_criteria(test):
         return (f"Response must have {count}" +
                 (f" and contain: {', '.join(map(str, terms))}." if terms else ".") +
                 (f" It must also contain at least {relevance} distinct topical terms; "
-                 "this is a lexical relevance proxy, not semantic grading."
+                 "a keyword-only list is rejected, but this remains a lexical proxy, not semantic grading."
                  if relevance else ""))
     if method == "code":
         return f"Python answer must pass all {len(test.get('tests', []))} sandboxed assertions."
@@ -280,10 +285,19 @@ def evaluate_with_details(test, answer):
                            "passed": len(set(matched_topics)) >= minimum_topics,
                            "expected_distinct_terms": minimum_topics,
                            "matched_terms": sorted(set(matched_topics))})
+            topic_vocabulary = {
+                token for term in [*test.get("required_terms", []), *topic_terms]
+                for token in re.findall(r"\w+", str(term).casefold(), flags=re.UNICODE)
+            }
+            has_non_keyword_word = any(
+                token not in topic_vocabulary
+                for token in re.findall(r"\w+", answer.casefold(), flags=re.UNICODE))
+            checks.append({"name": "Not a keyword-only list",
+                           "passed": has_non_keyword_word})
         passed = all(check["passed"] for check in checks)
         score = round(10 * sum(check["passed"] for check in checks) / len(checks), 2)
         explanation = (f"{sum(check['passed'] for check in checks)} of {len(checks)} lexical "
-                       "format/relevance checks passed. Topical terms are only a relevance proxy; "
+                       "format/relevance checks passed. Topic-word checks are only a relevance proxy; "
                        "semantic quality and originality are not judged.")
     elif method != "json_schema":
         passed = answer == str(expected)
@@ -315,14 +329,23 @@ def _run_code(source, tests):
     docker = shutil.which("docker")
     if not docker:
         return False
+    container_name = f"ai-benchmark-evaluator-{uuid.uuid4().hex}"
     try:
         completed = subprocess.run(
-            [docker, "run", "--rm", "--pull=never", "--network=none", "--cpus=0.5",
+            [docker, "run", "--rm", "--pull=never", "--name", container_name,
+             "--network=none", "--cpus=0.5",
              "--memory=128m", "--pids-limit=64", "--read-only", "--user=65534:65534",
              "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--ipc=none",
              "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--workdir=/tmp",
-             "python:3-alpine", "python", "-I", "-c", harness],
+             DOCKER_PYTHON_IMAGE, "python", "-I", "-c", harness],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
         return completed.returncode == 0
     except (subprocess.SubprocessError, OSError):
         return False
+    finally:
+        try:
+            subprocess.run([docker, "rm", "--force", container_name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5, check=False)
+        except (subprocess.SubprocessError, OSError):
+            pass

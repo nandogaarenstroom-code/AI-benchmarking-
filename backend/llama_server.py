@@ -1,6 +1,7 @@
 """Managed, loopback-only llama.cpp server process lifecycle."""
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import socket
@@ -34,14 +35,25 @@ class LlamaServerManager:
         self._configuration = None
         self._output_lines = deque(maxlen=20)
         self._output_thread = None
+        self._job_handle = None
         self._status = {"state": "stopped", "message": "No app-managed llama-server is running."}
 
     def status(self):
+        exited_process = None
         with self._lock:
             if self._process is not None and self._process.poll() is not None:
-                self._process = None
-                self._configuration = None
-                self._status = {"state": "stopped", "message": "The managed llama-server exited."}
+                exited_process = self._process
+                self._status = {
+                    "state": "stopping", "message": "Cleaning up the exited managed llama-server."}
+        if exited_process is not None:
+            self._cleanup_owned_process(exited_process)
+            with self._lock:
+                if self._process is exited_process:
+                    self._process = None
+                    self._configuration = None
+                    self._status = {
+                        "state": "stopped", "message": "The managed llama-server exited."}
+        with self._lock:
             return {**self._status}
 
     def managed_launch(self, endpoint):
@@ -103,6 +115,8 @@ class LlamaServerManager:
                    if hasattr(subprocess, "CREATE_NO_WINDOW") else {}),
             )
             with self._lock:
+                self._job_handle = self._assign_kill_on_close_job(process)
+            with self._lock:
                 self._process = process
                 self._output_lines.clear()
                 self._output_thread = threading.Thread(
@@ -120,17 +134,14 @@ class LlamaServerManager:
                         f"http://{SERVER_HOST}:{SERVER_PORT}/v1"),
                 }
             if not self._wait_until_ready(process):
-                self._stop_process(process)
-                if self._output_thread:
-                    self._output_thread.join(timeout=1)
-                detail = "\n".join(self._output_lines).strip()
-                message = "llama-server did not become healthy before the startup timeout."
-                if detail:
-                    message += f" Recent server output: {detail[-2000:]}"
+                self._cleanup_owned_process(process)
                 with self._lock:
                     self._process = None
                     self._configuration = None
-                    self._status = {"state": "error", "message": message}
+                    self._status = {
+                        "state": "error",
+                        "message": "llama-server did not become healthy before the startup timeout.",
+                    }
                 process = None
                 raise LlamaServerError(self._status["message"])
             with self._lock:
@@ -142,33 +153,48 @@ class LlamaServerManager:
                 return {**self._status}
         except Exception as exc:
             if process is not None:
-                self._stop_process(process)
+                self._cleanup_owned_process(process)
             with self._lock:
                 if self._process is process:
                     self._process = None
                     self._configuration = None
                 if self._process is None:
-                    self._status = {"state": "error", "message": str(exc)[:500]}
+                    self._status = {
+                        "state": "error",
+                        "message": (str(exc)[:500] if isinstance(exc, LlamaServerError)
+                                    else "Could not start llama-server; internal details were not exposed."),
+                    }
             if isinstance(exc, LlamaServerError):
                 raise
-            raise LlamaServerError(f"Could not start llama-server: {exc}") from exc
+            raise LlamaServerError("Could not start llama-server; internal details were not exposed.") from exc
 
     def stop(self):
         with self._lock:
             process = self._process
             if process is None and self._status["state"] == "starting":
                 raise LlamaServerConflict("llama-server startup is still in progress.")
-            if process is None or process.poll() is not None:
+            if process is None:
                 self._process = None
                 self._configuration = None
                 self._status = {"state": "stopped", "message": "No app-managed llama-server is running."}
                 return {**self._status}
-            self._status = {"state": "stopping", "message": "Stopping the app-managed llama-server."}
-        self._stop_process(process)
+            if process.poll() is not None:
+                self._process = None
+                self._configuration = None
+                self._status = {"state": "stopped", "message": "The managed llama-server exited."}
+                already_exited = True
+            else:
+                already_exited = False
+                self._status = {"state": "stopping", "message": "Stopping the app-managed llama-server."}
+        self._cleanup_owned_process(process)
         with self._lock:
             self._process = None
             self._configuration = None
-            self._status = {"state": "stopped", "message": "The app-managed llama-server was stopped."}
+            self._status = {
+                "state": "stopped",
+                "message": ("The managed llama-server exited." if already_exited else
+                            "The app-managed llama-server was stopped."),
+            }
             return {**self._status}
 
     @staticmethod
@@ -273,12 +299,92 @@ class LlamaServerManager:
                 process.kill()
                 process.wait(timeout=5)
 
+    @staticmethod
+    def _assign_kill_on_close_job(process):
+        if not hasattr(ctypes, "WinDLL"):
+            return None
+        from ctypes import wintypes
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimitInformation),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        info = ExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = 0x2000
+        try:
+            if (not kernel32.SetInformationJobObject(
+                    job, 9, ctypes.byref(info), ctypes.sizeof(info)) or
+                    not kernel32.AssignProcessToJobObject(
+                        job, wintypes.HANDLE(process._handle))):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return job
+        except Exception:
+            kernel32.CloseHandle(job)
+            raise
+
+    def _cleanup_owned_process(self, process):
+        self._stop_process(process)
+        with self._lock:
+            output_thread = self._output_thread
+            job_handle = self._job_handle
+            self._job_handle = None
+        if output_thread is not None and output_thread is not threading.current_thread():
+            output_thread.join(timeout=2)
+        if process.stdout is not None and (output_thread is None or not output_thread.is_alive()):
+            process.stdout.close()
+        if job_handle is not None and hasattr(ctypes, "WinDLL"):
+            try:
+                from ctypes import wintypes
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                kernel32.CloseHandle(job_handle)
+            except OSError:
+                pass
+        with self._lock:
+            if self._output_thread is output_thread:
+                self._output_thread = None
+
     def _drain_output(self, process):
         if process.stdout is None:
             return
-        for line in process.stdout:
-            with self._lock:
-                self._output_lines.append(line.rstrip())
+        with process.stdout:
+            for line in process.stdout:
+                with self._lock:
+                    self._output_lines.append(line.rstrip())
 
 
 llama_server_manager = LlamaServerManager()

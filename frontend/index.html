@@ -506,9 +506,12 @@ function show(result,resultDirectory){
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
   const uncertainty=result.uncertainty||{};
+  const repeatOutcomes=result.summary?.repeat_outcomes||{};
   $('repeat-summary').textContent=`Primary suite repeats: ${result.configuration.repeat_runs||1} · ${repeatScores.length>1
     ?`observed between-run quality: mean ${uncertainty.quality_mean}/100, standard deviation ${uncertainty.quality_stddev}`
     :`item-bootstrap variability: standard deviation ${uncertainty.quality_stddev??'not available'} (resampled tests, not independent model runs)`}. Context and performance measurements were run once.`;
+  if(repeatOutcomes.not_run)
+    $('repeat-summary').textContent+=` NOT RUN repeats: ${repeatOutcomes.not_run} of ${repeatOutcomes.requested_per_test*(result.tests||[]).length} requested.`;
   $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
   const links=$('result-links');links.replaceChildren();
   [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]].forEach(([label,filename])=>{
@@ -732,13 +735,13 @@ $('compare-results').onclick=async()=>{
     if(!response.ok)throw new Error('Could not compare the selected results.');
     const data=await response.json(),table=document.createElement('table');
     const header=document.createElement('tr');
-    ['Model','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
+    ['Model','Run type','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
     table.append(header);
     const comparable=data.results.filter(item=>Number.isFinite(item.overall));
     const best=comparable.length?comparable.reduce((current,item)=>item.overall>current.overall?item:current).id:null;
     data.results.forEach(item=>{
       const row=document.createElement('tr');
-      [item.model,item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
+      [item.model,item.demo?'DEMO DATA':'MODEL DATA',item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
       table.append(row);
     });
     const warnings=document.createElement('p');

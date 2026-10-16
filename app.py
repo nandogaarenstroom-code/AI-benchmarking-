@@ -24,6 +24,7 @@ ROOT = Path(__file__).parent
 manager = BenchmarkManager(ROOT / "results")
 CSRF_TOKEN = secrets.token_urlsafe(32)
 MAX_REQUEST_SIZE = 1_048_576
+MAX_REQUEST_TARGET_SIZE = 4096
 ALLOWED_HOSTNAMES = {"localhost", "127.0.0.1"}
 
 
@@ -56,6 +57,29 @@ class Handler(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.connection.settimeout(10)
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if len(self.path.encode("utf-8")) > MAX_REQUEST_TARGET_SIZE:
+            self.close_connection = True
+            self.send_error(414)
+            return False
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.close_connection = True
+            self.send_error(400, "Transfer-Encoding is not supported")
+            return False
+        raw_size = self.headers.get("Content-Length")
+        if raw_size is not None:
+            if not raw_size.isdigit():
+                self.close_connection = True
+                self.send_error(400, "Invalid Content-Length")
+                return False
+            if int(raw_size) > MAX_REQUEST_SIZE:
+                self.close_connection = True
+                self.send_error(413, "Request body too large")
+                return False
+        return True
 
     def _local_host(self, value):
         try:
@@ -138,12 +162,13 @@ class Handler(BaseHTTPRequestHandler):
             result = manager.load_result(path.rsplit("/", 1)[-1])
             return self._json(result, 200 if result else 404)
         if path.startswith("/results/"):
-            file_path = manager.root / Path(path).name
-            if (file_path.exists() and file_path.is_file() and not file_path.is_symlink() and
-                    file_path.resolve().parent == manager.root.resolve()):
-                data = file_path.read_bytes()
+            filename = Path(path).name
+            data = manager.read_artifact(filename)
+            if data is not None:
                 self.send_response(200)
-                self.send_header("Content-Type", "application/pdf" if file_path.suffix == ".pdf" else "application/octet-stream")
+                self.send_header(
+                    "Content-Type", "application/pdf" if filename.endswith(".pdf")
+                    else "application/octet-stream")
                 self.send_header("Content-Length", str(len(data)))
                 self._security_headers()
                 self.end_headers()
@@ -181,9 +206,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return self._json({"error": "invalid JSON"}, 400)
         if path == "/api/benchmark":
-            requested_model = payload.get("model") or {
-                "id": "demo-local", "backend": "Demo", "endpoint": "local://demo",
-            }
+            requested_model = payload.get("model")
+            if not isinstance(requested_model, dict):
+                return self._json({"error": "select a model explicitly"}, 400)
             try:
                 model = resolve_model(requested_model)
             except ValueError as exc:
