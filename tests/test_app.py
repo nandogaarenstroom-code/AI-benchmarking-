@@ -1,7 +1,9 @@
 import http.client
 import json
+import socket
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -21,6 +23,12 @@ class StubManager:
 
     def cancel(self):
         return False
+
+    def load_result(self, result_id):
+        return None
+
+    def read_artifact(self, filename):
+        return None
 
 
 class ApiSecurityTests(unittest.TestCase):
@@ -78,6 +86,85 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIsNone(self.manager.payload)
 
+    def test_every_state_changing_route_requires_origin_and_csrf(self):
+        routes = (
+            "/api/benchmark", "/api/resume", "/api/cancel",
+            "/api/llama-server/start", "/api/llama-server/stop",
+        )
+        for path in routes:
+            with self.subTest(path=path):
+                status, _ = self.request(path, "{}", {
+                    "Origin": f"http://127.0.0.1:{self.server.server_port}",
+                    "Content-Type": "application/json",
+                })
+                self.assertEqual(status, 403)
+                status, _ = self.request(path, "{}", {
+                    "Origin": "http://attacker.invalid",
+                    "Content-Type": "application/json",
+                    "X-CSRF-Token": app.CSRF_TOKEN,
+                })
+                self.assertEqual(status, 403)
+
+    def test_request_target_and_body_limits_cover_get_and_post(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        connection.request("GET", "/api/models?" + "x" * app.MAX_REQUEST_TARGET_SIZE,
+                           headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 414)
+
+        headers = {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        }
+        too_large = "{}" + " " * (app.MAX_REQUEST_SIZE - 1)
+        self.assertEqual(len(too_large), app.MAX_REQUEST_SIZE + 1)
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=3) as client:
+            request = (
+                f"POST /api/benchmark HTTP/1.0\r\n"
+                f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+                f"Content-Length: {len(too_large)}\r\n\r\n"
+            )
+            client.sendall(request.encode())
+            self.assertIn(b"413", client.recv(4096))
+        with socket.create_connection(("127.0.0.1", self.server.server_port), timeout=3) as client:
+            request = (
+                f"POST /api/benchmark HTTP/1.0\r\n"
+                f"Host: 127.0.0.1:{self.server.server_port}\r\n"
+                f"Content-Length: {'9' * 5000}\r\n\r\n"
+            )
+            client.sendall(request.encode())
+            self.assertIn(b"413", client.recv(4096))
+        boundary = "{}" + " " * (app.MAX_REQUEST_SIZE - 2)
+        self.assertEqual(len(boundary), app.MAX_REQUEST_SIZE)
+        status, body = self.request("/api/benchmark", boundary, headers)
+        self.assertEqual(status, 400)
+        self.assertIn(b"explicitly", body)
+
+    def test_download_and_history_routes_reject_traversal_and_internal_state(self):
+        for path in (
+                "/api/results/../current.json",
+                "/api/results/%2e%2e%2fcurrent.json",
+                "/results/../current.json",
+                "/results/.checkpoint.key"):
+            with self.subTest(path=path):
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", self.server.server_port, timeout=3)
+                connection.request(
+                    "GET", path, headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+                response = connection.getresponse()
+                response.read()
+                connection.close()
+                self.assertEqual(response.status, 404)
+
+    def test_frontend_uses_text_nodes_for_untrusted_display(self):
+        html = (Path(app.ROOT) / "frontend" / "index.html").read_text()
+        self.assertNotIn("innerHTML", html)
+        self.assertIn("content.textContent=", html)
+        self.assertIn("cell.textContent=", html)
+
     def test_unsupported_content_type_is_rejected(self):
         status, _ = self.request("/api/benchmark", '{"profile":"QUICK"}', {
             "Origin": f"http://127.0.0.1:{self.server.server_port}",
@@ -121,6 +208,16 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("tests", self.manager.payload)
         self.assertNotIn("completed_tests", self.manager.payload)
+
+    def test_benchmark_api_requires_explicit_model_selection(self):
+        status, body = self.request("/api/benchmark", '{"profile":"QUICK"}', {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("explicitly", json.loads(body)["error"])
+        self.assertIsNone(self.manager.payload)
 
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({

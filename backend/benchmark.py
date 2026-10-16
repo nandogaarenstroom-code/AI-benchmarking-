@@ -41,6 +41,7 @@ DIFFICULTY_DESCRIPTIONS = {
     "Hard": "A multi-step task or one that combines several constraints.",
     "Uncalibrated": "A pilot task with higher constructed complexity; difficulty has not been calibrated.",
 }
+MAX_CHECKPOINT_SIZE = 128 * 1024 * 1024
 
 
 def _valid_schedule(route, items, constraints):
@@ -135,7 +136,7 @@ def _inventory_adjustment_test(common, difficulty, a, b):
     }
 
 
-def _long_context_test(common, difficulty, rng):
+def _long_context_test(common: dict, difficulty: str, rng: random.Random) -> dict:
     noise_count = {"Easy": 24, "Medium": 40, "Hard": 56, "Uncalibrated": 72}[difficulty]
     noise = [
         f"Archive note {index + 1}: batch {rng.randint(1000, 9999)} was checked by desk "
@@ -219,7 +220,7 @@ def _long_context_test(common, difficulty, rng):
             "acceptable_answers": [answer]}
 
 
-def _test(category, i, rng, difficulty=None):
+def _test(category: str, i: int, rng: random.Random, difficulty: str | None = None) -> dict:
     difficulty = difficulty or DIFFICULTIES[i % 4]
     a, b = rng.randint(2, 99), rng.randint(2, 99)
     common = {"id": f"{category.lower().replace(' ', '-')}-{i+1:03d}",
@@ -730,7 +731,7 @@ def _test(category, i, rng, difficulty=None):
             "evaluation_method": "contains_all", "required_terms": ["ok"]}
 
 
-def make_tests(profile, seed):
+def make_tests(profile: str, seed: int) -> list[dict]:
     rng = random.Random(seed)
     count = COUNTS.get(profile.upper(), COUNTS["STANDARD"])
     tests, seen, fingerprints = [], set(), set()
@@ -764,7 +765,7 @@ def make_tests(profile, seed):
     return tests
 
 
-def make_context_tests(seed, max_context=131072):
+def make_context_tests(seed: int, max_context: int = 131072) -> list[dict]:
     rng = random.Random(seed)
     tests = []
     marker_positions = ("beginning", "middle", "end")
@@ -867,14 +868,20 @@ class BenchmarkManager:
                     return None
                 with os.fdopen(fd, "rb") as stream:
                     fd = -1
-                    return stream.read().decode("utf-8")
+                    try:
+                        return stream.read().decode("utf-8")
+                    except UnicodeDecodeError:
+                        return None
             finally:
                 if fd >= 0:
                     os.close(fd)
         path = self.root / filename
         if path.is_symlink() or path.resolve().parent != root or not path.is_file():
             return None
-        return path.read_text()
+        try:
+            return path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
 
     def read_artifact(self, filename):
         if (not isinstance(filename, str) or
@@ -882,26 +889,29 @@ class BenchmarkManager:
                     r"benchmark_[0-9]{8}_[0-9]{6}_[a-f0-9]{32}"
                     r"(?:\.json|\.csv|\.pdf|_quality\.svg)", filename) is None):
             return None
-        root = self.root.resolve()
-        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
-            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-            finally:
-                os.close(directory_fd)
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    return None
-                with os.fdopen(fd, "rb") as stream:
-                    fd = -1
-                    return stream.read()
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-        path = self.root / filename
-        if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+        try:
+            root = self.root.resolve()
+            if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+                directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                finally:
+                    os.close(directory_fd)
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        return None
+                    with os.fdopen(fd, "rb") as stream:
+                        fd = -1
+                        return stream.read()
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+            path = self.root / filename
+            if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+                return None
+            return path.read_bytes()
+        except OSError:
             return None
-        return path.read_bytes()
 
     def compare(self, result_ids):
         rows = []
@@ -939,6 +949,8 @@ class BenchmarkManager:
     def _state_key(self, create=False):
         key_path = self.root / ".checkpoint.key"
         with self._state_key_lock:
+            if key_path.is_symlink():
+                return None
             flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
             try:
                 fd = os.open(key_path, flags)
@@ -973,8 +985,24 @@ class BenchmarkManager:
                              separators=(",", ":"), allow_nan=False).encode("utf-8")
         return hmac.new(key, encoded, hashlib.sha256).hexdigest()
 
+    def _read_checkpoint_file(self) -> object:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.state_file, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_size > MAX_CHECKPOINT_SIZE:
+                raise ValueError("checkpoint file is invalid or too large")
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                content = stream.read(MAX_CHECKPOINT_SIZE + 1)
+            if len(content) > MAX_CHECKPOINT_SIZE:
+                raise ValueError("checkpoint file is too large")
+            return json.loads(content.decode("utf-8"))
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
     @staticmethod
-    def _valid_checkpoint_outcome(item):
+    def _valid_checkpoint_outcome(item: dict) -> bool:
         if not isinstance(item, dict):
             return False
         status, passed, score = item.get("status"), item.get("passed"), item.get("score")
@@ -985,7 +1013,7 @@ class BenchmarkManager:
         return (isinstance(score, (int, float)) and not isinstance(score, bool) and
                 math.isfinite(score) and 0 <= score <= 10)
 
-    def _validate_checkpoint(self, state):
+    def _validate_checkpoint(self, state: dict) -> None:
         if not isinstance(state, dict):
             raise ValueError("checkpoint must be an object")
         if (state.get("task_set_version") != TASK_SET_VERSION or
@@ -1002,7 +1030,7 @@ class BenchmarkManager:
             raise ValueError("checkpoint phase is invalid")
         if not isinstance(state.get("model"), dict):
             raise ValueError("checkpoint model is invalid")
-        resolve_model(state["model"])
+        model = resolve_model(state["model"])
         options = state.get("generation_options")
         if (not isinstance(options, dict) or
                 normalize_generation_options(options) != options):
@@ -1042,7 +1070,6 @@ class BenchmarkManager:
                   any(not self._valid_checkpoint_outcome(entry) for entry in replicates)):
                 raise ValueError("checkpoint repeats are invalid")
 
-        model = resolve_model(state["model"])
         advertised = model.get("context_length", 131072)
         try:
             max_context = min(int(advertised), 262144)
@@ -1075,7 +1102,7 @@ class BenchmarkManager:
             if self.running or not self.state_file.exists():
                 return False
             try:
-                state = json.loads(self.state_file.read_text())
+                state = self._read_checkpoint_file()
                 if not isinstance(state, dict):
                     raise ValueError("checkpoint must be an object")
                 signature = state.pop("_integrity", None)
@@ -1084,7 +1111,7 @@ class BenchmarkManager:
                         not hmac.compare_digest(signature, self._checkpoint_signature(state, key))):
                     raise ValueError("checkpoint integrity check failed")
                 self._validate_checkpoint(state)
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
                 self._update_status(
                     phase="Saved run rejected",
                     activity="The saved checkpoint is invalid or has been modified; start a new run.")
@@ -1133,12 +1160,14 @@ class BenchmarkManager:
 
     def cancel(self):
         with self._run_lock:
-            if not self.running or self._status.get("state") != "running":
+            if (not self.running or self._status.get("state") != "running" or
+                    self._status.get("phase") == "Saving result files"):
                 return False
             self.cancel_requested.set()
             return True
 
-    def _answer(self, model, test, history=None, generation_options=None):
+    def _answer(self, model: dict, test: dict, history: list | None = None,
+                generation_options: dict | None = None) -> str | dict:
         if model.get("demo"):
             if test["evaluation_method"] == "constraint_schedule":
                 route = next((list(candidate) for candidate in itertools.permutations(
@@ -1175,7 +1204,8 @@ class BenchmarkManager:
         response = ask_model(model, test["prompt"], history=history, options=generation_options)
         return response
 
-    def _execute(self, model, test, history=None, generation_options=None):
+    def _execute(self, model: dict, test: dict, history: list | None = None,
+                 generation_options: dict | None = None) -> dict:
         criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
         if test.get("evaluation_method") == "code" and not code_evaluator_available():
             evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -1281,6 +1311,59 @@ class BenchmarkManager:
             return "CONNECTION_ERROR"
         return "MODEL_ERROR"
 
+    @staticmethod
+    def _aggregate_repeats(
+            test: dict, repetitions: list[dict], generation_options: dict,
+            repeat_runs: int) -> dict:
+        measured = [
+            entry for entry in repetitions
+            if entry["status"] != "NOT RUN" and entry.get("score") is not None
+        ]
+        representative = measured[0] if measured else repetitions[0]
+        replicates = [
+            {"seed": (generation_options["seed"] + index) % 2147483648,
+             "score": entry["score"], "passed": entry["passed"],
+             "status": entry["status"], "latency_s": entry["latency_s"],
+             "answer": entry["answer"], "evaluation": entry["evaluation"],
+             "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
+             "attempts": entry["attempts"]}
+            for index, entry in enumerate(repetitions)
+        ]
+        missing = repeat_runs - len(measured)
+        passed = all(entry["passed"] for entry in measured) if measured else None
+        item = {
+            **representative,
+            "score": round(statistics.mean(entry["score"] for entry in measured), 2)
+            if measured else None,
+            "passed": passed,
+            "status": ("PASS" if passed is True else
+                       "FAILED" if passed is False else "NOT RUN"),
+            "latency_s": round(statistics.mean(entry["latency_s"] for entry in measured), 4)
+            if measured else 0,
+            "ttft_s": round(statistics.mean(entry["ttft_s"] for entry in measured), 4)
+            if measured else 0,
+            "generation_s": round(statistics.mean(
+                entry["generation_s"] for entry in measured), 4)
+            if measured else 0,
+            "prompt_tokens": round(statistics.mean(
+                entry["prompt_tokens"] for entry in measured))
+            if measured else max(1, len(test["prompt"]) // 4),
+            "output_tokens": round(statistics.mean(
+                entry["output_tokens"] for entry in measured))
+            if measured else 0,
+            "replicates": replicates,
+            "missing_repeat_count": missing,
+        }
+        if measured:
+            item["evaluation"] = {
+                "passed": passed, "status": item["status"],
+                "criteria": representative["evaluation"]["criteria"],
+                "explanation": (
+                    f"{sum(entry['passed'] is True for entry in measured)} of "
+                    f"{len(measured)} measured repeats passed; {missing} repeat(s) were NOT RUN."),
+            }
+        return item
+
     def _run(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("invalid benchmark request")
@@ -1364,61 +1447,9 @@ class BenchmarkManager:
                 run_options = dict(generation_options)
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
                 repetitions.append(self._execute(model, test, generation_options=run_options))
-            if repeat_runs > 1:
-                measured_repeats = [
-                    entry for entry in repetitions
-                    if entry["status"] != "NOT RUN" and entry.get("score") is not None
-                ]
-                representative = measured_repeats[0] if measured_repeats else repetitions[0]
-                replicate_records = [
-                    {"seed": (generation_options["seed"] + index) % 2147483648,
-                     "score": entry["score"], "passed": entry["passed"],
-                     "status": entry["status"], "latency_s": entry["latency_s"],
-                     "answer": entry["answer"], "evaluation": entry["evaluation"],
-                     "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
-                     "attempts": entry["attempts"]}
-                    for index, entry in enumerate(repetitions)
-                ]
-                missing_repeats = repeat_runs - len(measured_repeats)
-                aggregate_passed = (
-                    all(entry["passed"] for entry in measured_repeats)
-                    if measured_repeats else None)
-                item = {
-                    **representative,
-                    "score": round(statistics.mean(entry["score"] for entry in measured_repeats), 2)
-                    if measured_repeats else None,
-                    "passed": aggregate_passed,
-                    "status": ("PASS" if aggregate_passed is True else
-                               "FAILED" if aggregate_passed is False else "NOT RUN"),
-                    "latency_s": round(statistics.mean(
-                        entry["latency_s"] for entry in measured_repeats), 4)
-                    if measured_repeats else 0,
-                    "ttft_s": round(statistics.mean(
-                        entry["ttft_s"] for entry in measured_repeats), 4)
-                    if measured_repeats else 0,
-                    "generation_s": round(statistics.mean(
-                        entry["generation_s"] for entry in measured_repeats), 4)
-                    if measured_repeats else 0,
-                    "prompt_tokens": round(statistics.mean(
-                        entry["prompt_tokens"] for entry in measured_repeats))
-                    if measured_repeats else max(1, len(test["prompt"]) // 4),
-                    "output_tokens": round(statistics.mean(
-                        entry["output_tokens"] for entry in measured_repeats))
-                    if measured_repeats else 0,
-                    "replicates": replicate_records,
-                    "missing_repeat_count": missing_repeats,
-                }
-                if measured_repeats:
-                    item["evaluation"] = {
-                        "passed": aggregate_passed, "status": item["status"],
-                        "criteria": representative["evaluation"]["criteria"],
-                        "explanation": (
-                            f"{sum(entry['passed'] is True for entry in measured_repeats)} of "
-                            f"{len(measured_repeats)} measured repeats passed; "
-                            f"{missing_repeats} repeat(s) were NOT RUN."),
-                    }
-            else:
-                item = repetitions[0]
+            item = (self._aggregate_repeats(
+                test, repetitions, generation_options, repeat_runs)
+                    if repeat_runs > 1 else repetitions[0])
             completed.append(item)
             if item["status"] == "NOT RUN":
                 not_run.append({"test_id": test["id"],
@@ -1529,7 +1560,7 @@ class BenchmarkManager:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
             return
-        result = {"benchmark_version": "2.1.0", "task_set_version": TASK_SET_VERSION,
+        result = {"benchmark_version": "2.2.0", "task_set_version": TASK_SET_VERSION,
                   "evaluator_version": EVALUATOR_VERSION,
                   "quality_aggregation": "equal-weighted mean of available category scores",
                   "difficulty_calibration_status": "not empirically calibrated",
@@ -1607,9 +1638,14 @@ class BenchmarkManager:
                 } for level in DIFFICULTIES
             },
         }
-        self._update_status(phase="Saving result files",
-                            activity="Writing JSON, CSV, PDF, and SVG to the results directory.",
-                            total=1, progress=0)
+        with self._run_lock:
+            if self.cancel_requested.is_set():
+                save_checkpoint("performance")
+                self._update_status(state="cancelled")
+                return
+            self._update_status(phase="Saving result files",
+                                activity="Writing JSON, CSV, PDF, and SVG to the results directory.",
+                                total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._update_status(state="complete", phase="Benchmark complete",
                             activity="All result files are ready.", progress=1, total=1,
@@ -1617,7 +1653,7 @@ class BenchmarkManager:
                             quality=quality["overall"], performance=perf["score"],
                             overall=result["scores"]["overall"])
 
-    def _scores(self, results):
+    def _scores(self, results: list[dict]) -> dict:
         categories = {}
         for category in CATEGORIES:
             values = [x["score"] * 10 for x in results
@@ -1645,10 +1681,13 @@ class BenchmarkManager:
         if key is None:
             raise OSError("could not load checkpoint signing key")
         signed_state["_integrity"] = self._checkpoint_signature(signed_state, key)
+        encoded = json.dumps(signed_state, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > MAX_CHECKPOINT_SIZE:
+            raise ValueError("checkpoint exceeds the configured size limit")
         fd, name = tempfile.mkstemp(prefix="benchmark-", suffix=".tmp", dir=self.root)
         try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump(signed_state, stream, allow_nan=False)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
             for attempt in range(5):

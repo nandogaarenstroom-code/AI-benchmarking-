@@ -8,7 +8,7 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 
 ### In place
 
-- A dependency-free local HTTP server and browser dashboard
+- A local HTTP server and browser dashboard with no third-party Python runtime dependencies
 - An offline voxel laboratory that visualizes quality, performance, context, and category scores
   while retaining exact values in an accessible table
 - Discovery for Ollama, LM Studio, and OpenAI-compatible endpoints, plus a clearly marked demo model
@@ -93,7 +93,8 @@ Progress is persisted in `results/current.json`; use **Resume previous run** aft
 Completed files are saved under `results/` with a generated name such as
 `benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
 dashboard shows the results folder, saved-run history, and download links. Every test and failure is
-retained in the JSON result. Demo outputs are marked `DEMO DATA` in the result metadata (`demo: true`).
+retained in the JSON result. Demo outputs carry `demo: true` in JSON and `DEMO DATA` labels in the
+dashboard, CSV, PDF, history, and comparison view. The API requires an explicit model selection.
 Select a model deliberately before the run control is enabled; the demo model is never selected
 automatically. Active runs can be cancelled and resumed from their most recently checkpointed phase.
 Completed results include a **Test-by-test results** section with difficulty and outcome filters,
@@ -122,16 +123,19 @@ recorded with each result. The llama.cpp context window is configured when launc
 Choose a **Repeatable**, **Balanced**, or **Creative** preset on the main screen; individual
 sampling controls and optional 2–5 repeats of the primary test suite are collapsed under
 **Advanced settings**. Repeats use consecutive sampling seeds and report per-run quality and its
-standard deviation. Context-scaling and performance experiments still run once. Available server
+standard deviation. NOT RUN replicates stay unscored, are counted in repeat metadata, and are
+excluded from the per-test mean; a test with no measured replicates remains unavailable.
+Context-scaling and performance experiments still run once. Available server
 version, context length, and GPU-offload information are shown as read-only runtime details; values
 the local server does not report remain `Unknown`.
 
-The current dependency-free engine uses deterministic generated tasks and category-specific
+The current standard-library Python engine uses deterministic generated tasks and category-specific
 evaluators. It provides a stable
 adapter/result contract so additional local adapters and sandboxed coding evaluators can be added
 without changing the UI. Controlled benchmark measurements are not universal real-world guarantees.
 
-Test prompts are parameterized with seeded values and duplicate fingerprints are rejected. Results
+Test prompts are parameterized with seeded values; generation fails closed if a duplicate fingerprint
+is produced. Results
 also include three deterministic bootstrap resamples of the measured item scores, including mean
 and standard deviation. These resamples describe item-level variability; they are not independent
 model runs. When repeated runs are requested, between-run scores are reported separately. Categories
@@ -141,13 +145,16 @@ The engine now includes objective numeric, choice, JSON-key, required-term, inst
 and Python-code evaluators. Subjective categories use deterministic checks or finite acceptable
 answers; they do not measure semantic quality. No evaluator model is configured. Any future
 semantic judge should be reported separately from the deterministic score until validated against
-blinded human ratings. Model-generated code runs only in a resource-limited, network-disabled Docker
-container. If Docker or the preloaded `python:3-alpine` image is unavailable, coding evaluations are
-marked **NOT RUN**; the app never falls back to executing model code on the host. Caller-supplied test
-code is ignored.
+blinded human ratings. Model-generated code runs only in a resource-limited, network-disabled Docker container using the
+immutable `python:3-alpine` image digest configured in `backend/evaluation.py`. Docker is an external
+runtime requirement for coding evaluations; without the CLI or preloaded image, those checks are
+marked **NOT RUN**. Timed-out or failed runs trigger best-effort forced container removal when the
+Docker daemon is reachable. The app never falls back to executing model code on the host.
+Caller-supplied test code is ignored.
 
-The HTTP server binds to loopback, limits request size and concurrency, and requires a per-process
-CSRF token plus same-origin requests for state-changing API operations. Benchmark model endpoints
+The HTTP server binds to loopback, caps request targets at 4 KiB and declared request bodies at 1 MiB,
+bounds concurrent handlers, and requires a per-process CSRF token plus same-origin requests for
+state-changing API operations. Benchmark model endpoints
 must match a locally discovered server, and endpoint redirects are not followed. Result filenames
 use generated identifiers rather than model names.
 
@@ -227,12 +234,14 @@ answer quality.
   across their disclosed criteria
 - Unavailable evaluator or model response: `NOT RUN`, excluded from quality scoring
 - Category score: percentage of points earned in that category
-- Quality score: average across completed test scores, normalized to 0–100
+- Quality score: equal-weighted mean of available category scores; each category averages its scored
+  tests and is normalized to 0–100
 - Performance score: derived from measured request throughput
 - Overall score: `quality × 0.70 + performance × 0.30`
 
 Every answer, score, status, and failure is retained in the JSON result. Demo results are clearly
-marked with `demo: true` and `DEMO DATA`; they must not be interpreted as model performance.
+marked with `demo: true` and `DEMO DATA` in JSON, CSV, PDF, history, and comparisons; they must not be
+interpreted as model performance.
 The dashboard and CSV export also include per-test prompts, answers, evaluator criteria, and outcome
 explanations. “How it did it” means the observable response and checks; private chain-of-thought is
 not requested or treated as evidence.
@@ -252,8 +261,8 @@ fresh-context quality rather than being mixed into the primary quality score.
 Each run also records a separate context-scaling result with fresh and accumulated variants at
 4K, 8K, 16K, 32K, 64K, 128K, and (when supported) 256K target prompt sizes. Marker positions rotate
 between beginning, middle, and end. Prompt sizes are estimated from text length rather than measured
-with each model's tokenizer, and each size/position is sampled only once. The accumulated variant deliberately reuses the
-conversation history so context degradation can be observed; it is not mixed into the primary
+with each model's tokenizer, and each size/position is sampled only once. The accumulated variant deliberately reuses conversation history through both the Ollama chat and
+OpenAI-compatible adapters so context degradation can be observed; it is not mixed into the primary
 fresh-context quality score.
 
 The suite never blindly exceeds the model's advertised context limit. If metadata reports a
@@ -272,9 +281,10 @@ labels estimated timing when the adapter does not report streamed timing. P50/P9
 standard deviation are based on measured request latency. These are controlled measurements and
 should not be treated as guarantees for unrelated real-world workloads.
 
-Runs can be cancelled through the backend API. Resume state is written atomically, and corrupted
-resume files are rejected instead of being executed. Final JSON results are also written through
-an atomic replacement.
+Runs can be cancelled through the backend API. Resume state is written atomically and authenticated
+with a local key stored beside it; malformed, modified, or incompatible checkpoints are rejected
+before their results can be reused. Final JSON results are also written through an atomic replacement.
+API status does not return absolute result-directory paths or raw exception traces.
 
 ## Test
 

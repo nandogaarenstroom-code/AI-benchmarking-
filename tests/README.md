@@ -37,14 +37,16 @@ Additional coverage verifies repeated-run score metadata and that runtime detail
 when reported by the local server.
 
 Streaming adapter tests cover first-content TTFT measurement, timeout error mapping, malformed event
-handling, size-bounded discovery responses, and a real streaming adapter round-trip against a temporary
-loopback HTTP server. The loopback test exercises the local HTTP protocol only; it does not establish
-compatibility with live model servers. Additional adapter tests cover fragmented UTF-8/SSE events,
-finish markers, empty and incomplete streams, mid-stream disconnects, HTTP status errors, and the rule
-that adapter failures are recorded as unscored `NOT RUN` outcomes. Result comparisons warn about
-version/configuration mismatches and missing measurements; export checks assert representative PDF,
-CSV, and SVG content. Evaluator checks cover JSON value types and exact
-word-count rubrics. Benchmark tests verify performance calculations use dedicated generation-time
+handling, size-bounded discovery responses, accumulated history in both Ollama and OpenAI-compatible
+requests, and a loopback streaming round-trip. These tests exercise local protocols only and do not
+establish compatibility with live model servers. Additional adapter tests cover fragmented UTF-8/SSE
+events, finish markers, empty and incomplete streams, mid-stream disconnects, HTTP status errors, and
+the rule that adapter failures are recorded as unscored `NOT RUN` outcomes. Result comparisons warn
+about version/configuration mismatches and missing measurements; export checks assert demo provenance,
+PDF literal escaping, CSV formula neutralization, and SVG text escaping. Evaluator checks cover strict
+JSON constants, keyword-only rubric answers, JSON value types, exact-response contradictions, and
+word-count rubrics. Benchmark tests verify category-weighted scoring, missing-repeat accounting,
+performance calculations use dedicated generation-time
 samples, distinguish item bootstrap resampling from repeated model runs, and checkpoint/resume after
 cancellation during context tests. Difficulty-generation coverage checks that all four tiers appear
 in QUICK and that every primary category spans all tiers in FULL. It also checks varied
@@ -56,8 +58,16 @@ prompt/evaluator explanations, answer traces, and that unavailable evaluators pr
 NOT RUN outcomes.
 
 Managed llama.cpp launcher tests mock Windows process creation and verify locating executables in an
-already-installed WinGet package; they do not run a real `llama-server.exe` or validate actual
-GPU/context capacity. Live Windows testing is still required for those behaviors.
+already-installed WinGet package; they do not run a real `llama-server.exe`, exercise Windows Job
+Objects, or validate actual GPU/context capacity. Live Windows testing is still required for those
+behaviors.
+
+HTTP tests cover all implemented POST routes' CSRF/origin rejection, explicit model selection,
+request-target and body limits, and traversal/internal-file download rejection. Checkpoint tests cover
+HMAC tampering, malformed/non-object and incompatible state, generated-suite validation, and
+cancellation during warm-up, primary, context, and performance phases. Docker command tests verify
+resource flags, digest pinning, and forced cleanup attempts on timeout/failure; they do not exercise a
+real Docker daemon or prove the container boundary.
 
 ### `test_domain_evaluators`
 
@@ -105,14 +115,17 @@ The automated suite does not currently verify:
 - live streaming behavior across real servers or every adapter failure mode (the loopback fixture
   checks only the local adapter protocol); run-specific llama.cpp and Ollama integration behavior
   still needs validation against supported real server versions
-- all HTTP routes and status codes (the suite covers representative security, validation, and cancel cases)
-- browser rendering and user interactions (including the new comparison warning and diagnostic display)
-- cancellation responsiveness during every model request or every phase, and corrupted resume-state recovery
+- all HTTP status codes and malformed request combinations (route protections and key size/traversal
+  boundaries are covered; exhaustive protocol fuzzing is not)
+- real browser rendering and user interactions (a static regression check guards against `innerHTML`;
+  it does not replace browser execution)
+- cancellation responsiveness during every model request and concurrent lifecycle behavior beyond the
+  tested start/resume/cancel serialization paths
 - full retry coverage and all evaluator edge cases
 - accuracy of real-server performance metrics or concurrency behavior beyond the reported sample
 - output report contents beyond the newly asserted representative PDF/CSV/SVG fields
-- Docker isolation or adversarial generated code
-- cross-platform behavior
+- live Docker isolation or adversarial generated code
+- abnormal Windows process termination and cross-platform behavior
 - saved-history interactions, keyboard chart navigation, or live model-server compatibility
 
 Accordingly, a passing suite shows that the covered core paths still behave as expected. It does not

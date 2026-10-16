@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import ctypes
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,9 @@ class LlamaServerManagerTests(unittest.TestCase):
         with patch("backend.llama_server.sys.platform", "win32"), \
                 patch("backend.llama_server.LlamaServerManager._ensure_port_available"), \
                 patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=True), \
+                patch.object(self.manager, "_assign_kill_on_close_job",
+                             return_value="job-handle"), \
+                patch.object(self.manager, "_close_job_object") as close_job, \
                 patch("backend.llama_server.subprocess.Popen", return_value=process) as popen:
             status = self.manager.start(
                 "path", str(self.executable), None, str(self.model), "65536", 24)
@@ -46,6 +50,7 @@ class LlamaServerManagerTests(unittest.TestCase):
         self.assertEqual(stopped["state"], "stopped")
         process.terminate.assert_called_once()
         process.wait.assert_called()
+        close_job.assert_called_once_with("job-handle")
 
     def test_path_validation_rejects_non_server_exe_and_non_gguf_model(self):
         wrong_exe = self.root / "other.exe"
@@ -79,6 +84,33 @@ class LlamaServerManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.status()["state"], "error")
         self.assertIsNone(self.manager.managed_launch(f"http://{SERVER_HOST}:{SERVER_PORT}/v1"))
         process.terminate.assert_called_once()
+
+    def test_unexpected_exit_closes_owned_output_and_job_resources(self):
+        process = MagicMock()
+        process.poll.return_value = 1
+        self.manager._process = process
+        self.manager._job_handle = "job-handle"
+        with patch.object(self.manager, "_close_job_object") as close_job:
+            status = self.manager.status()
+        self.assertEqual(status["state"], "stopped")
+        process.terminate.assert_not_called()
+        process.stdout.close.assert_called_once()
+        close_job.assert_called_once_with("job-handle")
+
+    def test_windows_job_object_uses_kill_on_close_for_owned_process(self):
+        process = MagicMock()
+        process._handle = 1234
+        kernel32 = MagicMock()
+        kernel32.CreateJobObjectW.return_value = ctypes.c_void_p(5678)
+        kernel32.SetInformationJobObject.return_value = 1
+        kernel32.AssignProcessToJobObject.return_value = 1
+        with patch.object(ctypes, "WinDLL", return_value=kernel32, create=True):
+            handle = self.manager._assign_kill_on_close_job(process)
+        self.assertEqual(handle.value, 5678)
+        job_call = kernel32.SetInformationJobObject.call_args.args
+        self.assertEqual(job_call[1], 9)
+        self.assertEqual(ctypes.string_at(job_call[2], job_call[3])[16:20], b"\x00\x20\x00\x00")
+        self.assertEqual(kernel32.AssignProcessToJobObject.call_args.args[1].value, 1234)
 
     def test_winget_source_launches_existing_package_executable(self):
         process = MagicMock()

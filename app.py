@@ -75,7 +75,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
                 self.send_error(400, "Invalid Content-Length")
                 return False
-            if int(raw_size) > MAX_REQUEST_SIZE:
+            if len(raw_size) > len(str(MAX_REQUEST_SIZE)) or int(raw_size) > MAX_REQUEST_SIZE:
                 self.close_connection = True
                 self.send_error(413, "Request body too large")
                 return False

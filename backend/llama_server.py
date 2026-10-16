@@ -366,17 +366,23 @@ class LlamaServerManager:
             output_thread.join(timeout=2)
         if process.stdout is not None and (output_thread is None or not output_thread.is_alive()):
             process.stdout.close()
-        if job_handle is not None and hasattr(ctypes, "WinDLL"):
-            try:
-                from ctypes import wintypes
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-                kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-                kernel32.CloseHandle(job_handle)
-            except OSError:
-                pass
+        if job_handle is not None:
+            self._close_job_object(job_handle)
         with self._lock:
             if self._output_thread is output_thread:
                 self._output_thread = None
+
+    @staticmethod
+    def _close_job_object(job_handle):
+        if not hasattr(ctypes, "WinDLL"):
+            return
+        try:
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle(job_handle)
+        except OSError:
+            pass
 
     def _drain_output(self, process):
         if process.stdout is None:
