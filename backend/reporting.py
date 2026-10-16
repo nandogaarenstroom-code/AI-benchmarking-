@@ -25,6 +25,7 @@ def write_pdf(path, result):
     passed = sum(test.get("status") == "PASS" for test in tests)
     failed = sum(test.get("status") == "FAILED" for test in tests)
     not_run = sum(test.get("status") == "NOT RUN" for test in tests)
+    not_run_by_code = result.get("summary", {}).get("not_run_by_code", {})
     score = lambda key: (f"{result['scores'][key]}/100"
                          if result["scores"].get(key) is not None else "Not available")
     lines = ["LOCAL AI BENCHMARK", f"Model: {result['model']['name']}",
@@ -34,6 +35,9 @@ def write_pdf(path, result):
              f"Task set / evaluator: {result.get('task_set_version', 'unknown')} / "
              f"{result.get('evaluator_version', 'unknown')}",
              f"Tests: {passed} passed, {failed} failed, {not_run} not run",
+             "Not-run reasons: " +
+             (", ".join(f"{code}={count}" for code, count in sorted(not_run_by_code.items()))
+              if not_run_by_code else "none recorded"),
              "Difficulty tiers are not empirically calibrated.",
              "Pilot coverage: constraint reasoning, inventory code, incident handoff.",
              "", "Methodology: deterministic generated tasks with documented rule-based checks.",
