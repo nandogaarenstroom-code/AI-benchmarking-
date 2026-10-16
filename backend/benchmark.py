@@ -892,10 +892,14 @@ class BenchmarkManager:
         filename = os.path.basename(filename)
         try:
             root = self.root.resolve()
+            with os.scandir(root) as entries:
+                entry = next((item for item in entries if item.name == filename), None)
+            if entry is None or not entry.is_file(follow_symlinks=False):
+                return None
             if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
                 directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
                 try:
-                    fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                    fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
                 finally:
                     os.close(directory_fd)
                 try:
@@ -907,7 +911,7 @@ class BenchmarkManager:
                 finally:
                     if fd >= 0:
                         os.close(fd)
-            path = self.root / filename
+            path = Path(entry.path)
             if path.is_symlink() or path.resolve().parent != root or not path.is_file():
                 return None
             return path.read_bytes()
