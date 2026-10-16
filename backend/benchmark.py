@@ -4,10 +4,13 @@ from __future__ import annotations
 import csv
 import copy
 import hashlib
+import hmac
 import itertools
 import json
 import math
 import random
+import secrets
+import stat
 import statistics
 import time
 import uuid
@@ -730,7 +733,7 @@ def _test(category, i, rng, difficulty=None):
 def make_tests(profile, seed):
     rng = random.Random(seed)
     count = COUNTS.get(profile.upper(), COUNTS["STANDARD"])
-    tests, seen = [], set()
+    tests, seen, fingerprints = [], set(), set()
     while len(tests) < count:
         index = len(tests)
         category = CATEGORIES[index % len(CATEGORIES)]
@@ -751,6 +754,9 @@ def make_tests(profile, seed):
         fingerprint = hashlib.sha256(json.dumps(
             fingerprint_data, sort_keys=True, ensure_ascii=False,
             separators=(",", ":")).encode("utf-8")).hexdigest()
+        if fingerprint in fingerprints:
+            raise ValueError("duplicate generated test fingerprint")
+        fingerprints.add(fingerprint)
         test["item_fingerprint"] = fingerprint
         category_key = test["category"].lower().replace(" ", "-")
         test["item_instance_id"] = f"{category_key}@{fingerprint}"
@@ -783,6 +789,8 @@ def make_context_tests(seed, max_context=131072):
 
 
 class BenchmarkManager:
+    _state_key_lock = threading.Lock()
+
     def __init__(self, root):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.state_file = self.root / "current.json"; self.running = False
@@ -792,7 +800,7 @@ class BenchmarkManager:
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
             "progress": 0, "total": 0, "passed": 0, "failed": 0,
-            "result_directory": str(self.root.resolve()),
+            "result_directory": self.root.name,
         }
 
     def status(self):
@@ -867,35 +875,179 @@ class BenchmarkManager:
                 "best_overall": max(comparable, key=lambda x: x["overall"])["id"]
                 if comparable else None}
 
-    def resume(self):
-        if not self.state_file.exists(): return False
-        try:
-            state = json.loads(self.state_file.read_text())
-        except (OSError, json.JSONDecodeError):
+    def _state_key(self, create=False):
+        key_path = self.root / ".checkpoint.key"
+        with self._state_key_lock:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(key_path, flags)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                try:
+                    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    fd = os.open(key_path, flags)
+                else:
+                    key = secrets.token_bytes(32)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(key)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    return key
+            try:
+                key_stat = os.fstat(fd)
+                if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_size != 32:
+                    return None
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    key = stream.read(33)
+                    return key if len(key) == 32 else None
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+
+    def _checkpoint_signature(self, state, key):
+        encoded = json.dumps(state, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _valid_checkpoint_outcome(item):
+        if not isinstance(item, dict):
             return False
+        status, passed, score = item.get("status"), item.get("passed"), item.get("score")
+        if status == "NOT RUN":
+            return passed is None and score is None
+        if status not in ("PASS", "FAILED") or passed is not (status == "PASS"):
+            return False
+        return (isinstance(score, (int, float)) and not isinstance(score, bool) and
+                math.isfinite(score) and 0 <= score <= 10)
+
+    def _validate_checkpoint(self, state):
+        if not isinstance(state, dict):
+            raise ValueError("checkpoint must be an object")
         if (state.get("task_set_version") != TASK_SET_VERSION or
                 state.get("evaluator_version") != EVALUATOR_VERSION):
-            self._update_status(
-                phase="Saved run is incompatible",
-                activity="Task or evaluator version changed. Start a new run to avoid mixing results.")
-            return False
-        return self.start(state)
+            raise ValueError("checkpoint task or evaluator version changed")
+        profile, seed = state.get("profile"), state.get("seed")
+        if not isinstance(profile, str) or profile.upper() not in COUNTS:
+            raise ValueError("checkpoint profile is invalid")
+        if (not isinstance(seed, int) or isinstance(seed, bool) or
+                not 0 <= seed <= 2_147_483_647):
+            raise ValueError("checkpoint seed is invalid")
+        if state.get("resume_phase") not in (
+                "warmup", "primary", "fresh_context", "accumulated_context", "performance"):
+            raise ValueError("checkpoint phase is invalid")
+        if not isinstance(state.get("model"), dict):
+            raise ValueError("checkpoint model is invalid")
+        resolve_model(state["model"])
+        options = state.get("generation_options")
+        if (not isinstance(options, dict) or
+                normalize_generation_options(options) != options):
+            raise ValueError("checkpoint generation settings are invalid")
+        repeats = state.get("repeat_runs")
+        if not isinstance(repeats, int) or isinstance(repeats, bool) or not 1 <= repeats <= 5:
+            raise ValueError("checkpoint repeat count is invalid")
+
+        tests = make_tests(profile, seed)
+        if len({test["item_fingerprint"] for test in tests}) != len(tests):
+            raise ValueError("generated test fingerprints are not unique")
+        saved_tests = state.get("tests")
+        if (not isinstance(saved_tests, list) or
+                [(test.get("id"), test.get("item_fingerprint")) for test in saved_tests
+                 if isinstance(test, dict)] !=
+                [(test["id"], test["item_fingerprint"]) for test in tests] or
+                len(saved_tests) != len(tests)):
+            raise ValueError("checkpoint tests do not match the generated suite")
+
+        generated = {test["id"]: test for test in tests}
+        completed = state.get("completed_tests")
+        if not isinstance(completed, list) or len(completed) > len(tests):
+            raise ValueError("checkpoint completed tests are invalid")
+        completed_ids = set()
+        for item in completed:
+            if (not isinstance(item, dict) or item.get("id") not in generated or
+                    item.get("id") in completed_ids or
+                    item.get("item_fingerprint") != generated[item["id"]]["item_fingerprint"] or
+                    not self._valid_checkpoint_outcome(item)):
+                raise ValueError("checkpoint contains an invalid completed test")
+            completed_ids.add(item["id"])
+            replicates = item.get("replicates")
+            if repeats == 1:
+                if replicates:
+                    raise ValueError("checkpoint has unexpected repeats")
+            elif (not isinstance(replicates, list) or len(replicates) != repeats or
+                  any(not self._valid_checkpoint_outcome(entry) for entry in replicates)):
+                raise ValueError("checkpoint repeats are invalid")
+
+        model = resolve_model(state["model"])
+        advertised = model.get("context_length", 131072)
+        try:
+            max_context = min(int(advertised), 262144)
+        except (TypeError, ValueError, OverflowError):
+            max_context = 131072
+        if model.get("demo"):
+            max_context = min(max_context, 32768)
+        context_tests = {test["id"]: test for test in make_context_tests(seed, max_context)}
+        for field in ("context_results", "accumulated_results"):
+            records = state.get(field)
+            if not isinstance(records, list) or len(records) > len(context_tests):
+                raise ValueError(f"checkpoint {field} are invalid")
+            seen = set()
+            for item in records:
+                expected = context_tests.get(item.get("id")) if isinstance(item, dict) else None
+                if (expected is None or item["id"] in seen or
+                        item.get("prompt") != expected["prompt"] or
+                        item.get("expected_answer") != expected["expected_answer"] or
+                        item.get("context_size") != expected["context_size"] or
+                        not self._valid_checkpoint_outcome(item)):
+                    raise ValueError(f"checkpoint {field} contain an invalid result")
+                seen.add(item["id"])
+        for field, limit in (("failures", len(tests)), ("not_run", len(tests)),
+                             ("warmup_errors", 3)):
+            if not isinstance(state.get(field), list) or len(state[field]) > limit:
+                raise ValueError(f"checkpoint {field} are invalid")
+
+    def resume(self):
+        with self._run_lock:
+            if self.running or not self.state_file.exists():
+                return False
+            try:
+                state = json.loads(self.state_file.read_text())
+                if not isinstance(state, dict):
+                    raise ValueError("checkpoint must be an object")
+                signature = state.pop("_integrity", None)
+                key = self._state_key()
+                if (not isinstance(signature, str) or key is None or
+                        not hmac.compare_digest(signature, self._checkpoint_signature(state, key))):
+                    raise ValueError("checkpoint integrity check failed")
+                self._validate_checkpoint(state)
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                self._update_status(
+                    phase="Saved run rejected",
+                    activity="The saved checkpoint is invalid or has been modified; start a new run.")
+                return False
+            return self._start_locked(state)
 
     def start(self, payload):
         with self._run_lock:
-            if self.running:
-                return False
-            self.running = True
-            self.cancel_requested.clear()
-            self._update_status(state="running", phase="Starting benchmark",
-                                activity="Preparing the local model and test suite.",
-                                progress=0, total=1)
-            worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
-            try:
-                worker.start()
-            except RuntimeError:
-                self.running = False
-                raise
+            return self._start_locked(payload)
+
+    def _start_locked(self, payload):
+        if self.running:
+            return False
+        self.running = True
+        self.cancel_requested.clear()
+        self._update_status(state="running", phase="Starting benchmark",
+                            activity="Preparing the local model and test suite.",
+                            progress=0, total=1)
+        worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
+        try:
+            worker.start()
+        except RuntimeError:
+            self.running = False
+            raise
         return True
 
     def run(self, payload):
@@ -910,18 +1062,20 @@ class BenchmarkManager:
         try:
             self._run(payload)
             return True
-        except Exception as exc:
-            self._update_status(state="error", error=str(exc)[:500])
+        except Exception:
+            self._update_status(state="error",
+                                error="The benchmark failed; internal details were not exposed.")
             return False
         finally:
             with self._run_lock:
                 self.running = False
 
     def cancel(self):
-        if not self.running:
-            return False
-        self.cancel_requested.set()
-        return True
+        with self._run_lock:
+            if not self.running or self._status.get("state") != "running":
+                return False
+            self.cancel_requested.set()
+            return True
 
     def _answer(self, model, test, history=None, generation_options=None):
         if model.get("demo"):
@@ -1362,12 +1516,12 @@ class BenchmarkManager:
             },
         }
         self._update_status(phase="Saving result files",
-                            activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
+                            activity="Writing JSON, CSV, PDF, and SVG to the results directory.",
                             total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._update_status(state="complete", phase="Benchmark complete",
                             activity="All result files are ready.", progress=1, total=1,
-                            result_id=result["id"], result_directory=str(self.root.resolve()),
+                            result_id=result["id"], result_directory=self.root.name,
                             quality=quality["overall"], performance=perf["score"],
                             overall=result["scores"]["overall"])
 
@@ -1392,10 +1546,16 @@ class BenchmarkManager:
                 if fresh_score is not None and accumulated_score is not None else None}
 
     def _atomic_state_write(self, state):
+        signed_state = dict(state)
+        signed_state.pop("_integrity", None)
+        key = self._state_key(create=True)
+        if key is None:
+            raise OSError("could not load checkpoint signing key")
+        signed_state["_integrity"] = self._checkpoint_signature(signed_state, key)
         fd, name = tempfile.mkstemp(prefix="benchmark-", suffix=".tmp", dir=self.root)
         try:
             with os.fdopen(fd, "w") as stream:
-                json.dump(state, stream)
+                json.dump(signed_state, stream, allow_nan=False)
                 stream.flush()
                 os.fsync(stream.fileno())
             for attempt in range(5):

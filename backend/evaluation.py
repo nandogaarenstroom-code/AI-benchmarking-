@@ -48,6 +48,10 @@ def _normalized_value(value):
     return " ".join(re.findall(r"\w+", str(value).casefold(), flags=re.UNICODE))
 
 
+def _reject_json_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def _schedule_is_valid(route, items, constraints):
     if (not isinstance(route, list) or len(route) != len(items) or
             any(not isinstance(item, str) for item in route) or
@@ -145,7 +149,7 @@ def evaluate_with_details(test, answer):
                        if passed else "The complete response did not match any reviewed acceptable answer.")
     elif method == "json_schema":
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             required_types = test.get("required_types", {})
             if not isinstance(required_types, dict):
                 explanation = "The required type rules are invalid; the evaluator rejected this test."
@@ -173,7 +177,7 @@ def evaluate_with_details(test, answer):
                         f"{key} should be {kind}" for key, kind in wrong_types) + "."
                 else:
                     explanation = "Valid JSON object contains all required keys with the expected types."
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             explanation = "The response is not valid JSON."
     elif method == "contains_all":
         missing = [str(item) for item in test.get("required_terms", [])
@@ -192,9 +196,9 @@ def evaluate_with_details(test, answer):
         items = test.get("schedule_items", [])
         constraints = test.get("schedule_constraints", [])
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             valid_object = isinstance(value, dict)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             value, valid_object = {}, False
         possible = value.get("possible") if valid_object else None
         route = value.get("route") if valid_object else None
@@ -226,9 +230,9 @@ def evaluate_with_details(test, answer):
     elif method == "fact_fields":
         expected_fields = test.get("expected_fields", {})
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             valid_object = isinstance(value, dict)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             value, valid_object = {}, False
         checks = [
             {"name": "JSON object", "passed": valid_object},
