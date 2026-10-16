@@ -1152,7 +1152,8 @@ class BenchmarkManager:
                         {"seed": (generation_options["seed"] + index) % 2147483648,
                          "score": entry["score"], "passed": entry["passed"],
                          "status": entry["status"], "answer": entry["answer"],
-                         "evaluation": entry["evaluation"], "attempts": entry["attempts"]}
+                         "evaluation": entry["evaluation"], "error": entry.get("error"),
+                         "diagnostic": entry.get("diagnostic"), "attempts": entry["attempts"]}
                         for index, entry in enumerate(repetitions)]}
                 else:
                     item = {
@@ -1170,6 +1171,7 @@ class BenchmarkManager:
                          "score": entry["score"], "passed": entry["passed"],
                          "status": entry["status"], "latency_s": entry["latency_s"],
                          "answer": entry["answer"], "evaluation": entry["evaluation"],
+                         "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
                          "attempts": entry["attempts"]}
                         for index, entry in enumerate(repetitions)
                     ],
@@ -1337,16 +1339,17 @@ class BenchmarkManager:
                   "notes": ["Controlled benchmark results, not universal real-world guarantees.",
                             "Output-token counts are estimates; bootstrap resamples are not independent model runs."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
+        not_run_by_code = {}
+        for item in completed:
+            for outcome in item.get("replicates") or [item]:
+                if outcome["status"] == "NOT RUN" and outcome.get("error"):
+                    code = outcome["error"]
+                    not_run_by_code[code] = not_run_by_code.get(code, 0) + 1
         result["summary"] = {
             "passed": sum(item["status"] == "PASS" for item in completed),
             "failed": sum(item["status"] == "FAILED" for item in completed),
             "not_run": sum(item["status"] == "NOT RUN" for item in completed),
-            "not_run_by_code": {
-                code: sum(item["status"] == "NOT RUN" and item.get("error") == code
-                          for item in completed)
-                for code in sorted({item.get("error") for item in completed
-                                    if item["status"] == "NOT RUN" and item.get("error")})
-            },
+            "not_run_by_code": dict(sorted(not_run_by_code.items())),
             "by_difficulty": {
                 level: {
                     "passed": sum(item["difficulty"] == level and item["status"] == "PASS"

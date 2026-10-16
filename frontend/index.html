@@ -634,6 +634,19 @@ function renderTestResults(result){
       addTestField(replicateDetails,'Answer',replicate.answer,true);
       if(replicate.evaluation?.explanation)
         addTestField(replicateDetails,'Check result',replicate.evaluation.explanation);
+      if(replicate.error)addTestField(replicateDetails,'Failure code',replicate.error);
+      if(replicate.diagnostic)addTestField(replicateDetails,'Operational diagnostic',replicate.diagnostic);
+      (replicate.attempts||[]).forEach(attempt=>{
+        const attemptDetails=document.createElement('details'),attemptHeading=document.createElement('summary');
+        attemptHeading.textContent=`Attempt ${attempt.attempt}: ${attempt.status}`;
+        attemptDetails.append(attemptHeading);
+        if(attempt.answer!==undefined)addTestField(attemptDetails,'Answer',attempt.answer,true);
+        if(attempt.answer_truncated)addTestField(attemptDetails,'Note','Attempt answer truncated to 4,000 characters.');
+        if(attempt.error)addTestField(attemptDetails,'Error code',attempt.error);
+        if(attempt.diagnostic)addTestField(attemptDetails,'Operational diagnostic',attempt.diagnostic);
+        if(attempt.evaluation?.explanation)addTestField(attemptDetails,'Check result',attempt.evaluation.explanation);
+        replicateDetails.append(attemptDetails);
+      });
       record.append(replicateDetails);
     });
     container.append(record);

@@ -743,6 +743,43 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["uncertainty"]["method"], "observed repeated runs")
             self.assertEqual(result["uncertainty"]["bootstrap_resample_scores"], [])
 
+    def test_later_repeat_adapter_failure_is_summarized_and_retained(self):
+        test = {"id": "sample", "category": "Mathematics", "difficulty": "Easy",
+                "prompt": "Return 42", "evaluation_method": "exact_any",
+                "acceptable_answers": ["42"], "expected_answer": "42"}
+        success = {
+            **test, "answer": "42", "evaluation": {"criteria": "exact", "explanation": "passed"},
+            "passed": True, "score": 10, "status": "PASS", "error": None, "diagnostic": None,
+            "latency_s": 0.1, "ttft_s": 0.1, "generation_s": 0.1,
+            "prompt_tokens": 2, "output_tokens": 1, "attempts": [],
+        }
+        failure = {
+            **test, "answer": "", "evaluation": {"criteria": "exact", "explanation": "not run"},
+            "passed": None, "score": None, "status": "NOT RUN", "error": "TIMEOUT",
+            "diagnostic": "The local model server timed out.",
+            "latency_s": 0, "ttft_s": 0, "generation_s": 0,
+            "prompt_tokens": 2, "output_tokens": 0,
+            "attempts": [{"attempt": 1, "status": "ERROR", "error": "TIMEOUT",
+                          "diagnostic": "The local model server timed out."}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            with patch("backend.benchmark.make_tests", return_value=[test]), \
+                    patch("backend.benchmark.make_context_tests", return_value=[]), \
+                    patch.object(manager, "_execute", side_effect=[success, failure]), \
+                    patch.object(manager, "_performance", return_value={"score": 0}), \
+                    patch.object(manager, "_write_outputs") as write_outputs:
+                manager.run({"profile": "QUICK", "repeat_runs": 2,
+                             "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
+                                       "endpoint": "local://demo", "demo": True}})
+
+        result = write_outputs.call_args.args[0]
+        replicate = result["tests"][0]["replicates"][1]
+        self.assertEqual(result["summary"]["not_run_by_code"], {"TIMEOUT": 1})
+        self.assertEqual(replicate["error"], "TIMEOUT")
+        self.assertEqual(replicate["diagnostic"], "The local model server timed out.")
+        self.assertEqual(replicate["attempts"][0]["error"], "TIMEOUT")
+
     def test_performance_metrics_use_sampled_generation_time_and_ttft(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
