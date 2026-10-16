@@ -889,6 +889,7 @@ class BenchmarkManager:
                     r"benchmark_[0-9]{8}_[0-9]{6}_[a-f0-9]{32}"
                     r"(?:\.json|\.csv|\.pdf|_quality\.svg)", filename) is None):
             return None
+        filename = os.path.basename(filename)
         try:
             root = self.root.resolve()
             if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
