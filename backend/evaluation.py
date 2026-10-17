@@ -17,7 +17,16 @@ DOCKER_PYTHON_IMAGE = (
 
 
 def code_evaluator_available():
-    return shutil.which("docker") is not None
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    try:
+        result = subprocess.run(
+            [docker, "image", "inspect", DOCKER_PYTHON_IMAGE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _number(text):

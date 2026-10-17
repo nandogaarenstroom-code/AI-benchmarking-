@@ -385,7 +385,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(evaluate(
                 {"evaluation_method": "code", "tests": ["assert add(1, 2) == 3"]},
                 "def add(a,b): return a+b"))
-        command = run.call_args_list[0].args[0]
+        command = run.call_args_list[1].args[0]
         self.assertIn("--network=none", command)
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--read-only", command)
@@ -562,6 +562,22 @@ class BenchmarkTests(unittest.TestCase):
                 {"evaluation_method": "code", "tests": ["assert True"]}, "print('not run')"))
         run.assert_not_called()
 
+    def test_code_evaluation_requires_pinned_image_and_available_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "coding-1", "category": "Coding", "prompt": "define f",
+                    "evaluation_method": "code", "tests": ["assert f() == 1"]}
+            with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=1)) as run:
+                result = manager._execute({"demo": False}, test)
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0],
+                         ["/usr/bin/docker", "image", "inspect", DOCKER_PYTHON_IMAGE])
+
     def test_unavailable_code_evaluator_is_reported_in_test_results(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
@@ -593,32 +609,36 @@ class BenchmarkTests(unittest.TestCase):
                 patch("backend.evaluation.subprocess.run") as run:
             self.assertFalse(evaluate({"evaluation_method": "code", "tests": ["x" * 2001]}, "pass"))
             self.assertFalse(evaluate({"evaluation_method": "code", "tests": "assert True"}, "pass"))
-        run.assert_not_called()
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(all(call.args[0][1:3] == ["image", "inspect"]
+                            for call in run.call_args_list))
 
     def test_docker_timeout_and_failure_force_remove_named_container(self):
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
                 patch("backend.evaluation.subprocess.run", side_effect=[
+                    CompletedProcess(args=[], returncode=0),
                     TimeoutExpired("docker", 3),
                     CompletedProcess(args=[], returncode=0),
                 ]) as run:
             self.assertFalse(evaluate(
                 {"evaluation_method": "code", "tests": ["assert True"]}, "pass"))
-        cleanup = run.call_args_list[1].args[0]
+        cleanup = run.call_args_list[2].args[0]
         self.assertEqual(cleanup[:3], ["/usr/bin/docker", "rm", "--force"])
         container_name = cleanup[3]
         self.assertTrue(container_name.startswith("ai-benchmark-evaluator-"))
-        launch = run.call_args_list[0].args[0]
+        launch = run.call_args_list[1].args[0]
         self.assertIn("--name", launch)
         self.assertEqual(launch[launch.index("--name") + 1], container_name)
 
         with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
                 patch("backend.evaluation.subprocess.run", side_effect=[
+                    CompletedProcess(args=[], returncode=0),
                     CompletedProcess(args=[], returncode=1),
                     CompletedProcess(args=[], returncode=0),
                 ]) as run:
             self.assertFalse(evaluate(
                 {"evaluation_method": "code", "tests": ["assert True"]}, "pass"))
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
 
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
@@ -986,6 +1006,15 @@ class BenchmarkTests(unittest.TestCase):
             payload = start.call_args.args[0]
             self.assertNotIn("_integrity", payload)
             self.assertEqual(payload["tests"], make_tests("QUICK", 12345))
+
+    def test_resume_accepts_accumulated_warmup_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self._write_valid_checkpoint(manager)
+            state = json.loads(manager.state_file.read_text())
+            state.pop("_integrity")
+            state["warmup_errors"] = [{"attempt": attempt} for attempt in range(6)]
+            manager._validate_checkpoint(state)
 
     def test_resume_rejects_signed_checkpoint_with_unknown_completed_test(self):
         with tempfile.TemporaryDirectory() as directory:

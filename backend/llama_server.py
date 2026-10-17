@@ -35,12 +35,16 @@ class LlamaServerManager:
         self._configuration = None
         self._output_lines = deque(maxlen=20)
         self._output_thread = None
+        self._output_process = None
         self._job_handle = None
+        self._job_process = None
         self._status = {"state": "stopped", "message": "No app-managed llama-server is running."}
 
     def status(self):
         exited_process = None
         with self._lock:
+            if self._status["state"] == "stopping":
+                return {**self._status}
             if self._process is not None and self._process.poll() is not None:
                 exited_process = self._process
                 self._status = {
@@ -86,9 +90,19 @@ class LlamaServerManager:
             if (self._status["state"] in ("starting", "stopping") or
                     (self._process is not None and self._process.poll() is None)):
                 raise LlamaServerConflict("An app-managed llama-server is already running.")
-            self._process = None
-            self._configuration = None
-            self._status = {"state": "starting", "message": "Preparing llama-server."}
+            previous_process = self._process
+            self._status = {
+                "state": "stopping" if previous_process is not None else "starting",
+                "message": ("Cleaning up the exited managed llama-server." if previous_process is not None
+                            else "Preparing llama-server."),
+            }
+        if previous_process is not None:
+            self._cleanup_owned_process(previous_process)
+            with self._lock:
+                if self._process is previous_process:
+                    self._process = None
+                    self._configuration = None
+                self._status = {"state": "starting", "message": "Preparing llama-server."}
 
         process = None
         try:
@@ -116,11 +130,13 @@ class LlamaServerManager:
             )
             with self._lock:
                 self._job_handle = self._assign_kill_on_close_job(process)
+                self._job_process = process
             with self._lock:
                 self._process = process
                 self._output_lines.clear()
                 self._output_thread = threading.Thread(
                     target=self._drain_output, args=(process,), daemon=True)
+                self._output_process = process
                 self._output_thread.start()
                 self._configuration = {
                     "source": "winget-installed" if source == "winget" else "path",
@@ -170,6 +186,8 @@ class LlamaServerManager:
 
     def stop(self):
         with self._lock:
+            if self._status["state"] == "stopping":
+                raise LlamaServerConflict("llama-server cleanup is already in progress.")
             process = self._process
             if process is None and self._status["state"] == "starting":
                 raise LlamaServerConflict("llama-server startup is still in progress.")
@@ -179,22 +197,22 @@ class LlamaServerManager:
                 self._status = {"state": "stopped", "message": "No app-managed llama-server is running."}
                 return {**self._status}
             if process.poll() is not None:
-                self._process = None
-                self._configuration = None
-                self._status = {"state": "stopped", "message": "The managed llama-server exited."}
                 already_exited = True
+                self._status = {
+                    "state": "stopping", "message": "Cleaning up the exited managed llama-server."}
             else:
                 already_exited = False
                 self._status = {"state": "stopping", "message": "Stopping the app-managed llama-server."}
         self._cleanup_owned_process(process)
         with self._lock:
-            self._process = None
-            self._configuration = None
-            self._status = {
-                "state": "stopped",
-                "message": ("The managed llama-server exited." if already_exited else
-                            "The app-managed llama-server was stopped."),
-            }
+            if self._process is process:
+                self._process = None
+                self._configuration = None
+                self._status = {
+                    "state": "stopped",
+                    "message": ("The managed llama-server exited." if already_exited else
+                                "The app-managed llama-server was stopped."),
+                }
             return {**self._status}
 
     @staticmethod
@@ -359,18 +377,24 @@ class LlamaServerManager:
     def _cleanup_owned_process(self, process):
         self._stop_process(process)
         with self._lock:
-            output_thread = self._output_thread
-            job_handle = self._job_handle
-            self._job_handle = None
+            if self._output_process is process:
+                output_thread = self._output_thread
+                self._output_thread = None
+                self._output_process = None
+            else:
+                output_thread = None
+            if self._job_process is process:
+                job_handle = self._job_handle
+                self._job_handle = None
+                self._job_process = None
+            else:
+                job_handle = None
         if output_thread is not None and output_thread is not threading.current_thread():
             output_thread.join(timeout=2)
         if process.stdout is not None and (output_thread is None or not output_thread.is_alive()):
             process.stdout.close()
         if job_handle is not None:
             self._close_job_object(job_handle)
-        with self._lock:
-            if self._output_thread is output_thread:
-                self._output_thread = None
 
     @staticmethod
     def _close_job_object(job_handle):

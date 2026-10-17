@@ -1,11 +1,12 @@
 import tempfile
+import threading
 import unittest
 import ctypes
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.llama_server import (
-    LlamaServerError, LlamaServerManager, SERVER_HOST, SERVER_PORT,
+    LlamaServerConflict, LlamaServerError, LlamaServerManager, SERVER_HOST, SERVER_PORT,
 )
 
 
@@ -90,12 +91,58 @@ class LlamaServerManagerTests(unittest.TestCase):
         process.poll.return_value = 1
         self.manager._process = process
         self.manager._job_handle = "job-handle"
+        self.manager._job_process = process
         with patch.object(self.manager, "_close_job_object") as close_job:
             status = self.manager.status()
         self.assertEqual(status["state"], "stopped")
         process.terminate.assert_not_called()
         process.stdout.close.assert_called_once()
         close_job.assert_called_once_with("job-handle")
+
+    def test_start_cleans_exited_process_before_installing_replacement_job(self):
+        old_process = MagicMock()
+        old_process.poll.return_value = 1
+        new_process = MagicMock()
+        new_process.poll.return_value = None
+        self.manager._process = old_process
+        self.manager._job_handle = "old-job"
+        self.manager._job_process = old_process
+        with patch("backend.llama_server.sys.platform", "win32"), \
+                patch("backend.llama_server.LlamaServerManager._ensure_port_available"), \
+                patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=True), \
+                patch.object(self.manager, "_assign_kill_on_close_job", return_value="new-job"), \
+                patch.object(self.manager, "_close_job_object") as close_job, \
+                patch("backend.llama_server.subprocess.Popen", return_value=new_process):
+            self.manager.start("path", str(self.executable), None, str(self.model), 4096, 0)
+            self.assertIs(self.manager._job_process, new_process)
+            self.assertEqual(self.manager._job_handle, "new-job")
+            self.manager.stop()
+        close_job.assert_has_calls([unittest.mock.call("old-job"), unittest.mock.call("new-job")])
+        old_process.stdout.close.assert_called_once()
+
+    def test_start_is_blocked_while_stop_cleans_exited_process(self):
+        process = MagicMock()
+        process.poll.return_value = 1
+        self.manager._process = process
+        entered_cleanup = threading.Event()
+        finish_cleanup = threading.Event()
+
+        def wait_for_cleanup(_process):
+            entered_cleanup.set()
+            finish_cleanup.wait(timeout=2)
+
+        with patch("backend.llama_server.sys.platform", "win32"), \
+                patch.object(self.manager, "_cleanup_owned_process", side_effect=wait_for_cleanup):
+            stopper = threading.Thread(target=self.manager.stop)
+            stopper.start()
+            self.assertTrue(entered_cleanup.wait(timeout=2))
+            with self.assertRaisesRegex(LlamaServerConflict, "already running"):
+                self.manager.start("path", str(self.executable), None, str(self.model), 4096, 0)
+            self.assertIs(self.manager._process, process)
+            finish_cleanup.set()
+            stopper.join(timeout=2)
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(self.manager.status()["state"], "stopped")
 
     def test_windows_job_object_uses_kill_on_close_for_owned_process(self):
         process = MagicMock()

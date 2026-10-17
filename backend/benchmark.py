@@ -1097,10 +1097,11 @@ class BenchmarkManager:
                         not self._valid_checkpoint_outcome(item)):
                     raise ValueError(f"checkpoint {field} contain an invalid result")
                 seen.add(item["id"])
-        for field, limit in (("failures", len(tests)), ("not_run", len(tests)),
-                             ("warmup_errors", 3)):
+        for field, limit in (("failures", len(tests)), ("not_run", len(tests))):
             if not isinstance(state.get(field), list) or len(state[field]) > limit:
                 raise ValueError(f"checkpoint {field} are invalid")
+        if not isinstance(state.get("warmup_errors"), list):
+            raise ValueError("checkpoint warmup_errors are invalid")
 
     def resume(self):
         with self._run_lock:
