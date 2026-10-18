@@ -201,7 +201,8 @@ class LlamaServerManager:
         reader = threading.Thread(target=read_output, daemon=True)
         reader.start()
         reader.join(HELP_TIMEOUT_SECONDS)
-        if reader.is_alive() or overflow.is_set():
+        timed_out = reader.is_alive()
+        if timed_out or overflow.is_set():
             process.terminate()
             try:
                 process.wait(timeout=1)
@@ -220,6 +221,8 @@ class LlamaServerManager:
                     process.kill()
                     process.wait(timeout=1)
         if reader.is_alive():
+            raise LlamaServerError("Reading llama-server --help exceeded the 10 second limit.")
+        if timed_out:
             raise LlamaServerError("Reading llama-server --help exceeded the 10 second limit.")
         if overflow.is_set():
             collected = collected[:HELP_OUTPUT_LIMIT_BYTES]

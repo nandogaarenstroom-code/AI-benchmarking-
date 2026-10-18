@@ -949,6 +949,7 @@ function launchOptions(){
 }
 async function readLaunchCapabilities(){
   const status=$('launch-capability-status');
+  launchInputIds.forEach(id=>{if($(id))$(id).disabled=true});
   status.textContent='Validating the selected llama-server executable…';
   try{
     const selection=await fetch('/api/llama-server/select',{

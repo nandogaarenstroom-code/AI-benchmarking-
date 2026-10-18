@@ -96,6 +96,25 @@ class LlamaServerManagerTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0], [str(self.executable), "--help"])
         self.assertFalse(popen.call_args.kwargs["shell"])
 
+    def test_help_command_terminates_after_timeout(self):
+        finished = threading.Event()
+
+        class SlowOutput:
+            def read(self, _):
+                finished.wait(timeout=1)
+                return b""
+
+        process = MagicMock()
+        process.stdout = SlowOutput()
+        process.poll.return_value = None
+        process.terminate.side_effect = finished.set
+        with patch("backend.llama_server.HELP_TIMEOUT_SECONDS", 0.001), \
+                patch("backend.llama_server.subprocess.Popen", return_value=process):
+            with self.assertRaisesRegex(LlamaServerError, "10 second limit"):
+                LlamaServerManager._read_help(self.executable)
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once()
+
     def test_boolean_flash_attention_rejects_unavailable_modes(self):
         flags = {"--flash-attn": {"takes_value": False, "choices": []}}
         for mode in ("off", "auto"):
@@ -184,6 +203,16 @@ class LlamaServerManagerTests(unittest.TestCase):
                     "path", str(self.executable), None, str(self.model), 4096, 0)
         self.assertEqual(len(raised.exception.output_lines), 20)
         self.assertTrue(all("<local-path>" in line for line in raised.exception.output_lines))
+
+    def test_startup_log_values_are_recorded_as_unverified_parses(self):
+        self.manager._configuration = {"argv": ["--model", str(self.model.resolve())]}
+        self.manager._output_lines.extend([
+            "build: b1234", "llama_model_load: offloaded 20/32 layers to GPU",
+        ])
+        self.assertEqual(self.manager._parsed_log_values(), {
+            "build": "build: b1234",
+            "offloaded_layers": {"value": 20, "total": 32},
+        })
 
     def test_configurable_port_is_bounded_and_recorded(self):
         with patch("backend.llama_server.sys.platform", "win32"), \
