@@ -259,6 +259,67 @@ def _get(url, timeout=0.7):
         return None
 
 
+def _post_json(url, payload, timeout=0.7):
+    try:
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        with _open(request, timeout=timeout) as response:
+            body = response.read(MAX_DISCOVERY_RESPONSE_BYTES + 1)
+            if len(body) > MAX_DISCOVERY_RESPONSE_BYTES:
+                return None
+            result = json.loads(body)
+            return result if isinstance(result, dict) else None
+    except Exception:
+        return None
+
+
+def _context_integer(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 1:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return parsed
+
+
+def _ollama_context_details(model_name):
+    shown = _post_json("http://localhost:11434/api/show",
+                       {"model": model_name, "name": model_name})
+    model_info = shown.get("model_info") if isinstance(shown, dict) else None
+    context_train = None
+    if isinstance(model_info, dict):
+        for key, value in model_info.items():
+            if key == "context_length" or (
+                    isinstance(key, str) and key.endswith(".context_length")):
+                context_train = _context_integer(value)
+                if context_train is not None:
+                    break
+    parameters = shown.get("parameters") if isinstance(shown, dict) else None
+    context_configured = None
+    if isinstance(parameters, dict):
+        context_configured = _context_integer(parameters.get("num_ctx"))
+    elif isinstance(parameters, str):
+        for line in parameters.splitlines():
+            parts = line.strip().split()
+            if parts and parts[0].upper() == "PARAMETER":
+                parts = parts[1:]
+            if len(parts) >= 2 and parts[0].lower() == "num_ctx":
+                context_configured = _context_integer(parts[1])
+                if context_configured is not None:
+                    break
+    return {
+        "context_train": context_train if context_train is not None else "Unknown",
+        "context_configured": context_configured if context_configured is not None else "Unknown",
+        "context_default_assumed": "Unknown",
+    }
+
+
 def _llama_runtime_details(endpoint):
     base_endpoint = endpoint[:-3] if endpoint.endswith("/v1") else endpoint
     props = _get(base_endpoint + "/props")
@@ -360,6 +421,8 @@ def resolve_model(requested):
     for model in discover_models():
         if (model.get("id"), model.get("backend"), model.get("endpoint")) == (
                 model_id, backend, endpoint):
+            if model.get("backend") == "Ollama":
+                model.update(_ollama_context_details(model_id))
             return model
     raise ValueError("model endpoint is not an available local model")
 
@@ -370,6 +433,9 @@ def model_info(model):
         "name": model.get("name", "Unknown"), "family": "Unknown",
         "parameters": "Unknown", "quantization": "Unknown", "architecture": "Unknown",
         "context_length": model.get("context_length", "Unknown"), "vocabulary_size": "Unknown",
+        "context_train": model.get("context_train", "Unknown"),
+        "context_configured": model.get("context_configured", "Unknown"),
+        "context_default_assumed": model.get("context_default_assumed", "Unknown"),
         "file_size": model.get("size", "Unknown"), "backend": model.get("backend", "Unknown"),
         "endpoint": model.get("endpoint", "Unknown"), "backend_version": model.get("backend_version", "Unknown"),
         "gpu_offload": model.get("gpu_offload", "Unknown"),

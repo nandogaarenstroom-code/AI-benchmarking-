@@ -153,6 +153,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/models":
             return self._json({"models": discover_models(),
                                "parameter_capabilities": REQUEST_CAPABILITY_MATRIX})
+        if path == "/api/model-info":
+            query = parse_qs(urlparse(self.path).query)
+            requested = {key: query.get(key, [""])[0]
+                         for key in ("id", "backend", "endpoint")}
+            try:
+                return self._json({"model": resolve_model(requested)})
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
         if path == "/api/hardware":
             hardware = hardware_info()
             return self._json({"hardware": hardware, "recommendations": recommend_settings(hardware)})

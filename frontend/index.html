@@ -192,6 +192,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
       <input id="llama-model" type="text" placeholder="C:\models\model.gguf" autocomplete="off">
     </label>
   </div>
+  <p id="context-hint" class="muted"></p>
   <p class="muted">WinGet does not launch apps itself; this option locates <code>llama-server.exe</code> inside an already-installed WinGet package.
     Enter that package's ID (including a custom-fork package ID).
     High context sizes or GPU offload settings can exceed available memory. This app-managed server uses port 8080.</p>
@@ -373,6 +374,22 @@ async function load(){
         card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);refreshParameterStates();
         $('run').disabled=false;$('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';
         $('discovery-status').textContent=model.demo?'Demo results test the app only; they are not model measurements.':'Selected local model: '+model.name;
+        $('context-hint').textContent='';
+        if(model.backend==='Ollama'){
+          const params=new URLSearchParams({id:model.id,backend:model.backend,endpoint:model.endpoint});
+          fetch('/api/model-info?'+params.toString()).then(response=>response.ok?response.json():null)
+            .then(data=>{
+              if(!data||selected!==model)return;
+              selected={...model,...data.model};
+              const configured=data.model.context_configured;
+              if(!dirtyFields.has('num_ctx')&&configured!=='Unknown')
+                $('runtime-context').value=configured;
+              $('context-hint').textContent=configured==='Unknown'
+                ?'Ollama context window is unknown. Set Ollama context tokens to run context probes.'
+                :`Ollama context override prefilled from configured num_ctx (${configured}); training context is an upper bound.`;
+              refreshParameterStates();
+            }).catch(()=>{$('context-hint').textContent='Could not load Ollama context metadata; set the context field to enable context probes.'});
+        }
       };
       card.onclick=choose;card.onkeydown=event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();choose()}};
       container.append(card);

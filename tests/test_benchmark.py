@@ -16,7 +16,7 @@ from backend.benchmark import (
 )
 from backend.discovery import (
     AdapterError, _get, _llama_runtime_details, ask_model, discover_models,
-    model_info, normalize_generation_options, resolve_model,
+    model_info, normalize_generation_options, resolve_model, _ollama_context_details,
 )
 from backend.evaluation import DOCKER_PYTHON_IMAGE, evaluate, evaluate_with_details
 from backend.hardware import GIB, recommend_settings
@@ -108,6 +108,26 @@ class BenchmarkTests(unittest.TestCase):
         model = next(item for item in models if item.get("id") == "local-model")
         self.assertEqual(model["managed_launch"], launch)
         self.assertEqual(model_info(model)["managed_launch"], launch)
+
+    def test_ollama_context_metadata_is_parsed_lazily_from_show(self):
+        fixtures = [
+            ({"parameters": "num_ctx 4096\nother 1",
+              "model_info": {"llama.context_length": 8192}}, (8192, 4096)),
+            ({"parameters": {"num_ctx": 2048},
+              "model_info": {"context_length": 4096}}, (4096, 2048)),
+            ({"parameters": "temperature 0.5",
+              "model_info": {"llama.context_length": "invalid"}}, ("Unknown", "Unknown")),
+        ]
+        for response, expected in fixtures:
+            with self.subTest(response=response), patch(
+                    "backend.discovery._post_json", return_value=response) as post:
+                details = _ollama_context_details("local-model")
+            self.assertEqual(details["context_train"], expected[0])
+            self.assertEqual(details["context_configured"], expected[1])
+            self.assertEqual(details["context_default_assumed"], "Unknown")
+            post.assert_called_once_with(
+                "http://localhost:11434/api/show",
+                {"model": "local-model", "name": "local-model"})
 
     def test_generation_options_are_normalized(self):
         options = normalize_generation_options({"min_p": 0.2, "max_tokens": 5000, "seed": 7})
