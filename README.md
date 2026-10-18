@@ -2,7 +2,7 @@
 
 An offline, zero-interaction benchmark dashboard for local LLM servers. It discovers Ollama,
 LM Studio, and common OpenAI-compatible endpoints, then runs deterministic tests, scores them,
-and writes JSON, CSV, PDF, and SVG chart artifacts.
+and writes JSON, CSV, PDF, standalone voxel HTML, and SVG chart artifacts.
 
 ## Project status
 
@@ -15,7 +15,7 @@ and writes JSON, CSV, PDF, and SVG chart artifacts.
 - Seeded benchmark generation, automatic scoring, retries, cancellation, and resumable progress
 - Fresh and accumulated context experiments with advertised-limit handling
 - Warm-ups, latency/throughput measurements, and concurrency samples
-- JSON, CSV, PDF, and SVG result exports and result comparison
+- Per-model JSON, CSV, PDF, voxel HTML, and SVG result exports and result comparison
 - A small automated regression suite for core evaluators, deterministic generation, demo execution,
   exports, context metadata, and comparison
 - A local, version-aware calibration-study protocol and CSV analysis CLI for separate human/model
@@ -90,8 +90,11 @@ Selecting a model and pressing **Run benchmark** starts the selected profile wit
 questions. The dashboard reports warm-up, primary tests, fresh and accumulated context tests,
 performance measurements, and file-saving phases, with phase progress and pass/fail counts.
 Progress is persisted in `results/current.json`; use **Resume previous run** after an interruption.
-Completed files are saved under `results/` with a generated name such as
-`benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, and `_quality.svg` files. The
+Completed files are saved under `results/<model-folder>/` with a generated name such as
+`benchmark_<timestamp>_<id>.json`, plus matching `.csv`, `.pdf`, `.html`, and `_quality.svg` files.
+Model folders use a sanitized label and identity hash; different backends/models remain separate.
+The HTML is a standalone, offline voxel report that can be opened without the application.
+Older flat result files remain accessible in history and downloads. The
 dashboard shows the results folder, saved-run history, and download links. Every test and failure is
 retained in the JSON result. Demo outputs carry `demo: true` in JSON and `DEMO DATA` labels in the
 dashboard, CSV, PDF, history, and comparison view. The API requires an explicit model selection.
@@ -117,17 +120,30 @@ maximum output tokens, and the sampling seed. Defaults favor repeatable evaluati
 `top_p: 1`, `seed: 12345`); settings are included in saved result configuration and passed to
 Ollama or OpenAI-compatible adapters. When llama.cpp reports its startup generation defaults through
 `/props`, the dashboard displays those values on the model card and loads them into the generation
-controls. Edited controls are sent as request-level overrides and the actual benchmark settings are
+controls, except that the output budget uses the more generous hardware recommendation.
+Edited controls are sent as request-level overrides and the actual benchmark settings are
 recorded with each result. The llama.cpp context window is configured when launching `llama-server`
 (for example, with `-c`); it cannot be changed for an individual request here.
 Choose a **Repeatable**, **Balanced**, or **Creative** preset on the main screen; individual
-sampling controls and optional 2–5 repeats of the primary test suite are collapsed under
-**Advanced settings**. Repeats use consecutive sampling seeds and report per-run quality and its
+sampling controls and optional 2–5 repeats of the primary test suite are in the
+**Advanced** tab. This tab also contains requested llama.cpp context/GPU layers (restart the
+app-managed server to apply them), and optional Ollama context, GPU-layer, and CPU-thread overrides.
+Externally managed LM Studio/llama.cpp load settings must be changed in that server.
+Repeats use consecutive sampling seeds and report per-run quality and its
 standard deviation. NOT RUN replicates stay unscored, are counted in repeat metadata, and are
 excluded from the per-test mean; a test with no measured replicates remains unavailable.
 Context-scaling and performance experiments still run once. Available server
 version, context length, and GPU-offload information are shown as read-only runtime details; values
 the local server does not report remain `Unknown`.
+
+Hardware detection reports CPU, RAM, GPU and VRAM when supported by local OS/vendor tools;
+missing tools or unsupported hardware produce `Unknown`, not invented capacity.
+The dashboard suggests context, output budget, GPU layers, and threads; use **Apply hardware
+suggestions** to populate runtime controls. Output defaults scale with detected memory, with a
+2048-token fallback and an editable ceiling of 32768 tokens. Recommendations are conservative
+starting points, not model-fit guarantees: model weights, quantization, KV cache, other applications,
+and server limits still determine what actually fits. Sampling temperature does not increase with
+hardware. Hardware detection runs on the computer hosting the application.
 
 The current standard-library Python engine uses deterministic generated tasks and category-specific
 evaluators. It provides a stable
@@ -158,9 +174,12 @@ state-changing API operations. Benchmark model endpoints
 must match a locally discovered server, and endpoint redirects are not followed. Result filenames
 use generated identifiers rather than model names.
 
-Real adapters use streaming requests where supported. The result records an estimated TTFT from
-the first streamed content chunk, generation time after that chunk, estimated prompt tokens, and
-output tokens. Servers that do not provide compatible streaming responses are recorded as adapter
+Real adapters use streaming requests where supported. Live status shows prefill and decode token
+rates while requests run, with source/estimate labels. Backend token counters and evaluation timings
+are preferred when available; prefill is unavailable until reported by the server, rather than
+mislabeling time-to-first-token as prefill. Client-side token estimates are not tokenizer counts,
+and a single streamed chunk cannot establish a reliable decode speed.
+Servers that do not provide compatible streaming responses are recorded as adapter
 failures rather than silently presenting a fabricated streaming metric. The adapters tolerate
 fragmented UTF-8/SSE events, check completion markers, and reject empty output; a local loopback test
 does not establish compatibility with every live server or server version. Verify the specific
@@ -275,9 +294,9 @@ Performance runs perform three warm-ups, discard their outputs, then collect lat
 streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.
 Concurrency results include request success/failure counts, elapsed time, mean latency, and estimated
 throughput; they use only the selected profile's first five test prompts and are a small local sample.
-Throughput is estimated output tokens divided by the measured generation time of dedicated
-performance samples; token counts are estimates rather than tokenizer-reported counts. The result
-labels estimated timing when the adapter does not report streamed timing. P50/P95 latency and
+Throughput uses dedicated performance samples, preferring backend token counters and generation
+timings. Client-derived counts and timings remain labeled as estimates, and insufficient streaming
+samples cannot establish a decode rate. P50/P95 latency and
 standard deviation are based on measured request latency. These are controlled measurements and
 should not be treated as guarantees for unrelated real-world workloads.
 

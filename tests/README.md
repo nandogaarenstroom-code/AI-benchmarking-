@@ -36,6 +36,14 @@ retained in result configuration. It does not replace integration testing agains
 Additional coverage verifies repeated-run score metadata and that runtime details are included only
 when reported by the local server.
 
+Hardware inventory/recommendation tests mock OS/vendor output, missing utilities, and memory tiers;
+they do not certify model fit or GPU offload on real Windows/macOS/Linux machines. Adapter coverage
+checks backend timing/usage counters and estimate labels, live callbacks, truncated output, and
+single-chunk responses that cannot establish a decode rate. HTTP tests verify the hardware API,
+advanced controls, and sandbox headers for downloadable voxel HTML reports. Export tests cover
+per-model folders and legacy flat results. Live hardware/server compatibility still needs validation
+on the target workstation.
+
 Streaming adapter tests cover first-content TTFT measurement, timeout error mapping, malformed event
 handling, size-bounded discovery responses, accumulated history in both Ollama and OpenAI-compatible
 requests, and a loopback streaming round-trip. These tests exercise local protocols only and do not

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from .discovery import hardware_info, model_info, normalize_generation_options, resolve_model
 from .evaluation import code_evaluator_available, evaluation_criteria, evaluate_with_details
-from .reporting import write_pdf, write_chart
+from .reporting import write_pdf, write_chart, write_html
 
 CATEGORIES = ["Reasoning", "Mathematics", "Coding", "Instruction Following",
               "Structured Output", "Knowledge", "Hallucination Resistance",
@@ -765,18 +765,20 @@ def make_tests(profile: str, seed: int) -> list[dict]:
     return tests
 
 
-def make_context_tests(seed: int, max_context: int = 131072) -> list[dict]:
+def make_context_tests(seed: int, max_context: int = 131072,
+                       output_budget: int = 0) -> list[dict]:
     rng = random.Random(seed)
     tests = []
     marker_positions = ("beginning", "middle", "end")
     filler_unit = " neutral distractor information."
     for index, size in enumerate((4096, 8192, 16384, 32768, 65536, 131072, 262144)):
-        if size > max_context:
+        if size > max_context or size <= max(0, output_budget) + 32:
             continue
         marker = f"CTX-{rng.randint(1000, 9999)}"
         position = marker_positions[index % len(marker_positions)]
         fixed_text = f"{marker}\n\nReturn the marker."
-        filler_count = max(0, (size * 4 - len(fixed_text)) // len(filler_unit))
+        prompt_budget = max(1, size - max(0, output_budget))
+        filler_count = max(0, (prompt_budget * 4 - len(fixed_text)) // len(filler_unit))
         filler = filler_unit * filler_count
         prompt = f"{marker}\n{filler}\nReturn the marker." if position == "beginning" else (
             f"{filler[:len(filler)//2]}{marker}{filler[len(filler)//2:]}\nReturn the marker."
@@ -797,6 +799,7 @@ class BenchmarkManager:
         self.state_file = self.root / "current.json"; self.running = False
         self._run_lock = threading.Lock()
         self._status_lock = threading.Lock()
+        self._live_requests = {}
         self.cancel_requested = threading.Event()
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
@@ -816,19 +819,18 @@ class BenchmarkManager:
 
     def list_results(self):
         results = []
-        root = self.root.resolve()
-        for path in self.root.glob("*.json"):
-            if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
-                continue
+        for filename in self._result_names():
             try:
-                raw = self._read_result_file(path.name)
+                raw = self._read_result_file(filename)
                 if raw is None:
                     continue
                 data = json.loads(raw)
             except (OSError, json.JSONDecodeError):
                 continue
             model = data.get("model") if isinstance(data, dict) else {}
-            results.append({"id": path.stem,
+            if not isinstance(data, dict):
+                continue
+            results.append({"id": Path(filename).stem,
                             "model": model.get("name") if isinstance(model, dict) else None,
                             "timestamp": data.get("timestamp"),
                             "demo": bool(data.get("demo"))})
@@ -839,10 +841,10 @@ class BenchmarkManager:
                 re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id) is None or
                 result_id == "current"):
             return None
-        for path in self.root.glob("*.json"):
-            if path.name == f"{result_id}.json" and not path.is_symlink():
+        for filename in self._result_names():
+            if Path(filename).name == f"{result_id}.json":
                 try:
-                    raw = self._read_result_file(path.name)
+                    raw = self._read_result_file(filename)
                     if raw is None:
                         return None
                     data = json.loads(raw)
@@ -851,16 +853,54 @@ class BenchmarkManager:
                 return data if isinstance(data, dict) else None
         return None
 
-    def _read_result_file(self, filename):
-        if (not isinstance(filename, str) or
-                re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.json", filename) is None or
-                filename == "current.json"):
+    def _result_names(self):
+        with os.scandir(self.root) as entries:
+            for entry in entries:
+                if entry.is_file(follow_symlinks=False) and entry.name.endswith(".json"):
+                    yield entry.name
+                elif (entry.is_dir(follow_symlinks=False) and
+                      re.fullmatch(r"[A-Za-z0-9_-]{1,100}", entry.name)):
+                    try:
+                        with os.scandir(entry.path) as children:
+                            for child in children:
+                                if child.is_file(follow_symlinks=False) and child.name.endswith(".json"):
+                                    yield f"{entry.name}/{child.name}"
+                    except OSError:
+                        continue
+
+    @staticmethod
+    def _relative_parts(filename):
+        if not isinstance(filename, str):
             return None
+        parts = filename.split("/")
+        if (len(parts) not in (1, 2) or
+                (len(parts) == 2 and not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", parts[0]))):
+            return None
+        return parts
+
+    def _read_result_file(self, filename):
+        parts = self._relative_parts(filename)
+        if (not parts or re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.json", parts[-1]) is None
+                or parts[-1] == "current.json"):
+            return None
+        try:
+            raw = self._read_safe_file(parts)
+            return raw.decode("utf-8") if raw is not None else None
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _read_safe_file(self, parts):
         root = self.root.resolve()
         if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
             directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
-                fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                if len(parts) == 2:
+                    child_fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                       dir_fd=directory_fd)
+                    os.close(directory_fd)
+                    directory_fd = child_fd
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW |
+                             getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
             finally:
                 os.close(directory_fd)
             try:
@@ -868,53 +908,28 @@ class BenchmarkManager:
                     return None
                 with os.fdopen(fd, "rb") as stream:
                     fd = -1
-                    try:
-                        return stream.read().decode("utf-8")
-                    except UnicodeDecodeError:
-                        return None
+                    return stream.read()
             finally:
                 if fd >= 0:
                     os.close(fd)
-        path = self.root / filename
-        if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+        path = root.joinpath(*parts)
+        if (any(root.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts)+1))
+                or not path.resolve().is_relative_to(root) or not path.is_file()):
             return None
         try:
-            return path.read_text()
-        except (OSError, UnicodeDecodeError):
+            return path.read_bytes()
+        except OSError:
             return None
 
     def read_artifact(self, filename):
-        if (not isinstance(filename, str) or
+        parts = self._relative_parts(filename)
+        if (not parts or
                 re.fullmatch(
                     r"benchmark_[0-9]{8}_[0-9]{6}_[a-f0-9]{32}"
-                    r"(?:\.json|\.csv|\.pdf|_quality\.svg)", filename) is None):
+                    r"(?:\.json|\.csv|\.pdf|\.html|_quality\.svg)", parts[-1]) is None):
             return None
-        filename = os.path.basename(filename)
         try:
-            root = self.root.resolve()
-            with os.scandir(root) as entries:
-                entry = next((item for item in entries if item.name == filename), None)
-            if entry is None or not entry.is_file(follow_symlinks=False):
-                return None
-            if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
-                directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-                finally:
-                    os.close(directory_fd)
-                try:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        return None
-                    with os.fdopen(fd, "rb") as stream:
-                        fd = -1
-                        return stream.read()
-                finally:
-                    if fd >= 0:
-                        os.close(fd)
-            path = Path(entry.path)
-            if path.is_symlink() or path.resolve().parent != root or not path.is_file():
-                return None
-            return path.read_bytes()
+            return self._read_safe_file(parts)
         except OSError:
             return None
 
@@ -1082,7 +1097,8 @@ class BenchmarkManager:
             max_context = 131072
         if model.get("demo"):
             max_context = min(max_context, 32768)
-        context_tests = {test["id"]: test for test in make_context_tests(seed, max_context)}
+        context_tests = {test["id"]: test for test in make_context_tests(
+            seed, max_context, output_budget=options["max_tokens"] + 128)}
         for field in ("context_results", "accumulated_results"):
             records = state.get(field)
             if not isinstance(records, list) or len(records) > len(context_tests):
@@ -1207,8 +1223,64 @@ class BenchmarkManager:
                 return " ".join(map(str, test.get("required_terms", [])))
             return test["expected_answer"]
         from .discovery import ask_model
-        response = ask_model(model, test["prompt"], history=history, options=generation_options)
-        return response
+        request_id = uuid.uuid4().hex
+
+        def progress(metrics):
+            self._publish_live_metrics(request_id, metrics)
+
+        progress({"phase": "prefill", "token_count_is_estimated": True,
+                  "timing_source": "awaiting backend"})
+        try:
+            return ask_model(model, test["prompt"], history=history,
+                             options=generation_options, progress_callback=progress)
+        finally:
+            with self._status_lock:
+                self._live_requests.pop(request_id, None)
+                if "live_metrics" in self._status:
+                    self._status["live_metrics"]["active_requests"] = len(self._live_requests)
+                    if not self._live_requests:
+                        self._status["live_metrics"]["phase"] = "complete"
+
+    def _publish_live_metrics(self, request_id, metrics):
+        if not isinstance(metrics, dict):
+            return
+        normalized = {
+            "phase": metrics.get("phase", "prefill"),
+            "token_count_is_estimated": metrics.get("token_count_is_estimated", True) is not False,
+            "timing_source": metrics.get("timing_source", "unknown"),
+        }
+        for key in ("prefill_tokens_per_second", "decode_tokens_per_second"):
+            value = metrics.get(key)
+            normalized[key] = (value if isinstance(value, (int, float)) and
+                               not isinstance(value, bool) and math.isfinite(value) and value >= 0
+                               else None)
+        with self._status_lock:
+            self._live_requests[request_id] = normalized
+            active = list(self._live_requests.values())
+            aggregate = dict(normalized)
+            aggregate["active_requests"] = len(active)
+            aggregate["phase"] = ("decode" if any(item["phase"] == "decode" for item in active)
+                                  else normalized["phase"])
+            for key in ("prefill_tokens_per_second", "decode_tokens_per_second"):
+                rates = [item[key] for item in active if item[key] is not None]
+                aggregate[key] = sum(rates) if rates else None
+            aggregate["token_count_is_estimated"] = any(
+                item["token_count_is_estimated"] for item in active)
+            sources = {item["timing_source"] for item in active}
+            aggregate["timing_source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
+            self._status["live_metrics"] = aggregate
+
+    @staticmethod
+    def _measurement_flags(metrics):
+        return {
+            "timing_is_estimated": metrics.get("timing_is_estimated", True) is not False,
+            "token_count_is_estimated": metrics.get("token_count_is_estimated", True) is not False,
+            "timing_source": metrics.get("timing_source", "estimated"),
+            **{key: metrics[key] for key in (
+                "prefill_tokens_per_second", "decode_tokens_per_second",
+                "prompt_token_count_is_estimated", "output_token_count_is_estimated",
+                "finish_reason") if key in metrics},
+        }
 
     def _execute(self, model: dict, test: dict, history: list | None = None,
                  generation_options: dict | None = None) -> dict:
@@ -1250,7 +1322,15 @@ class BenchmarkManager:
                 evaluation = evaluate_with_details(test, answer)
                 attempt_status = evaluation["status"]
                 last_answer, last_evaluation, last_metrics = answer, evaluation, response_metrics
-                diagnostic = None
+                truncated = response_metrics.get("finish_reason") in ("length", "max_tokens")
+                diagnostic = (
+                    "The backend stopped at the output-token budget; the answer may be incomplete. "
+                    "Increase max_tokens and rerun before interpreting the quality score."
+                    if truncated else None)
+                if diagnostic:
+                    evaluation = {**evaluation, "explanation":
+                                  f"{evaluation.get('explanation', '')} {diagnostic}"}
+                    last_evaluation = evaluation
             latency = time.perf_counter() - started
             if error is None:
                 last_latency = latency
@@ -1267,13 +1347,11 @@ class BenchmarkManager:
                         "passed": True, "score": evaluation.get("score", 10),
                         "latency_s": latency, "ttft_s": response_metrics.get("ttft_s", latency),
                         "generation_s": response_metrics.get("generation_s", latency),
-                        "timing_is_estimated": not bool(
-                            response_metrics and "ttft_s" in response_metrics and
-                            "generation_s" in response_metrics),
-                        "token_count_is_estimated": True,
+                        **self._measurement_flags(response_metrics),
                         "prompt_tokens": response_metrics.get("prompt_tokens", test.get("estimated_prompt_tokens", max(1, len(test["prompt"]) // 4))),
                         "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))),
-                        "error": None,
+                        "error": None, "diagnostic": diagnostic,
+                        "output_truncated": truncated,
                         "context_reset": history is None, "attempts": attempts,
                         "status": "PASS"}
             if attempt == 3:
@@ -1293,17 +1371,16 @@ class BenchmarkManager:
                         "latency_s": last_latency,
                         "ttft_s": last_metrics.get("ttft_s", last_latency),
                         "generation_s": last_metrics.get("generation_s", last_latency),
-                        "timing_is_estimated": not bool(
-                            last_metrics and "ttft_s" in last_metrics and
-                            "generation_s" in last_metrics),
-                        "token_count_is_estimated": True,
+                        **self._measurement_flags(last_metrics),
                         "prompt_tokens": last_metrics.get(
                             "prompt_tokens", test.get("estimated_prompt_tokens",
                                                       max(1, len(test["prompt"]) // 4))),
                         "output_tokens": last_metrics.get(
                             "output_tokens", max(1, len(last_answer.split()))),
                         "error": "EVALUATION_FAILED", "context_reset": history is None,
-                        "diagnostic": None,
+                        "diagnostic": next((entry["diagnostic"] for entry in reversed(attempts)
+                                            if entry["error"] is None), None),
+                        "output_truncated": last_metrics.get("finish_reason") in ("length", "max_tokens"),
                         "attempts": attempts, "status": "FAILED"}
 
     @staticmethod
@@ -1482,7 +1559,8 @@ class BenchmarkManager:
         # large-context behavior; real adapters receive the full supported suite.
         if model.get("demo"):
             max_context = min(max_context, 32768)
-        context_tests = make_context_tests(seed, max_context=max_context)
+        context_tests = make_context_tests(
+            seed, max_context=max_context, output_budget=generation_options["max_tokens"] + 128)
         context_sizes = [test["context_size"] for test in context_tests]
         self._update_status(phase="Testing fresh context windows",
                             activity="Sending independent prompts at increasing context sizes.",
@@ -1571,13 +1649,16 @@ class BenchmarkManager:
                   "quality_aggregation": "equal-weighted mean of available category scores",
                   "difficulty_calibration_status": "not empirically calibrated",
                   "timestamp": datetime.now(timezone.utc).isoformat(),
-                  "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
+                  "seed": seed, "demo": bool(model.get("demo")),
+                  "model": {**model_info(model), "id": model.get("id")},
                   "hardware": hardware_info(), "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
                   "top_p": generation_options["top_p"], "generation_options": generation_options,
                   "repeat_runs": repeat_runs,
                   "repeat_seed_policy": "sampling seed increments by one per repeat" if repeat_runs > 1 else "single run",
                   "context_reset_per_test": True, "context_suite": context_sizes,
+                  "context_output_token_reserve": generation_options["max_tokens"],
+                  "context_chat_overhead_token_reserve": 128,
                   "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
                   "difficulty_calibration_status": "not empirically calibrated",
                   "context_skipped": [size for size in (4096, 8192, 16384, 32768, 65536, 131072, 262144)
@@ -1609,7 +1690,10 @@ class BenchmarkManager:
                       round(quality["overall"]/max(statistics.mean(latencies), .001), 2)
                       if quality["overall"] is not None else None)},
                   "notes": ["Controlled benchmark results, not universal real-world guarantees.",
-                            "Output-token counts are estimates; bootstrap resamples are not independent model runs."]}
+                            "Token counts and timings use backend measurements where available; "
+                            "consult estimation flags and timing_source. Bootstrap resamples are not independent model runs.",
+                            "Context prompt sizing uses a character-based token estimate with output and chat overhead reserved; "
+                            "the backend tokenizer may differ."]}
         result["id"] = f"benchmark_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}"
         not_run_by_code = {}
         for item in completed:
@@ -1650,7 +1734,7 @@ class BenchmarkManager:
                 self._update_status(state="cancelled")
                 return
             self._update_status(phase="Saving result files",
-                                activity="Writing JSON, CSV, PDF, and SVG to the results directory.",
+                                activity="Writing JSON, CSV, PDF, HTML, and SVG to the model results directory.",
                                 total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._update_status(state="complete", phase="Benchmark complete",
@@ -1719,8 +1803,11 @@ class BenchmarkManager:
                         "output_tokens": 0}
             text = answer.get("text", "") if isinstance(answer, dict) else answer
             return {"success": True, "latency_s": time.perf_counter() - started,
-                    "output_tokens": (answer.get("output_tokens") or max(1, len(str(text).split())))
-                    if isinstance(answer, dict) else max(1, len(str(text).split()))}
+                    "output_tokens": answer.get("output_tokens", max(1, len(str(text).split())))
+                    if isinstance(answer, dict) else max(1, len(str(text).split())),
+                    "token_count_is_estimated": (
+                        answer.get("token_count_is_estimated", True) is not False
+                        if isinstance(answer, dict) else True)}
 
         concurrency_results = []
         for concurrency in (1, 2, 4):
@@ -1731,15 +1818,18 @@ class BenchmarkManager:
                 outcomes = list(pool.map(safe_answer, samples))
             elapsed = time.perf_counter() - started
             successful = [item for item in outcomes if item["success"]]
+            estimated = not successful or any(item["token_count_is_estimated"] for item in successful)
+            throughput = (round(sum(item["output_tokens"] for item in successful) / elapsed, 2)
+                          if elapsed else None)
             concurrency_results.append({
                 "workers": concurrency, "requests": len(outcomes),
                 "successful_requests": len(successful),
                 "failed_requests": len(outcomes) - len(successful),
                 "elapsed_s": round(elapsed, 4),
                 "requests_per_second": round(len(successful) / elapsed, 2) if elapsed else None,
-                "estimated_output_tokens_per_second": round(
-                    sum(item["output_tokens"] for item in successful) / elapsed, 2)
-                    if elapsed else None,
+                "output_tokens_per_second": throughput,
+                "estimated_output_tokens_per_second": throughput if estimated else None,
+                "token_count_is_estimated": estimated,
                 "latency_mean_s": round(statistics.mean(
                     item["latency_s"] for item in successful), 4) if successful else None,
             })
@@ -1763,6 +1853,11 @@ class BenchmarkManager:
         output_tokens = sum(item["output_tokens"] for item in evaluated)
         tokens_per_second = (output_tokens / sum(generation_times)
                              if generation_times else None)
+        estimated = not evaluated or any(
+            item.get("token_count_is_estimated", True) for item in evaluated)
+        timing_sources = {item.get("timing_source", "unknown") for item in evaluated}
+        prefill_rates = [item["prefill_tokens_per_second"] for item in evaluated
+                         if isinstance(item.get("prefill_tokens_per_second"), (int, float))]
         return {"score": min(100, round(tokens_per_second * 10, 2))
                 if tokens_per_second is not None else None,
                 "tokens_per_second": round(tokens_per_second, 2)
@@ -1775,9 +1870,17 @@ class BenchmarkManager:
                 "latency_p95_s": round(sorted(latencies)[min(len(latencies)-1, math.ceil(len(latencies)*.95)-1)], 4)
                 if latencies else None,
                 "latency_stddev_s": round(statistics.pstdev(latencies), 4) if latencies else None,
-                "throughput_basis": "estimated output tokens / measured generation time",
-                "timing_is_estimated": any(item["timing_is_estimated"] for item in evaluated),
-                "token_count_is_estimated": True,
+                "prefill_tokens_per_second": round(statistics.median(prefill_rates), 2)
+                if prefill_rates else None,
+                "decode_tokens_per_second": round(tokens_per_second, 2)
+                if tokens_per_second is not None else None,
+                "throughput_basis": ("estimated" if estimated else "backend-reported") +
+                " output tokens / generation time (see timing provenance)",
+                "timing_is_estimated": not evaluated or any(
+                    item["timing_is_estimated"] for item in evaluated),
+                "token_count_is_estimated": estimated,
+                "timing_source": next(iter(timing_sources)) if len(timing_sources) == 1 else "mixed"
+                if timing_sources else "unavailable",
                 "warmup_runs": 3, "measured_runs": len(evaluated),
                 "not_run_samples": not_run_count,
                 "concurrency_levels": [1, 2, 4],
@@ -1787,9 +1890,52 @@ class BenchmarkManager:
         result_id = result["id"]
         if not isinstance(result_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id):
             raise ValueError("invalid result identifier")
-        result_dir = self.root.resolve()
+        model = result["model"]
+        identity = json.dumps(
+            [model.get("backend"), model.get("endpoint"), model.get("id", model.get("name"))],
+            ensure_ascii=False, separators=(",", ":"))
+        slug = re.sub(r"[^a-z0-9]+", "-", str(model.get("name") or model.get("id") or "model").lower())
+        folder = f"{slug.strip('-')[:60] or 'model'}-{hashlib.sha256(identity.encode()).hexdigest()[:20]}"
+        names = {kind: f"{result_id}.{kind}" for kind in ("json", "csv", "pdf", "html")}
+        names["quality_chart"] = f"{result_id}_quality.svg"
+        result["files"] = {kind: f"{folder}/{name}" for kind, name in names.items()}
+        result["model_folder"] = folder
+        root = self.root.resolve()
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                try:
+                    os.mkdir(folder, dir_fd=root_fd)
+                except FileExistsError:
+                    pass
+                directory_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                       dir_fd=root_fd)
+            finally:
+                os.close(root_fd)
+        else:
+            destination = root / folder
+            destination.mkdir(exist_ok=True)
+            if destination.is_symlink() or destination.resolve().parent != root:
+                raise ValueError("unsafe model results directory")
+            directory_fd = None
+        try:
+            with tempfile.TemporaryDirectory(prefix="export-", dir=root) as staging:
+                self._write_output_files(result, Path(staging))
+                # Publish JSON last so history only sees runs with all exports present.
+                for kind in ("csv", "pdf", "html", "quality_chart", "json"):
+                    if directory_fd is not None:
+                        os.replace(Path(staging) / names[kind], names[kind],
+                                   dst_dir_fd=directory_fd)
+                    else:
+                        os.replace(Path(staging) / names[kind], root / folder / names[kind])
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+
+    def _write_output_files(self, result, result_dir):
+        result_id = result["id"]
         destination = result_dir / f"{result_id}.json"
-        fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=self.root)
+        fd, temporary = tempfile.mkstemp(prefix="result-", suffix=".tmp", dir=result_dir)
         try:
             with os.fdopen(fd, "w") as stream:
                 json.dump(result, stream, indent=2)
@@ -1839,6 +1985,7 @@ class BenchmarkManager:
             } for row in result["tests"])
         write_pdf(result_dir / f"{result_id}.pdf", result)
         write_chart(result_dir / f"{result_id}_quality.svg", result["quality"]["categories"])
+        write_html(result_dir / f"{result_id}.html", result)
 
     @staticmethod
     def _csv_cell(value):

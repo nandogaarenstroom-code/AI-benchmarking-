@@ -70,6 +70,58 @@ class ApiSecurityTests(unittest.TestCase):
 
                     handler._json({"models": []})
 
+    def test_hardware_endpoint_returns_detection_and_advice(self):
+        hardware = {"cpu": "Test CPU", "ram": "16 GiB"}
+        advice = {"generation_options": {"max_tokens": 4096}}
+        with patch.object(app, "hardware_info", return_value=hardware), patch.object(
+                app, "recommend_settings", return_value=advice) as recommend:
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+            connection.request("GET", "/api/hardware")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read()),
+                             {"hardware": hardware, "recommendations": advice})
+            connection.close()
+            recommend.assert_called_once_with(hardware)
+
+    def test_nested_html_artifact_is_sandboxed(self):
+        self.manager.read_artifact = Mock(return_value=b"<!doctype html><title>Voxel</title>")
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        connection.request("GET", "/results/model-abc/benchmark_20261018_120000_abcdef1234.html")
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+        self.assertIn("sandbox allow-scripts", response.getheader("Content-Security-Policy"))
+        self.assertNotIn("allow-same-origin", response.getheader("Content-Security-Policy"))
+        response.read()
+        connection.close()
+        self.manager.read_artifact.assert_called_once_with(
+            "model-abc/benchmark_20261018_120000_abcdef1234.html")
+
+    def test_dashboard_contains_advanced_controls_and_live_rates(self):
+        from html.parser import HTMLParser
+
+        class Elements(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.elements = {}
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if "id" in attrs:
+                    self.elements[attrs["id"]] = attrs
+
+        parser = Elements()
+        parser.feed((app.ROOT / "frontend" / "index.html").read_text())
+        self.assertEqual(parser.elements["advanced-tab"]["role"], "tab")
+        self.assertEqual(parser.elements["advanced-settings"]["role"], "tabpanel")
+        self.assertIn("hidden", parser.elements["advanced-settings"])
+        self.assertEqual(parser.elements["max-tokens"]["max"], "32768")
+        for control in ("llama-gpu-layers", "llama-context", "runtime-context",
+                        "runtime-gpu", "runtime-threads", "live-speeds",
+                        "hardware-summary", "apply-recommendations"):
+            self.assertIn(control, parser.elements)
+
     def test_cross_origin_and_missing_token_posts_are_rejected(self):
         body = json.dumps({"profile": "QUICK"})
         headers = {

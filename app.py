@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import BenchmarkManager
-from backend.discovery import discover_models, resolve_model
+from backend.discovery import discover_models, hardware_info, recommend_settings, resolve_model
 from backend.llama_server import LlamaServerConflict, LlamaServerError, llama_server_manager
 
 ROOT = Path(__file__).parent
@@ -149,6 +149,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path == "/api/models":
             return self._json({"models": discover_models()})
+        if path == "/api/hardware":
+            hardware = hardware_info()
+            return self._json({"hardware": hardware, "recommendations": recommend_settings(hardware)})
         if path == "/api/llama-server/status":
             return self._json(llama_server_manager.status())
         if path == "/api/status":
@@ -162,13 +165,18 @@ class Handler(BaseHTTPRequestHandler):
             result = manager.load_result(path.rsplit("/", 1)[-1])
             return self._json(result, 200 if result else 404)
         if path.startswith("/results/"):
-            filename = Path(path).name
+            filename = path[len("/results/"):]
             data = manager.read_artifact(filename)
             if data is not None:
                 self.send_response(200)
                 self.send_header(
                     "Content-Type", "application/pdf" if filename.endswith(".pdf")
+                    else "text/html; charset=utf-8" if filename.endswith(".html")
                     else "application/octet-stream")
+                if filename.endswith(".html"):
+                    self.send_header("Content-Security-Policy",
+                                     "sandbox allow-scripts; default-src 'none'; "
+                                     "script-src 'unsafe-inline'; style-src 'unsafe-inline'")
                 self.send_header("Content-Length", str(len(data)))
                 self._security_headers()
                 self.end_headers()
