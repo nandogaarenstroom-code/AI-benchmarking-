@@ -353,6 +353,15 @@ class _StreamTelemetry:
         # The first chunk arrived before the measured decode interval. Counting
         # it makes one-chunk responses appear arbitrarily fast.
         client_decode_tokens = max(1, (self.generated_bytes - self.first_chunk_bytes) // 4)
+        client_sample = elapsed > 0 and self.content_chunks > 1
+        if decode_rate is not None:
+            decode_token_count = self.output_tokens
+            decode_measurement_s = self.decode_s
+            if decode_measurement_s is None and self.output_tokens is not None and decode_rate > 0:
+                decode_measurement_s = self.output_tokens / decode_rate
+        else:
+            decode_token_count = client_decode_tokens if client_sample else None
+            decode_measurement_s = elapsed if client_sample else None
         return {
             "phase": phase, "prompt_tokens": int(prompt_tokens), "output_tokens": int(output_tokens),
             "ttft_s": None if self.first_token_at is None else self.first_token_at - self.started,
@@ -360,7 +369,10 @@ class _StreamTelemetry:
             "client_generation_s": elapsed, "prefill_s": self.prefill_s, "decode_s": self.decode_s,
             "prefill_tokens_per_second": prefill_rate,
             "decode_tokens_per_second": decode_rate if decode_rate is not None else (
-                client_decode_tokens / elapsed if elapsed > 0 and self.content_chunks > 1 else None),
+                client_decode_tokens / elapsed if client_sample else None),
+            "decode_token_count": decode_token_count,
+            "decode_measurement_s": decode_measurement_s,
+            "decode_token_count_is_estimated": decode_rate is None,
             "token_count_is_estimated": self.prompt_tokens is None or self.output_tokens is None,
             "timing_source": source,
             "timing_is_estimated": (

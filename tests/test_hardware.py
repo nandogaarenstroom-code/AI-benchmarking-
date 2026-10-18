@@ -152,3 +152,16 @@ class HardwareTests(unittest.TestCase):
         for settings in (small, medium, large):
             self.assertGreater(settings["generation_options"]["num_ctx"],
                                settings["generation_options"]["max_tokens"])
+
+    def test_gpu_with_unknown_capacity_does_not_force_cpu_offload(self):
+        for info in (
+                {"gpus": [{"name": "Apple M4", "vram_bytes": None}], "gpu_vram_bytes": None},
+                {"gpu": "Integrated GPU", "gpu_vram_bytes": "Unknown"}):
+            with self.subTest(info=info):
+                settings = hardware.recommend_settings(info)
+                self.assertIsNone(settings["gpu_layers"])
+                self.assertIsNone(settings["runtime_settings"]["gpu_layers"])
+                self.assertNotIn("num_gpu", settings["generation_options"])
+        no_gpu = hardware.recommend_settings({"gpus": [], "gpu": "Unknown"})
+        self.assertEqual(no_gpu["gpu_layers"], 0)
+        self.assertNotIn("num_gpu", no_gpu["generation_options"])

@@ -819,7 +819,9 @@ class BenchmarkTests(unittest.TestCase):
                              "bootstrap resampling of primary test items")
             self.assertNotIn("independent_seed_scores", data["uncertainty"])
             self.assertEqual(len(data["uncertainty"]["bootstrap_resample_scores"]), 3)
-            self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
+            self.assertIsNone(data["scores"]["performance"])
+            self.assertIsNone(data["scores"]["overall"])
+            self.assertIsNone(manager.compare([data["id"]])["best_overall"])
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
             self.assertEqual(manager.status()["result_directory"], Path(directory).name)
@@ -1369,6 +1371,19 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(secret.read_text(), '{"id":"private","model":{"name":"private"}}')
             self.assertEqual(len(list(external.iterdir())), 1)
 
+    def test_shared_result_reader_rejects_unvalidated_components_and_checkpoint_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager.state_file.write_text('{"private":"checkpoint"}')
+            for parts in (None, [], ["current.json"], ["..", "outside.json"],
+                          ["nested/../outside.json"], ["/outside.json"], ["folder", "../outside.json"],
+                          ["folder", "file.json", "extra"], ["folder", 1]):
+                with self.subTest(parts=parts):
+                    self.assertIsNone(manager._read_safe_file(parts))
+            filename = "benchmark_20261018_120000_" + "a" * 32 + ".html"
+            (Path(directory) / filename).symlink_to(filename)
+            self.assertIsNone(manager.read_artifact(filename))
+
     def test_html_report_is_offline_and_model_output_is_not_executable(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self._export_fixture()
@@ -1670,6 +1685,57 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(result["hardware"], hardware)
                 probe.assert_called_once_with()
                 recommend.assert_called_once_with(hardware)
+
+    def test_single_chunk_without_decode_measurement_cannot_inflate_performance_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            sample = {"id": "short", "prompt": "x", "category": "Mathematics",
+                      "evaluation_method": "raw", "expected_answer": "x"}
+            measurement = {
+                "status": "PASS", "latency_s": 0.5, "ttft_s": 0.5, "generation_s": 1e-9,
+                "output_tokens": 500, "decode_tokens_per_second": None,
+                "timing_is_estimated": True, "token_count_is_estimated": False,
+                "timing_source": "backend_usage",
+            }
+            with patch.object(manager, "_answer", return_value={"text": "x"}), \
+                    patch.object(manager, "_execute", return_value=measurement):
+                performance = manager._performance({}, [sample])
+            self.assertIsNone(performance["score"])
+            self.assertIsNone(performance["tokens_per_second"])
+            self.assertIsNone(performance["decode_tokens_per_second"])
+            self.assertEqual(performance["decode_measured_runs"], 0)
+            self.assertEqual(performance["decode_unavailable_samples"], 1)
+            self.assertEqual(performance["timing_source"], "unavailable")
+            self.assertEqual(performance["ttft_s"], 0.5)
+
+    def test_decode_aggregate_excludes_missing_intervals_and_weights_valid_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            sample = {"id": "sample", "prompt": "x", "category": "Mathematics",
+                      "evaluation_method": "raw", "expected_answer": "x"}
+            base = {"status": "PASS", "latency_s": 8, "ttft_s": 0.2,
+                    "generation_s": 2, "output_tokens": 100, "token_count_is_estimated": False}
+            client = {**base, "decode_tokens_per_second": 5,
+                      "timing_is_estimated": True, "decode_timing_is_estimated": True,
+                      "timing_source": "backend_usage"}
+            reported = {**base, "output_tokens": 90, "decode_s": 6,
+                        "decode_tokens_per_second": 15, "timing_is_estimated": False,
+                        "timing_source": "llama.cpp"}
+            missing = {**base, "generation_s": 1e-12, "output_tokens": 10000,
+                       "decode_tokens_per_second": None, "timing_is_estimated": True}
+            with patch.object(manager, "_answer", return_value={"text": "x"}), \
+                    patch.object(manager, "_execute", side_effect=[client, reported, missing]):
+                performance = manager._performance({}, [sample] * 3)
+            self.assertEqual(performance["decode_tokens_per_second"], 12.5)
+            self.assertEqual(performance["decode_measured_runs"], 2)
+            self.assertEqual(performance["decode_unavailable_samples"], 1)
+            self.assertTrue(performance["token_count_is_estimated"])
+            self.assertTrue(performance["timing_is_estimated"])
+            self.assertEqual(performance["timing_source"], "mixed")
+            rate_only = {**reported, "decode_s": None, "generation_s": 1e-12}
+            tokens, seconds, estimated = manager._decode_measurement(rate_only)
+            self.assertEqual(tokens / seconds, 15)
+            self.assertFalse(estimated)
 
 
 if __name__ == "__main__":

@@ -389,7 +389,8 @@ async function poll(){
   const status=await response.json();
   const metrics=status.live_metrics||{};
   const speed=value=>Number.isFinite(value)?`${value.toFixed(1)} tok/s`:'not available';
-  $('live-speeds').textContent=`Prefill: ${speed(metrics.prefill_tokens_per_second)} · Decode: ${speed(metrics.decode_tokens_per_second)} · ${metrics.timing_source||'waiting for server telemetry'}${metrics.token_count_is_estimated?' (estimated tokens)':''}`;
+  const timingEstimate=metrics.timing_is_estimated?' (includes estimated timing)':'';
+  $('live-speeds').textContent=`Prefill: ${speed(metrics.prefill_tokens_per_second)} · Decode: ${speed(metrics.decode_tokens_per_second)} · ${metrics.timing_source||'waiting for server telemetry'}${timingEstimate}${metrics.token_count_is_estimated?' (estimated tokens)':''}`;
   resumeAvailable=Boolean(status.resume_available);
   if(status.state==='running'){
     $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
@@ -506,7 +507,7 @@ function show(result,resultDirectory){
   $('performance').textContent=scoreText(result.scores.performance);
   $('overall').textContent=scoreText(result.scores.overall);
   const performance=result.performance||{};
-  $('performance-detail').textContent=`Measured sample decode: ${performance.tokens_per_second??'not available'} tokens/s · prefill: ${performance.prefill_tokens_per_second??'not available'} tokens/s · median TTFT ${performance.ttft_s??'not available'}s · ${performance.timing_source||'timing source unavailable'} · token counts ${performance.token_count_is_estimated===false?'backend-reported':'estimated'}.`;
+  $('performance-detail').textContent=`Sample decode: ${performance.tokens_per_second??'not available'} tokens/s · prefill: ${performance.prefill_tokens_per_second??'not available'} tokens/s · median TTFT ${performance.ttft_s??'not available'}s · ${performance.timing_source||'timing source unavailable'}${performance.timing_is_estimated?' (includes estimated timing)':''} · token counts ${performance.token_count_is_estimated===false?'backend-reported':'estimated'}.`;
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
   const notRun=result.not_run||[];
   $('result-note').textContent=result.demo
@@ -821,9 +822,9 @@ function applyHardwareSuggestions(){
   const advice=hardwareRecommendations;
   $('max-tokens').value=advice.generation_options.max_tokens;
   $('llama-context').value=advice.context_size;
-  $('llama-gpu-layers').value=advice.gpu_layers;
+  if(advice.gpu_layers!==null&&advice.gpu_layers!==undefined)$('llama-gpu-layers').value=advice.gpu_layers;
   $('runtime-context').value=advice.context_size;
-  $('runtime-gpu').value=advice.gpu_layers;
+  $('runtime-gpu').value=advice.gpu_layers??'';
   $('runtime-threads').value=advice.threads;
   $('preset').value='custom';
 }
@@ -835,7 +836,7 @@ async function loadHardware(){
     hardwareRecommendations=data.recommendations;
     $('hardware-summary').textContent=`CPU: ${hardware.cpu} · threads: ${hardware.threads??'Unknown'} · RAM: ${hardware.ram} · GPU: ${hardware.gpu} · VRAM: ${hardware.gpu_vram}`;
     const advice=hardwareRecommendations;
-    $('hardware-advice').textContent=`Suggested output budget: ${advice.generation_options.max_tokens} tokens; context: ${advice.context_size}; GPU layers: ${advice.gpu_layers}. ${(advice.notes||[]).join(' ')}`;
+    $('hardware-advice').textContent=`Suggested output budget: ${advice.generation_options.max_tokens} tokens; context: ${advice.context_size}; GPU layers: ${advice.gpu_layers??'unchanged (capacity unknown)'}. ${(advice.notes||[]).join(' ')}`;
     Object.values(presets).forEach(preset=>preset.max_tokens=advice.generation_options.max_tokens);
     // Do not replace settings that were edited while detection was running.
     if($('preset').value!=='custom')$('max-tokens').value=advice.generation_options.max_tokens;

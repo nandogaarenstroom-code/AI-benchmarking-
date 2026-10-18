@@ -83,6 +83,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result["prefill_tokens_per_second"], 10)
         self.assertEqual(result["decode_tokens_per_second"], 4)
         self.assertEqual(result["generation_s"], 3)
+        self.assertEqual(result["decode_token_count"], 12)
+        self.assertEqual(result["decode_measurement_s"], 3)
+        self.assertFalse(result["decode_token_count_is_estimated"])
         self.assertEqual(result["timing_source"], "ollama")
         self.assertFalse(result["token_count_is_estimated"])
         self.assertFalse(result["timing_is_estimated"])
@@ -119,6 +122,8 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(result["prefill_s"])
         self.assertIsNotNone(result["ttft_s"])
         self.assertIsNone(result["decode_tokens_per_second"])
+        self.assertIsNone(result["decode_token_count"])
+        self.assertIsNone(result["decode_measurement_s"])
 
     def test_usage_counts_do_not_claim_backend_timing(self):
         with patch("backend.discovery._open", return_value=sse({
@@ -130,6 +135,16 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(result["timing_is_estimated"])
         self.assertEqual(result["timing_source"], "backend_usage")
         self.assertIsNone(result["prefill_tokens_per_second"])
+
+    def test_backend_rate_and_count_define_decode_measurement_interval(self):
+        with patch("backend.discovery._open", return_value=sse({
+                "choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}],
+                "timings": {"prompt_n": 100, "prompt_per_second": 10,
+                            "predicted_n": 20, "predicted_per_second": 5}})):
+            result = ask_model(OPENAI, "prompt")
+        self.assertEqual(result["decode_token_count"], 20)
+        self.assertEqual(result["decode_measurement_s"], 4)
+        self.assertFalse(result["decode_token_count_is_estimated"])
 
     def test_reasoning_only_is_not_an_answer_but_has_timing(self):
         progress = []
@@ -162,6 +177,9 @@ class DiscoveryTests(unittest.TestCase):
             result = ask_model(OPENAI, "prompt")
         self.assertEqual(result["output_tokens"], 110)
         self.assertAlmostEqual(result["decode_tokens_per_second"], 5)
+        self.assertEqual(result["decode_token_count"], 10)
+        self.assertAlmostEqual(result["decode_measurement_s"], 2)
+        self.assertTrue(result["decode_token_count_is_estimated"])
 
     def test_finish_marker_preserves_answer_when_optional_metadata_times_out(self):
         class TimeoutResponse(Response):

@@ -928,16 +928,43 @@ class BenchmarkManager:
             return None
 
     def _read_safe_file(self, parts):
+        if (not isinstance(parts, (list, tuple)) or len(parts) not in (1, 2) or
+                any(not isinstance(part, str) or part != os.path.basename(part) for part in parts)):
+            return None
+        parts = [os.path.basename(part) for part in parts]
+        if ((len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", parts[0]) is None) or
+                re.fullmatch(r"[A-Za-z0-9_-]{1,108}\.(?:json|csv|pdf|html|svg)", parts[-1]) is None
+                or parts[-1] == "current.json"):
+            return None
         root = self.root.resolve()
+        path = root.joinpath(*parts)
+        try:
+            contained = path.resolve().is_relative_to(root)
+        except (OSError, RuntimeError):
+            return None
+        if not contained:
+            return None
         if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
             directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
                 if len(parts) == 2:
-                    child_fd = os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    with os.scandir(directory_fd) as entries:
+                        child = next((entry for entry in entries
+                                      if entry.name == parts[0] and
+                                      entry.is_dir(follow_symlinks=False)), None)
+                    if child is None:
+                        return None
+                    child_fd = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                                        dir_fd=directory_fd)
                     os.close(directory_fd)
                     directory_fd = child_fd
-                fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW |
+                with os.scandir(directory_fd) as entries:
+                    entry = next((entry for entry in entries
+                                  if entry.name == parts[-1] and
+                                  entry.is_file(follow_symlinks=False)), None)
+                if entry is None:
+                    return None
+                fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW |
                              getattr(os, "O_NONBLOCK", 0), dir_fd=directory_fd)
             finally:
                 os.close(directory_fd)
@@ -950,7 +977,6 @@ class BenchmarkManager:
             finally:
                 if fd >= 0:
                     os.close(fd)
-        path = root.joinpath(*parts)
         if (any(root.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts)+1))
                 or not path.resolve().is_relative_to(root) or not path.is_file()):
             return None
@@ -1321,6 +1347,7 @@ class BenchmarkManager:
                 "prefill_tokens_per_second", "decode_tokens_per_second",
                 "prompt_token_count_is_estimated", "output_token_count_is_estimated",
                 "decode_timing_is_estimated", "prefill_s", "decode_s",
+                "decode_token_count", "decode_measurement_s", "decode_token_count_is_estimated",
                 "backend_metrics", "finish_reason") if key in metrics},
         }
 
@@ -1331,6 +1358,35 @@ class BenchmarkManager:
                 and math.isfinite(reported) and reported >= 0):
             return reported
         return metrics.get("generation_s", fallback)
+
+    @staticmethod
+    def _decode_measurement(item):
+        def valid(value, positive=False):
+            return (isinstance(value, (int, float)) and not isinstance(value, bool) and
+                    math.isfinite(value) and (value > 0 if positive else value >= 0))
+
+        tokens, seconds = item.get("decode_token_count"), item.get("decode_measurement_s")
+        estimated = item.get("token_count_is_estimated", True) is not False
+        if valid(tokens) and valid(seconds, positive=True):
+            return tokens, seconds, (
+                item.get("decode_token_count_is_estimated", estimated) is not False)
+        tokens, seconds = item.get("output_tokens"), item.get("decode_s")
+        if valid(tokens) and valid(seconds, positive=True):
+            return tokens, seconds, estimated
+        rate = item.get("decode_tokens_per_second")
+        if valid(rate):
+            if (valid(tokens, positive=True) and valid(rate, positive=True) and
+                    item.get("decode_timing_is_estimated", item.get("timing_is_estimated", True)) is False):
+                return tokens, tokens / rate, estimated
+            seconds = item.get("generation_s")
+            if valid(seconds, positive=True):
+                # Client rates exclude the first chunk; total output_tokens do not.
+                return rate * seconds, seconds, True
+        if ("decode_tokens_per_second" not in item and
+                item.get("timing_is_estimated") is False and
+                valid(tokens) and valid(item.get("generation_s"), positive=True)):
+            return tokens, item["generation_s"], estimated
+        return None
 
     def _execute(self, model: dict, test: dict, history: list | None = None,
                  generation_options: dict | None = None) -> dict:
@@ -1943,6 +1999,7 @@ class BenchmarkManager:
                 "output_tokens_per_second": throughput,
                 "estimated_output_tokens_per_second": throughput if estimated else None,
                 "token_count_is_estimated": estimated,
+                "throughput_basis": "complete-response output tokens / batch wall time, including prefill; not decode rate",
                 "latency_mean_s": round(statistics.mean(
                     item["latency_s"] for item in successful), 4) if successful else None,
             })
@@ -1961,14 +2018,14 @@ class BenchmarkManager:
         evaluated = [item for item in measurements if item.get("status") != "NOT RUN"]
         not_run_count = len(measurements) - len(evaluated)
         latencies = [item["latency_s"] for item in evaluated]
-        generation_times = [max(item["generation_s"], .001) for item in evaluated]
         ttft_times = [item["ttft_s"] for item in evaluated]
-        output_tokens = sum(item["output_tokens"] for item in evaluated)
-        tokens_per_second = (output_tokens / sum(generation_times)
-                             if generation_times else None)
-        estimated = not evaluated or any(
-            item.get("token_count_is_estimated", True) for item in evaluated)
-        timing_sources = {item.get("timing_source", "unknown") for item in evaluated}
+        decode_samples = [(item, measurement) for item in evaluated
+                          if (measurement := self._decode_measurement(item)) is not None]
+        generation_times = [measurement[1] for _, measurement in decode_samples]
+        tokens_per_second = (sum(measurement[0] for _, measurement in decode_samples) /
+                             sum(generation_times) if generation_times else None)
+        estimated = not decode_samples or any(measurement[2] for _, measurement in decode_samples)
+        timing_sources = {item.get("timing_source", "unknown") for item, _ in decode_samples}
         prefill_rates = [item["prefill_tokens_per_second"] for item in evaluated
                          if isinstance(item.get("prefill_tokens_per_second"), (int, float))]
         return {"score": min(100, round(tokens_per_second * 10, 2))
@@ -1988,13 +2045,15 @@ class BenchmarkManager:
                 "decode_tokens_per_second": round(tokens_per_second, 2)
                 if tokens_per_second is not None else None,
                 "throughput_basis": ("estimated" if estimated else "backend-reported") +
-                " output tokens / generation time (see timing provenance)",
-                "timing_is_estimated": not evaluated or any(
-                    item["timing_is_estimated"] for item in evaluated),
+                " decode/output tokens / valid decode intervals; unavailable intervals excluded",
+                "timing_is_estimated": not decode_samples or any(
+                    item["timing_is_estimated"] for item, _ in decode_samples),
                 "token_count_is_estimated": estimated,
                 "timing_source": next(iter(timing_sources)) if len(timing_sources) == 1 else "mixed"
                 if timing_sources else "unavailable",
                 "warmup_runs": 3, "measured_runs": len(evaluated),
+                "decode_measured_runs": len(decode_samples),
+                "decode_unavailable_samples": len(evaluated) - len(decode_samples),
                 "not_run_samples": not_run_count,
                 "concurrency_levels": [1, 2, 4],
                 "concurrency_results": concurrency_results}

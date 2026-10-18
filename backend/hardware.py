@@ -197,8 +197,12 @@ def recommend_settings(hardware=None):
     generation = {"max_tokens": max_tokens, "num_ctx": context}
     if threads:
         generation["num_thread"] = min(threads, 32)
-    gpu_layers = 24 if vram >= 16 * GIB else 12 if vram >= 8 * GIB else 4 if vram else 0
-    if info.get("gpus"):
+    gpu_detected = bool(info.get("gpus")) or info.get("gpu") not in (None, "", UNKNOWN)
+    if vram:
+        gpu_layers = 24 if vram >= 16 * GIB else 12 if vram >= 8 * GIB else 4
+    else:
+        gpu_layers = None if gpu_detected else 0
+    if gpu_detected and gpu_layers is not None:
         generation["num_gpu"] = gpu_layers
     return {
         "generation_options": generation,
