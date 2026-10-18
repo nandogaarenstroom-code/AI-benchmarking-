@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import (
-    hardware_info, model_info, normalize_generation_options, recommend_settings, resolve_model,
+    hardware_info, model_info, normalize_generation_options, resolve_model,
 )
 from .evaluation import code_evaluator_available, evaluation_criteria, evaluate_with_details
 from .reporting import write_pdf, write_chart, write_html
@@ -1297,11 +1297,14 @@ class BenchmarkManager:
                              options=generation_options, progress_callback=progress)
         finally:
             with self._status_lock:
-                self._live_requests.pop(request_id, None)
-                if "live_metrics" in self._status:
-                    self._status["live_metrics"]["active_requests"] = len(self._live_requests)
-                    if not self._live_requests:
-                        self._status["live_metrics"]["phase"] = "complete"
+                completed = self._live_requests.pop(request_id, None)
+                if self._live_requests:
+                    self._status["live_metrics"] = self._aggregate_live_metrics(
+                        list(self._live_requests.values()))
+                elif completed is not None:
+                    self._status["live_metrics"] = {
+                        **completed, "active_requests": 0, "phase": "complete",
+                    }
 
     def _publish_live_metrics(self, request_id, metrics):
         if not isinstance(metrics, dict):
@@ -1321,20 +1324,25 @@ class BenchmarkManager:
                                else None)
         with self._status_lock:
             self._live_requests[request_id] = normalized
-            active = list(self._live_requests.values())
-            aggregate = dict(normalized)
-            aggregate["active_requests"] = len(active)
-            aggregate["phase"] = ("decode" if any(item["phase"] == "decode" for item in active)
-                                  else normalized["phase"])
-            for key in ("prefill_tokens_per_second", "decode_tokens_per_second"):
-                rates = [item[key] for item in active if item[key] is not None]
-                aggregate[key] = sum(rates) if rates else None
-            aggregate["token_count_is_estimated"] = any(
-                item["token_count_is_estimated"] for item in active)
-            aggregate["timing_is_estimated"] = any(item["timing_is_estimated"] for item in active)
-            sources = {item["timing_source"] for item in active}
-            aggregate["timing_source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
-            self._status["live_metrics"] = aggregate
+            self._status["live_metrics"] = self._aggregate_live_metrics(
+                list(self._live_requests.values()))
+
+    @staticmethod
+    def _aggregate_live_metrics(active):
+        aggregate = dict(active[-1])
+        aggregate["active_requests"] = len(active)
+        phases = {item["phase"] for item in active}
+        aggregate["phase"] = ("decode" if "decode" in phases else
+                              "prefill" if "prefill" in phases else aggregate["phase"])
+        for key in ("prefill_tokens_per_second", "decode_tokens_per_second"):
+            rates = [item[key] for item in active if item[key] is not None]
+            aggregate[key] = sum(rates) if rates else None
+        aggregate["token_count_is_estimated"] = any(
+            item["token_count_is_estimated"] for item in active)
+        aggregate["timing_is_estimated"] = any(item["timing_is_estimated"] for item in active)
+        sources = {item["timing_source"] for item in active}
+        aggregate["timing_source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
+        return aggregate
 
     @staticmethod
     def _measurement_flags(metrics):
@@ -1365,6 +1373,8 @@ class BenchmarkManager:
             return (isinstance(value, (int, float)) and not isinstance(value, bool) and
                     math.isfinite(value) and (value > 0 if positive else value >= 0))
 
+        if "decode_tokens_per_second" in item and not valid(item["decode_tokens_per_second"]):
+            return None
         tokens, seconds = item.get("decode_token_count"), item.get("decode_measurement_s")
         estimated = item.get("token_count_is_estimated", True) is not False
         if valid(tokens) and valid(seconds, positive=True):
@@ -1396,8 +1406,10 @@ class BenchmarkManager:
             options = generation_options or normalize_generation_options()
             required = (math.ceil(len(test["prompt"]) / 4) + self._history_tokens(history) +
                         options["max_tokens"] + 128)
-            context_exceeded = required > min(
-                test["context_size"], self._context_limit(model, options))
+            limit = min(test["context_size"], self._context_limit(model, options))
+            test = {**test, "estimated_total_context_tokens": required,
+                    "estimated_context_token_limit": limit, "context_budget_is_estimated": True}
+            context_exceeded = required > limit
         if context_exceeded or (test.get("evaluation_method") == "code" and not code_evaluator_available()):
             error = "CONTEXT_BUDGET_EXCEEDED" if context_exceeded else "EVALUATOR_UNAVAILABLE"
             evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -1620,12 +1632,8 @@ class BenchmarkManager:
             "id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
             "endpoint": "local://demo", "demo": True})
         hardware = hardware_info()
-        supplied_options = payload.get("generation_options", payload.get("parameters"))
-        supplied_options = supplied_options if isinstance(supplied_options, dict) else {}
-        recommended_output = recommend_settings(hardware)["generation_options"]["max_tokens"]
-        generation_options = normalize_generation_options({
-            "max_tokens": recommended_output, **supplied_options,
-        })
+        generation_options = normalize_generation_options(
+            payload.get("generation_options", payload.get("parameters")))
         payload["generation_options"] = generation_options
         try:
             repeat_runs = min(5, max(1, int(payload.get("repeat_runs", 1))))

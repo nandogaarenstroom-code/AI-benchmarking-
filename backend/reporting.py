@@ -141,7 +141,9 @@ def write_html(path, result):
                 "latency_s", "ttft_s", "generation_s", "prompt_tokens", "output_tokens",
                 "prefill_tokens_per_second", "decode_tokens_per_second",
                 "token_count_is_estimated", "timing_is_estimated", "timing_source",
-                "backend_metrics", "finish_reason", "output_truncated") if key in test}
+                "backend_metrics", "finish_reason", "output_truncated",
+                "estimated_total_context_tokens", "estimated_context_token_limit",
+                "context_budget_is_estimated") if key in test}
             rows.append(
                 f"<details><summary>{escaped(test.get('id', 'Test'))} · "
                 f"{escaped(test.get('status', 'Unknown'))} · Score: "

@@ -138,6 +138,7 @@ the local server does not report remain `Unknown`.
 
 Hardware detection reports CPU, RAM, GPU and VRAM when supported by local OS/vendor tools;
 missing tools or unsupported hardware produce `Unknown`, not invented capacity.
+Detected GPUs with unknown dedicated VRAM retain backend offload defaults instead of forcing CPU mode.
 The dashboard suggests context, output budget, GPU layers, and threads; use **Apply hardware
 suggestions** to populate runtime controls. Output defaults scale with detected memory, with a
 2048-token fallback and an editable ceiling of 32768 tokens. Recommendations are conservative

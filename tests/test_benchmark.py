@@ -1471,6 +1471,58 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(all(item["token_count_is_estimated"] for item in snapshots))
             self.assertEqual(manager.status()["live_metrics"]["active_requests"], 0)
 
+    def test_completed_worker_rates_are_removed_while_remaining_worker_prefills(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            ready, release = threading.Event(), threading.Event()
+            errors = []
+
+            def adapter(model, prompt, progress_callback, **kwargs):
+                if prompt == "waiting":
+                    progress_callback({"phase": "prefill", "token_count_is_estimated": True,
+                                       "timing_source": "client_estimate"})
+                    ready.set()
+                    if not release.wait(timeout=3):
+                        raise TimeoutError("test worker was not released")
+                    progress_callback({"phase": "decode", "decode_tokens_per_second": 5,
+                                       "token_count_is_estimated": True,
+                                       "timing_source": "client_estimate"})
+                else:
+                    progress_callback({
+                        "phase": "decode", "prefill_tokens_per_second": 100,
+                        "decode_tokens_per_second": 20, "token_count_is_estimated": False,
+                        "timing_is_estimated": False, "timing_source": "ollama"})
+                return {"text": "ok"}
+
+            def waiting_worker():
+                try:
+                    manager._answer({}, {"prompt": "waiting"})
+                except Exception as exc:
+                    errors.append(exc)
+
+            with patch("backend.discovery.ask_model", side_effect=adapter):
+                thread = threading.Thread(target=waiting_worker)
+                thread.start()
+                try:
+                    self.assertTrue(ready.wait(timeout=3))
+                    manager._answer({}, {"prompt": "finishing"})
+                    metrics = manager.status()["live_metrics"]
+                    self.assertEqual(metrics["active_requests"], 1)
+                    self.assertEqual(metrics["phase"], "prefill")
+                    self.assertIsNone(metrics["decode_tokens_per_second"])
+                    self.assertIsNone(metrics["prefill_tokens_per_second"])
+                    self.assertEqual(metrics["timing_source"], "client_estimate")
+                    self.assertTrue(metrics["token_count_is_estimated"])
+                finally:
+                    release.set()
+                    thread.join(timeout=5)
+            self.assertEqual(errors, [])
+            self.assertFalse(thread.is_alive())
+            completed = manager.status()["live_metrics"]
+            self.assertEqual(completed["active_requests"], 0)
+            self.assertEqual(completed["phase"], "complete")
+            self.assertEqual(completed["decode_tokens_per_second"], 5)
+
     def test_output_budget_truncation_is_explained_even_if_partial_answer_passes(self):
         test = {"id": "math", "prompt": "42", "category": "Mathematics",
                 "evaluation_method": "numeric", "expected_answer": "42"}
@@ -1580,6 +1632,8 @@ class BenchmarkTests(unittest.TestCase):
                 history.extend([{"role": "user", "content": test["prompt"]},
                                 {"role": "assistant", "content": result["answer"]}])
             self.assertEqual(manager._context_limit({"context_length": 131072}, options), 16384)
+            self.assertEqual(manager._context_limit({}, options), 16384)
+            self.assertEqual(manager._context_limit({"context_length": "Unknown"}, options), 16384)
 
     def test_over_budget_context_is_not_sent_to_backend(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1594,6 +1648,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["error"], "CONTEXT_BUDGET_EXCEEDED")
             self.assertIsNone(result["score"])
             self.assertIn("no model request", result["evaluation"]["explanation"])
+            self.assertGreater(result["estimated_total_context_tokens"],
+                               result["estimated_context_token_limit"])
+            self.assertTrue(result["context_budget_is_estimated"])
 
     def test_context_checkpoint_validation_replays_resized_accumulated_prompts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1658,19 +1715,13 @@ class BenchmarkTests(unittest.TestCase):
         unmatched = BenchmarkManager._context_score(fresh, [{"id": "other", "score": 10}])
         self.assertIsNone(unmatched["degradation"])
 
-    def test_api_output_default_scales_with_hardware_without_applying_runtime_settings(self):
+    def test_manager_defaults_do_not_implicitly_apply_hardware_runtime_recommendations(self):
         hardware = {"ram_bytes": 64 * 1024**3, "gpu_vram_bytes": None}
-        recommendations = {
-            "generation_options": {"max_tokens": 16384, "num_ctx": 32768,
-                                   "num_gpu": 24, "num_thread": 12},
-            "runtime_settings": {"context_length": 32768, "gpu_layers": 24},
-        }
-        for supplied, expected in (({}, 16384), ({"max_tokens": 17}, 17),
-                                   ({"temperature": 0.5, "num_ctx": 4096}, 16384)):
+        for supplied, expected in (({}, 2048), ({"max_tokens": 17}, 17),
+                                   ({"temperature": 0.5, "num_ctx": 4096}, 2048)):
             with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as directory:
                 manager = BenchmarkManager(Path(directory))
                 with patch("backend.benchmark.hardware_info", return_value=hardware) as probe, \
-                        patch("backend.benchmark.recommend_settings", return_value=recommendations) as recommend, \
                         patch("backend.benchmark.make_tests", return_value=[]), \
                         patch("backend.benchmark.make_context_tests", return_value=[]), \
                         patch.object(manager, "_performance", return_value={"score": None}), \
@@ -1684,7 +1735,6 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(options.get("num_ctx"), supplied.get("num_ctx"))
                 self.assertEqual(result["hardware"], hardware)
                 probe.assert_called_once_with()
-                recommend.assert_called_once_with(hardware)
 
     def test_single_chunk_without_decode_measurement_cannot_inflate_performance_score(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1707,6 +1757,10 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(performance["decode_unavailable_samples"], 1)
             self.assertEqual(performance["timing_source"], "unavailable")
             self.assertEqual(performance["ttft_s"], 0.5)
+            self.assertIsNone(manager._decode_measurement({
+                **measurement, "decode_s": 1e-9, "decode_token_count": 500,
+                "decode_measurement_s": 1e-9,
+            }))
 
     def test_decode_aggregate_excludes_missing_intervals_and_weights_valid_rates(self):
         with tempfile.TemporaryDirectory() as directory:
