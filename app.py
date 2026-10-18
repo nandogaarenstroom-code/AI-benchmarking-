@@ -166,6 +166,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"hardware": hardware, "recommendations": recommend_settings(hardware)})
         if path == "/api/llama-server/status":
             return self._json(llama_server_manager.status())
+        if path == "/api/llama-server/capabilities":
+            try:
+                return self._json(llama_server_manager.capabilities())
+            except LlamaServerError as exc:
+                return self._json({"error": str(exc)}, 400)
         if path == "/api/status":
             return self._json(manager.status())
         if path == "/api/results":
@@ -200,7 +205,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in (
                 "/api/benchmark", "/api/resume", "/api/cancel",
-                "/api/llama-server/start", "/api/llama-server/stop"):
+                "/api/llama-server/start", "/api/llama-server/stop",
+                "/api/llama-server/select"):
             return self.send_error(404)
         if not self._valid_host() or not self._valid_origin():
             return self._json({"error": "forbidden origin"}, 403)
@@ -270,12 +276,22 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("source"), payload.get("executable_path"),
                     payload.get("package_id"),
                     payload.get("model_path"), payload.get("context_size"),
-                    payload.get("gpu_layers", 0))
+                    payload.get("gpu_layers", 0),
+                    launch_options=payload.get("launch_options"),
+                    port=payload.get("port", 8080))
             except LlamaServerConflict as exc:
                 return self._json({"error": str(exc)}, 409)
             except LlamaServerError as exc:
-                return self._json({"error": str(exc)}, 400)
+                return self._json({"error": str(exc),
+                                   "output_lines": getattr(exc, "output_lines", [])}, 400)
             return self._json(status)
+        if path == "/api/llama-server/select":
+            try:
+                return self._json(llama_server_manager.select_executable(
+                    payload.get("source"), payload.get("executable_path"),
+                    payload.get("package_id")))
+            except LlamaServerError as exc:
+                return self._json({"error": str(exc)}, 400)
         if path == "/api/llama-server/stop":
             try:
                 return self._json(llama_server_manager.stop())

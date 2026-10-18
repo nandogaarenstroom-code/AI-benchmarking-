@@ -121,7 +121,8 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertIn("required", parser.elements["suite-seed"])
         for control in ("llama-gpu-layers", "llama-context", "runtime-context",
                         "runtime-gpu", "runtime-threads", "live-speeds",
-                        "hardware-summary", "apply-recommendations"):
+                        "hardware-summary", "apply-recommendations", "suite-seed",
+                        "launch-threads", "launch-extra-args", "llama-port"):
             self.assertIn(control, parser.elements)
 
     def test_cross_origin_and_missing_token_posts_are_rejected(self):
@@ -144,6 +145,7 @@ class ApiSecurityTests(unittest.TestCase):
         routes = (
             "/api/benchmark", "/api/resume", "/api/cancel",
             "/api/llama-server/start", "/api/llama-server/stop",
+            "/api/llama-server/select",
         )
         for path in routes:
             with self.subTest(path=path):
@@ -320,7 +322,8 @@ class ApiSecurityTests(unittest.TestCase):
             "source": "path", "executable_path": "C:\\models\\llama-server.exe",
             "package_id": "vendor.custom-fork",
             "model_path": "C:\\models\\test.gguf", "context_size": 65536,
-            "gpu_layers": 24, "tests": [{"id": "caller-controlled"}],
+            "gpu_layers": 24, "port": 9000, "launch_options": {"threads": 4},
+            "tests": [{"id": "caller-controlled"}],
         })
         headers = {
             "Origin": f"http://127.0.0.1:{self.server.server_port}",
@@ -334,7 +337,8 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(json.loads(body_bytes), {"state": "running", "message": "ready"})
         start.assert_called_once_with(
             "path", "C:\\models\\llama-server.exe", "vendor.custom-fork",
-            "C:\\models\\test.gguf", 65536, 24)
+            "C:\\models\\test.gguf", 65536, 24,
+            launch_options={"threads": 4}, port=9000)
 
         headers.pop("X-CSRF-Token")
         with patch.object(app.llama_server_manager, "start") as start:
@@ -343,6 +347,17 @@ class ApiSecurityTests(unittest.TestCase):
         start.assert_not_called()
 
     def test_llama_server_status_and_stop_routes(self):
+        with patch.object(app.llama_server_manager, "capabilities", return_value={
+                "flags": {"--threads": {"takes_value": True}}, "supported": ["--threads"]}) as caps:
+            connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            connection.request("GET", "/api/llama-server/capabilities",
+                               headers={"Host": f"127.0.0.1:{self.server.server_port}"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn("--threads", json.loads(response.read())["supported"])
+            connection.close()
+            caps.assert_called_once_with()
+
         with patch.object(app.llama_server_manager, "status", return_value={
                 "state": "running", "message": "ready"}):
             connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)

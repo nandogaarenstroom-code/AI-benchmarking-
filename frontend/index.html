@@ -176,7 +176,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 <p class="muted">A private, local-only evaluation dashboard for your models.</p>
 <section class="station-setup">
   <h2>Start llama.cpp server (Windows)</h2>
-  <p class="muted">The app can start a local llama-server on 127.0.0.1:8080. You must already have a GGUF model file.
+  <p class="muted">The app can start a local llama-server on a configurable loopback port. You must already have a GGUF model file.
     Context size is a requested startup value, not a promise that the model or your hardware can support it.</p>
   <div class="settings">
     <label>Executable source
@@ -191,11 +191,14 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <label>Full path to GGUF model file
       <input id="llama-model" type="text" placeholder="C:\models\model.gguf" autocomplete="off">
     </label>
+    <label>Port (1024–65535)
+      <input id="llama-port" type="number" min="1024" max="65535" value="8080" step="1">
+    </label>
   </div>
   <p id="context-hint" class="muted"></p>
   <p class="muted">WinGet does not launch apps itself; this option locates <code>llama-server.exe</code> inside an already-installed WinGet package.
     Enter that package's ID (including a custom-fork package ID).
-    High context sizes or GPU offload settings can exceed available memory. This app-managed server uses port 8080.</p>
+    High context sizes or GPU offload settings can exceed available memory. Launch arguments require a server restart.</p>
   <p class="muted"><strong>Security:</strong> only launch an executable you trust. It runs with the same permissions as this app.</p>
   <button class="primary" id="start-llama-server" type="button">Start llama-server</button>
   <button class="secondary" id="stop-llama-server" type="button" disabled>Stop app-managed server</button>
@@ -243,6 +246,32 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
         <label>Ollama CPU threads (blank = server default)<input id="runtime-threads" type="number" min="1" max="256" step="1" disabled></label>
       </div>
       <p class="muted">llama.cpp load parameters take effect on the next dashboard launch: stop the app-managed server first, then start it again. For externally managed llama.cpp or LM Studio, change load settings in that server. Ollama overrides apply to benchmark requests only. Suggestions are starting points, not proof that a model fits in memory.</p>
+    </fieldset>
+    <fieldset id="llama-launch-fieldset">
+      <legend>llama-server launch settings</legend>
+      <p class="muted">Supported options are discovered from the selected executable's help output. Changes require a server restart; configure external llama.cpp and LM Studio servers in their own UI.</p>
+      <div class="settings">
+        <label data-launch-flag="--threads">Threads<input id="launch-threads" type="number" min="1"></label>
+        <label data-launch-flag="--threads-batch">Batch threads<input id="launch-threads-batch" type="number" min="1"></label>
+        <label data-launch-flag="--batch-size">Batch size<input id="launch-batch-size" type="number" min="1"></label>
+        <label data-launch-flag="--ubatch-size">Micro-batch size<input id="launch-ubatch-size" type="number" min="1"></label>
+        <label data-launch-flag="--flash-attn">Flash attention<select id="launch-flash-attn"><option value="">Default</option><option>off</option><option>on</option><option>auto</option></select></label>
+        <label data-launch-flag="--cache-type-k">K cache type<select id="launch-cache-type-k"><option value="">Default</option><option>f32</option><option>f16</option><option>bf16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></label>
+        <label data-launch-flag="--cache-type-v">V cache type<select id="launch-cache-type-v"><option value="">Default</option><option>f32</option><option>f16</option><option>bf16</option><option>q8_0</option><option>q4_0</option><option>q4_1</option><option>iq4_nl</option><option>q5_0</option><option>q5_1</option></select></label>
+        <label data-launch-flag="--parallel">Parallel slots<input id="launch-parallel" type="number" min="1"></label>
+        <label data-launch-flag="--mlock"><input id="launch-mlock" type="checkbox">Lock model in memory</label>
+        <label data-launch-flag="--no-mmap"><input id="launch-no-mmap" type="checkbox">Disable memory mapping</label>
+        <label data-launch-flag="--tensor-split">Tensor split<input id="launch-tensor-split" type="text" placeholder="0.5,0.5"></label>
+        <label data-launch-flag="--main-gpu">Main GPU<input id="launch-main-gpu" type="number" min="0"></label>
+        <label data-launch-flag="--n-cpu-moe">CPU MoE layers<input id="launch-n-cpu-moe" type="number" min="0"></label>
+        <label data-launch-flag="--jinja"><input id="launch-jinja" type="checkbox">Enable Jinja templates</label>
+        <label data-launch-flag="--chat-template">Chat template<select id="launch-chat-template"><option value="">Default</option><option>chatml</option><option>llama2</option><option>llama3</option><option>mistral</option><option>gemma</option><option>phi3</option><option>deepseek</option><option>command-r</option><option>qwen2</option><option>vicuna</option><option>zephyr</option></select></label>
+        <label data-launch-flag="--rope-scaling">RoPE scaling<select id="launch-rope-scaling"><option value="">Default</option><option>none</option><option>linear</option><option>yarn</option></select></label>
+        <label data-launch-flag="--rope-scale">RoPE scale<input id="launch-rope-scale" type="number" min="0.01" max="100" step="0.01"></label>
+        <label>Extra args (one token per line)<textarea id="launch-extra-args" rows="3"></textarea></label>
+      </div>
+      <button class="secondary" id="read-launch-capabilities" type="button">Read selected build capabilities</button>
+      <p id="launch-capability-status" class="muted" aria-live="polite">Select a valid executable to read supported launch flags.</p>
     </fieldset>
     <fieldset>
     <legend>Generation settings</legend>
@@ -555,9 +584,15 @@ function show(result,resultDirectory){
   const runtime=$('runtime-details');runtime.replaceChildren();
   const details=[['Backend',result.model.backend],['Version',result.model.backend_version],
     ['Context length',result.model.context_length],['GPU offload',result.model.gpu_offload],
+    ['Training context (upper bound)',result.model.context_train],
+    ['Configured Ollama context',result.model.context_configured],
+    ['Context limit used',result.configuration.context_limit],
+    ['Context limit source',result.configuration.context_limit_source],
     ['llama.cpp server defaults',result.model.generation_defaults],
     ['App-managed server startup request',result.model.managed_launch]];
   details.forEach(([label,value])=>{const row=document.createElement('tr'),heading=document.createElement('th'),cell=document.createElement('td');heading.textContent=label;cell.textContent=value===undefined||value===null?'Unknown':typeof value==='object'?JSON.stringify(value):String(value);row.append(heading,cell);runtime.append(row)});
+  if(result.configuration.context_suite_reason==='CONTEXT_WINDOW_UNKNOWN')
+    $('context-hint').textContent='Context suite NOT RUN: Ollama context window is unknown. Set the Ollama context field and rerun.';
   const repeatScores=result.uncertainty?.repeat_run_scores||[];
   const uncertainty=result.uncertainty||{};
   const repeatOutcomes=result.summary?.repeat_outcomes||{};
@@ -886,6 +921,78 @@ function applyModelDefaults(model){
   refreshParameterStates();
   $('settings-note').textContent='Blank request fields use server defaults. Reported settings are not confirmation that a server applied a request override.';
 }
+const launchFields=[
+  ['launch-threads','threads'],['launch-threads-batch','threads_batch'],
+  ['launch-batch-size','batch_size'],['launch-ubatch-size','ubatch_size'],
+  ['launch-flash-attn','flash_attn'],['launch-cache-type-k','cache_type_k'],
+  ['launch-cache-type-v','cache_type_v'],['launch-parallel','parallel'],
+  ['launch-mlock','mlock'],['launch-no-mmap','no_mmap'],
+  ['launch-tensor-split','tensor_split'],['launch-main-gpu','main_gpu'],
+  ['launch-n-cpu-moe','n_cpu_moe'],['launch-jinja','jinja'],
+  ['launch-chat-template','chat_template'],['launch-rope-scaling','rope_scaling'],
+  ['launch-rope-scale','rope_scale']
+];
+const launchInputIds=[...launchFields.map(x=>x[0]),'launch-extra-args'];
+launchInputIds.forEach(id=>{if($(id))$(id).disabled=true});
+function launchOptions(){
+  const values={};
+  launchFields.forEach(([id,key])=>{
+    const input=$(id);
+    if(input.disabled)return;
+    if(input.type==='checkbox'){if(input.checked)values[key]=true}
+    else if(input.value!=='')values[key]=input.type==='number'?Number(input.value):input.value;
+  });
+  const extras=$('launch-extra-args').disabled?[]:
+    $('launch-extra-args').value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+  if(extras.length)values.extra_args=extras;
+  return values;
+}
+async function readLaunchCapabilities(){
+  const status=$('launch-capability-status');
+  status.textContent='Validating the selected llama-server executable…';
+  try{
+    const selection=await fetch('/api/llama-server/select',{
+      method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},
+      body:JSON.stringify({source:$('llama-source').value,
+        executable_path:$('llama-executable').value,package_id:$('llama-package').value})
+    });
+    const selectedData=await selection.json();
+    if(!selection.ok)throw new Error(selectedData.error||'Could not select this executable.');
+    const response=await fetch('/api/llama-server/capabilities');
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Could not read build capabilities.');
+    launchFields.forEach(([id,key])=>{
+      const label=$(id).closest('label'),flag=label.dataset.launchFlag;
+      const supported=Object.hasOwn(data.flags||{},flag),control=$(id);
+      control.disabled=!supported;
+      label.title=supported?'':'Not supported by this llama-server build';
+      if(control.tagName==='SELECT'&&supported){
+        const choices=data.flags[flag].choices||[];
+        Array.from(control.options).forEach(option=>{
+          option.hidden=option.value!==''&&(choices.length?!choices.includes(option.value):
+            flag==='--flash-attn'&&option.value!=='on');
+        });
+        if(control.selectedOptions[0]?.hidden)control.value='';
+      }
+      let note=label.querySelector('.launch-unsupported');
+      if(!supported){
+        if(!note){note=document.createElement('span');note.className='launch-unsupported';label.append(note)}
+        note.textContent='Not supported by this llama-server build';
+      }else if(note)note.remove();
+    });
+    $('launch-extra-args').disabled=false;
+    status.textContent='Capabilities read from the selected executable.';
+  }catch(error){status.textContent=error.message}
+}
+launchInputIds.forEach(id=>{
+  const input=$(id);
+  input.addEventListener('input',()=>dirtyFields.add('launch:'+id));
+  input.addEventListener('change',()=>dirtyFields.add('launch:'+id));
+});
+$('read-launch-capabilities').onclick=readLaunchCapabilities;
+$('llama-source').addEventListener('change',readLaunchCapabilities);
+$('llama-executable').addEventListener('change',readLaunchCapabilities);
+$('llama-package').addEventListener('change',readLaunchCapabilities);
 const CONFIG_KEY='ai-benchmarking-configurations-v1';
 function readConfigs(){
   try{
@@ -902,8 +1009,9 @@ function refreshConfigs(selectName=''){
 }
 function configurationState(){
   const launch={};
-  ['llama-source','llama-executable','llama-package','llama-model','llama-context','llama-gpu-layers']
-    .forEach(id=>{const input=$(id);if(input)launch[id]=input.value});
+  [...launchInputIds,'llama-source','llama-executable','llama-package','llama-model',
+    'llama-context','llama-gpu-layers','llama-port']
+    .forEach(id=>{const input=$(id);if(input)launch[id]=input.type==='checkbox'?input.checked:input.value});
   return {version:1,profile:$('profile').value,preset:$('preset').value,
     suite_seed:$('suite-seed').value,repeat_runs:$('repeat-runs').value,
     parameters:Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,$(id).value])),
@@ -931,7 +1039,12 @@ function loadConfig(){
   if(typeof config.suite_seed==='string'){$('suite-seed').value=config.suite_seed;dirtyFields.add('suite_seed')}
   if(typeof config.repeat_runs==='string')$('repeat-runs').value=config.repeat_runs;
   if(typeof config.profile==='string'&&[...$('profile').options].some(x=>x.value===config.profile))$('profile').value=config.profile;
-  Object.entries(config.launch||{}).forEach(([id,value])=>{if($(id)&&typeof value==='string')$(id).value=value});
+  Object.entries(config.launch||{}).forEach(([id,value])=>{
+    if($(id)&&!dirtyFields.has('launch:'+id)){
+      if($(id).type==='checkbox'&&typeof value==='boolean')$(id).checked=value;
+      else if(typeof value==='string')$(id).value=value;
+    }
+  });
   $('preset').value=['repeatable','balanced','creative','custom'].includes(config.preset)?config.preset:'custom';
   maxTokensEdited=dirtyFields.has('max_tokens');refreshParameterStates();configStatus(`Loaded “${entry.name}”.`);
 }
@@ -1067,11 +1180,13 @@ $('start-llama-server').onclick=async()=>{
         source:$('llama-source').value,executable_path:$('llama-executable').value,
         package_id:$('llama-package').value,
         model_path:$('llama-model').value,context_size:Number($('llama-context').value),
-        gpu_layers:Number($('llama-gpu-layers').value)
+        gpu_layers:Number($('llama-gpu-layers').value),port:Number($('llama-port').value),
+        launch_options:launchOptions()
       })
     });
     const data=await response.json();
-    if(!response.ok)throw new Error(data.error||'Could not start llama-server.');
+    if(!response.ok)throw new Error((data.error||'Could not start llama-server.')+
+      ((data.output_lines||[]).length?'\n'+data.output_lines.join('\n'):''));
     $('llama-server-status').textContent=data.message;
     await updateLlamaServerStatus();
     await load();

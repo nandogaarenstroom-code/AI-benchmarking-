@@ -1,3 +1,4 @@
+import io
 import tempfile
 import threading
 import unittest
@@ -6,7 +7,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.llama_server import (
-    LlamaServerConflict, LlamaServerError, LlamaServerManager, SERVER_HOST, SERVER_PORT,
+    HELP_OUTPUT_LIMIT_BYTES, LAUNCH_FLAG_NAMES, LlamaServerConflict, LlamaServerError, LlamaServerManager,
+    SERVER_HOST, SERVER_PORT,
 )
 
 
@@ -19,6 +21,13 @@ class LlamaServerManagerTests(unittest.TestCase):
         self.model = self.root / "model.gguf"
         self.model.touch()
         self.manager = LlamaServerManager()
+        flags = {flag: {"takes_value": flag not in {
+            "--mlock", "--no-mmap", "--jinja", "--flash-attn"},"choices": []}
+                 for flag in ("--host", "--port", "--model", "--ctx-size", "--n-gpu-layers",
+                              *LAUNCH_FLAG_NAMES.values(), "--threads", "--cache-type-k")}
+        flags["--flash-attn"] = {"takes_value": False, "choices": []}
+        self.manager._help_capabilities = MagicMock(
+            return_value={"flags": flags, "supported": sorted(flags)})
 
     def tearDown(self):
         self.manager.stop()
@@ -47,11 +56,152 @@ class LlamaServerManagerTests(unittest.TestCase):
             launch = self.manager.managed_launch(f"http://{SERVER_HOST}:{SERVER_PORT}/v1")
             self.assertEqual(launch["context_size_requested"], 65536)
             self.assertEqual(launch["model_file"], "model.gguf")
+            self.assertEqual(launch["argv"], args)
             stopped = self.manager.stop()
         self.assertEqual(stopped["state"], "stopped")
         process.terminate.assert_called_once()
         process.wait.assert_called()
         close_job.assert_called_once_with("job-handle")
+
+    def test_help_parser_handles_older_and_newer_layouts(self):
+        older = """Options:
+  --threads N             number of threads
+  --flash-attn            enable flash attention
+  --mlock                 lock model in memory
+  --model FILE            model path
+"""
+        newer = """--threads N                 Set threads
+--flash-attn [off|on|auto]   Flash attention mode
+--cache-type-k TYPE          K cache quantization
+--jinja                      Enable Jinja
+"""
+        old = LlamaServerManager.parse_help(older)["flags"]
+        new = LlamaServerManager.parse_help(newer)["flags"]
+        self.assertTrue(old["--threads"]["takes_value"])
+        self.assertFalse(old["--flash-attn"]["takes_value"])
+        self.assertTrue(old["--model"]["takes_value"])
+        self.assertEqual(new["--flash-attn"]["choices"], ["off", "on", "auto"])
+        self.assertTrue(new["--flash-attn"]["takes_value"])
+        self.assertFalse(new["--jinja"]["takes_value"])
+
+    def test_help_command_is_argv_only_and_output_is_capped(self):
+        process = MagicMock()
+        process.stdout = io.BytesIO(b"--threads N\n" + b"x" * 64)
+        process.poll.return_value = 0
+        with patch("backend.llama_server.HELP_OUTPUT_LIMIT_BYTES", 12), \
+                patch("backend.llama_server.subprocess.Popen", return_value=process) as popen:
+            output = LlamaServerManager._read_help(self.executable)
+        self.assertEqual(len(output.encode()), 12)
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], [str(self.executable), "--help"])
+        self.assertFalse(popen.call_args.kwargs["shell"])
+
+    def test_boolean_flash_attention_rejects_unavailable_modes(self):
+        flags = {"--flash-attn": {"takes_value": False, "choices": []}}
+        for mode in ("off", "auto"):
+            with self.subTest(mode=mode), self.assertRaises(LlamaServerError):
+                self.manager._build_launch_args({"flash_attn": mode}, {"flags": flags})
+
+    def test_help_is_cached_by_executable_path_and_mtime(self):
+        manager = LlamaServerManager()
+        with patch.object(manager, "_read_help", return_value="--threads N") as read:
+            first = manager._help_capabilities(self.executable)
+            second = manager._help_capabilities(self.executable)
+            self.assertEqual(first, second)
+            read.assert_called_once_with(self.executable)
+
+    def test_launch_options_generate_argv_for_each_allowlisted_flag(self):
+        flags = {
+            "--threads": {"takes_value": True, "choices": []},
+            "--threads-batch": {"takes_value": True, "choices": []},
+            "--batch-size": {"takes_value": True, "choices": []},
+            "--ubatch-size": {"takes_value": True, "choices": []},
+            "--flash-attn": {"takes_value": True, "choices": ["off", "on", "auto"]},
+            "--cache-type-k": {"takes_value": True, "choices": []},
+            "--cache-type-v": {"takes_value": True, "choices": []},
+            "--parallel": {"takes_value": True, "choices": []},
+            "--mlock": {"takes_value": False, "choices": []},
+            "--no-mmap": {"takes_value": False, "choices": []},
+            "--tensor-split": {"takes_value": True, "choices": []},
+            "--main-gpu": {"takes_value": True, "choices": []},
+            "--n-cpu-moe": {"takes_value": True, "choices": []},
+            "--jinja": {"takes_value": False, "choices": []},
+            "--chat-template": {"takes_value": True, "choices": []},
+            "--rope-scaling": {"takes_value": True, "choices": []},
+            "--rope-scale": {"takes_value": True, "choices": []},
+            "--threads-extra": {"takes_value": True, "choices": []},
+        }
+        options = {
+            "threads": 4, "threads_batch": 3, "batch_size": 512, "ubatch_size": 128,
+            "flash_attn": "auto", "cache_type_k": "q8_0", "cache_type_v": "f16",
+            "parallel": 2, "mlock": True, "no_mmap": True, "tensor_split": "0.5,0.5",
+            "main_gpu": 0, "n_cpu_moe": 2, "jinja": True, "chat_template": "llama3",
+            "rope_scaling": "yarn", "rope_scale": 2,
+            "extra_args": ["--threads-extra", "5"],
+        }
+        result = self.manager._build_launch_args(options, {"flags": flags})
+        self.assertEqual(result, [
+            "--threads", "4", "--threads-batch", "3", "--batch-size", "512",
+            "--ubatch-size", "128", "--flash-attn", "auto", "--cache-type-k", "q8_0",
+            "--cache-type-v", "f16", "--parallel", "2", "--mlock", "--no-mmap",
+            "--tensor-split", "0.5,0.5", "--main-gpu", "0", "--n-cpu-moe", "2",
+            "--jinja", "--chat-template", "llama3", "--rope-scaling", "yarn",
+            "--rope-scale", "2.0", "--threads-extra", "5",
+        ])
+
+    def test_launch_options_reject_unsupported_and_injection_attempts(self):
+        with self.assertRaisesRegex(LlamaServerError, "does not support"):
+            self.manager._build_launch_args(
+                {"threads": 4}, {"flags": {}})
+        for extra in (
+                ["--model", "evil.gguf"], ["--custom", "C:\\secret"],
+                ["--custom", "127.0.0.1"], ["--custom", "1;touch"],
+                ["--custom", "--host"],
+                ["--unknown"]):
+            flags = {
+                "--model": {"takes_value": True, "choices": []},
+                "--custom": {"takes_value": True, "choices": []},
+            }
+            with self.subTest(extra=extra), self.assertRaises(LlamaServerError):
+                self.manager._build_launch_args({"extra_args": extra}, {"flags": flags})
+
+    def test_failure_output_is_limited_and_sanitizes_full_model_path(self):
+        process = MagicMock()
+        process.poll.return_value = None
+
+        def fail_ready(*_):
+            self.manager._output_lines.extend(
+                [f"failed to load {self.model.resolve()}"] * 24)
+            return False
+
+        with patch("backend.llama_server.sys.platform", "win32"), \
+                patch("backend.llama_server.LlamaServerManager._ensure_port_available"), \
+                patch("backend.llama_server.LlamaServerManager._wait_until_ready",
+                      side_effect=fail_ready), \
+                patch("backend.llama_server.subprocess.Popen", return_value=process):
+            with self.assertRaises(LlamaServerError) as raised:
+                self.manager.start(
+                    "path", str(self.executable), None, str(self.model), 4096, 0)
+        self.assertEqual(len(raised.exception.output_lines), 20)
+        self.assertTrue(all("<local-path>" in line for line in raised.exception.output_lines))
+
+    def test_configurable_port_is_bounded_and_recorded(self):
+        with patch("backend.llama_server.sys.platform", "win32"), \
+                patch("backend.llama_server.LlamaServerManager._ensure_port_available"), \
+                patch("backend.llama_server.LlamaServerManager._wait_until_ready", return_value=True), \
+                patch("backend.llama_server.subprocess.Popen") as popen:
+            process = MagicMock()
+            process.poll.return_value = None
+            popen.return_value = process
+            status = self.manager.start(
+                "path", str(self.executable), None, str(self.model), 4096, 0, port=9123)
+            argv = popen.call_args.args[0]
+            self.assertEqual(argv[argv.index("--port") + 1], "9123")
+            self.assertEqual(status["configuration"]["port"], 9123)
+        with patch("backend.llama_server.sys.platform", "win32"):
+            with self.assertRaisesRegex(LlamaServerError, "between 1024 and 65535"):
+                LlamaServerManager().start(
+                    "path", str(self.executable), None, str(self.model), 4096, 0, port=80)
 
     def test_path_validation_rejects_non_server_exe_and_non_gguf_model(self):
         wrong_exe = self.root / "other.exe"
@@ -67,6 +217,8 @@ class LlamaServerManagerTests(unittest.TestCase):
                 self.manager.start("path", str(self.executable), None, str(wrong_model), 4096, 0)
             with self.assertRaisesRegex(LlamaServerError, "between"):
                 self.manager.start("path", str(self.executable), None, str(self.model), 1, 0)
+            with self.assertRaisesRegex(LlamaServerError, "between"):
+                self.manager.start("path", str(self.executable), None, str(self.model), 4096, 0, port=65536)
 
     def test_start_is_windows_only(self):
         with patch("backend.llama_server.sys.platform", "linux"):

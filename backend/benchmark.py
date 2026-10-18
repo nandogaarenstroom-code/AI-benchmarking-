@@ -1910,6 +1910,7 @@ class BenchmarkManager:
                   "server_reported_options_note": (
                       "Reported server defaults/runtime metadata; not an acknowledgement "
                       "that per-request options were applied."),
+                  "managed_launch": model.get("managed_launch"),
                   "max_tokens_for_context_budget": (
                       {"value": 2048, "assumed": True}
                       if "max_tokens" not in requested_options else

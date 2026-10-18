@@ -384,8 +384,11 @@ def discover_models():
                            "modified": item.get("modified_at"),
                            "capabilities": {"streaming": True, "structured_output": "Unknown",
                                             "tools": "Unknown"}, "demo": False})
-    for name, endpoint in (("LM Studio", "http://localhost:1234/v1"),
-                           ("OpenAI-compatible", "http://127.0.0.1:8080/v1")):
+    openai_endpoints = [("OpenAI-compatible", "http://127.0.0.1:8080/v1")]
+    managed_endpoint = llama_server_manager.endpoint
+    if managed_endpoint not in {endpoint for _, endpoint in openai_endpoints}:
+        openai_endpoints.append(("OpenAI-compatible", managed_endpoint))
+    for name, endpoint in (("LM Studio", "http://localhost:1234/v1"), *openai_endpoints):
         data = _get(endpoint + "/models")
         if data:
             runtime_details = _llama_runtime_details(endpoint)
