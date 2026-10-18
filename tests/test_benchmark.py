@@ -1669,6 +1669,45 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager._context_limit({}, options), 16384)
             self.assertEqual(manager._context_limit({"context_length": "Unknown"}, options), 16384)
 
+    def test_context_limit_precedence_and_non_ollama_fallback(self):
+        manager = BenchmarkManager
+        self.assertEqual(manager._context_limit_details(
+            {"backend": "Ollama", "context_configured": 8192, "context_train": 4096},
+            {"num_ctx": 16384}), (4096, "request_num_ctx+training_cap"))
+        self.assertEqual(manager._context_limit_details(
+            {"backend": "Ollama", "context_configured": 8192, "context_train": 4096},
+            {}), (4096, "context_configured+training_cap"))
+        self.assertEqual(manager._context_limit_details(
+            {"backend": "Ollama", "context_train": 32768}, {}), (None, "unknown"))
+        self.assertEqual(manager._context_limit_details(
+            {"backend": "OpenAI-compatible"}, {}), (131072, "128k_fallback"))
+        self.assertEqual(manager._context_limit(
+            {"backend": "OpenAI-compatible"}, {}), 131072)
+
+    def test_unknown_ollama_window_skips_context_tests_and_scores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            model = {"id": "ollama-model", "name": "Ollama", "backend": "Ollama",
+                     "endpoint": "http://localhost:11434", "context_train": "Unknown",
+                     "context_configured": "Unknown", "context_default_assumed": "Unknown"}
+            results = []
+            with patch("backend.benchmark.resolve_model", return_value=model), \
+                    patch("backend.benchmark.hardware_info", return_value={}), \
+                    patch("backend.benchmark.make_tests", return_value=[]), \
+                    patch.object(manager, "_performance", return_value={"score": None}), \
+                    patch.object(manager, "_write_outputs",
+                                 side_effect=lambda result: results.append(result)):
+                self.assertTrue(manager.run({
+                    "model": model, "profile": "QUICK", "generation_options": {}}))
+            result = results[0]
+            self.assertEqual(result["configuration"]["context_limit"], None)
+            self.assertEqual(result["configuration"]["context_limit_source"], "unknown")
+            self.assertEqual(result["configuration"]["context_suite_status"], "NOT RUN")
+            self.assertEqual(result["configuration"]["context_suite_reason"],
+                             "CONTEXT_WINDOW_UNKNOWN")
+            self.assertEqual(result["context_scaling"], {"fresh": [], "accumulated": []})
+            self.assertIsNone(result["scores"]["context_behavior"]["fresh"])
+
     def test_over_budget_context_is_not_sent_to_backend(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))

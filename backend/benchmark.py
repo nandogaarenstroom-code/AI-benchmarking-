@@ -823,13 +823,44 @@ class BenchmarkManager:
 
     @staticmethod
     def _context_limit(model, options):
+        limit, _ = BenchmarkManager._context_limit_details(model, options)
+        return limit
+
+    @staticmethod
+    def _context_limit_details(model, options):
+        if model.get("backend") == "Ollama":
+            candidates = (
+                (options.get("num_ctx"), "request_num_ctx"),
+                (model.get("context_configured"), "context_configured"),
+            )
+            limit, source = None, "unknown"
+            for value, candidate_source in candidates:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if isinstance(value, bool) or parsed < 1:
+                    continue
+                limit, source = parsed, candidate_source
+                break
+            training = model.get("context_train")
+            try:
+                training_limit = int(training)
+            except (TypeError, ValueError, OverflowError):
+                training_limit = None
+            if limit is not None and training_limit and training_limit > 0:
+                limit = min(limit, training_limit)
+                source += "+training_cap"
+            return limit, source
         try:
             limit = min(int(model.get("context_length", 131072)), 262144)
         except (TypeError, ValueError, OverflowError):
             limit = 131072
+        source = "runtime_reported" if model.get("context_length") not in (None, "Unknown") else "128k_fallback"
         if options.get("num_ctx") is not None:
             limit = min(limit, options["num_ctx"])
-        return min(limit, 32768) if model.get("demo") else limit
+            source = "request_num_ctx" if limit == options["num_ctx"] else source
+        return (min(limit, 32768), source) if model.get("demo") else (limit, source)
 
     @staticmethod
     def _history_tokens(history):
@@ -1014,6 +1045,10 @@ class BenchmarkManager:
                                  "suite_seed", result.get("seed")),
                              "sampling_seed": (result.get("configuration") or {}).get(
                                  "sampling_seed"),
+                             "context_limit": (result.get("configuration") or {}).get(
+                                 "context_limit"),
+                             "context_limit_source": (result.get("configuration") or {}).get(
+                                 "context_limit_source"),
                              "profile": (result.get("configuration") or {}).get("profile"),
                              "generation_options": (result.get("configuration") or {}).get(
                                  "generation_options"),
@@ -1023,6 +1058,7 @@ class BenchmarkManager:
         for field, label in (
                 ("task_set_version", "task set"), ("evaluator_version", "evaluator"),
                 ("suite_seed", "suite seed"), ("sampling_seed", "sampling seed"),
+                ("context_limit", "context limit"), ("context_limit_source", "context limit source"),
                 ("profile", "profile"), ("generation_options", "generation settings"),
                 ("repeat_runs", "repeat count"), ("demo", "demo/real run type")):
             values = {json.dumps(row.get(field), sort_keys=True) for row in rows}
@@ -1160,8 +1196,10 @@ class BenchmarkManager:
                   any(not self._valid_checkpoint_outcome(entry) for entry in replicates)):
                 raise ValueError("checkpoint repeats are invalid")
 
-        context_tests = make_context_tests(
-            seed, self._context_limit(model, options), output_budget=options["max_tokens"] + 128)
+        max_context = self._context_limit(model, options)
+        context_tests = (make_context_tests(
+            seed, max_context, output_budget=options["max_tokens"] + 128)
+            if max_context is not None else [])
         for field in ("context_results", "accumulated_results"):
             records = state.get(field)
             if not isinstance(records, list) or len(records) > len(context_tests):
@@ -1748,12 +1786,16 @@ class BenchmarkManager:
             save_checkpoint("fresh_context")
             self._update_status(state="cancelled")
             return
-        max_context = self._context_limit(model, generation_options)
-        context_tests = make_context_tests(
-            seed, max_context=max_context, output_budget=generation_options["max_tokens"] + 128)
+        context_limit, context_limit_source = self._context_limit_details(model, requested_options)
+        context_tests = (make_context_tests(
+            seed, max_context=context_limit,
+            output_budget=generation_options["max_tokens"] + 128)
+            if context_limit is not None else [])
         context_sizes = [test["context_size"] for test in context_tests]
         self._update_status(phase="Testing fresh context windows",
-                            activity="Sending independent prompts at increasing context sizes.",
+                            activity=("Ollama context window is unknown; context suite will not run."
+                                      if context_limit is None else
+                                      "Sending independent prompts at increasing context sizes."),
                             total=len(context_tests), progress=len(context_results))
         context_done = {item["id"] for item in context_results}
         for index, test in enumerate(context_tests):
@@ -1783,7 +1825,9 @@ class BenchmarkManager:
             ])
         accumulated_done = {item["id"] for item in accumulated_results}
         self._update_status(phase="Testing accumulated context",
-                            activity="Reusing conversation history to measure context degradation.",
+                            activity=("Context window is unknown; accumulated context suite will not run."
+                                      if context_limit is None else
+                                      "Reusing conversation history to measure context degradation."),
                             total=len(context_tests), progress=len(accumulated_results))
         for index, test in enumerate(context_tests):
             if self.cancel_requested.is_set():
@@ -1851,6 +1895,8 @@ class BenchmarkManager:
                   "hardware": hardware, "configuration": {"profile": profile, "warmup_runs": 3,
                   "measured_runs": 5, "retries": 2,
                   "suite_seed": seed, "sampling_seed": requested_options.get("seed"),
+                  "context_limit": context_limit,
+                  "context_limit_source": context_limit_source,
                   "temperature": requested_options.get("temperature"),
                   "top_p": requested_options.get("top_p"),
                   "generation_options": requested_options,
@@ -1858,6 +1904,7 @@ class BenchmarkManager:
                   "request_options_sent": request_options_snapshot(model, requested_options),
                   "server_reported_options": {
                       key: model[key] for key in ("generation_defaults", "context_length",
+                          "context_train", "context_configured", "context_default_assumed",
                           "gpu_offload", "backend_version") if model.get(key) is not None
                   },
                   "server_reported_options_note": (
@@ -1870,6 +1917,10 @@ class BenchmarkManager:
                   "repeat_runs": repeat_runs,
                   "repeat_seed_policy": "sampling seed increments by one per repeat" if repeat_runs > 1 else "single run",
                   "context_reset_per_test": True, "context_suite": context_sizes,
+                  "context_suite_status": "NOT RUN" if context_limit is None else
+                      ("COMPLETE" if context_sizes else "NO WINDOWS FIT"),
+                  "context_suite_reason": (
+                      "CONTEXT_WINDOW_UNKNOWN" if context_limit is None else None),
                   "context_output_token_reserve": generation_options["max_tokens"],
                   "context_chat_overhead_token_reserve": 128,
                   "context_accumulation_policy": "retain prior turns; resize new distractor filler to target total window",
