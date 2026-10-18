@@ -9,12 +9,13 @@ import time
 import codecs
 import math
 import socket
-from datetime import datetime, timezone
-
+from .hardware import hardware_info, recommend_settings
 from .llama_server import llama_server_manager
 
-MAX_MODEL_RESPONSE_BYTES = 1_048_576
+MAX_MODEL_RESPONSE_BYTES = 16_777_216
 MAX_DISCOVERY_RESPONSE_BYTES = 1_048_576
+MODEL_READ_TIMEOUT_SECONDS = 300
+CLIENT_DECODE_MIN_INTERVAL_SECONDS = 0.01
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -28,26 +29,31 @@ def _open(request, timeout):
 
 GENERATION_DEFAULTS = {
     "temperature": 0.0, "top_p": 1.0, "top_k": 40, "min_p": 0.05,
-    "repeat_penalty": 1.1, "max_tokens": 128, "seed": 12345,
+    "repeat_penalty": 1.1, "max_tokens": 2048, "seed": 12345,
 }
 GENERATION_LIMITS = {
     "temperature": (0.0, 2.0), "top_p": (0.01, 1.0), "top_k": (0, 1000),
     "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
-    "max_tokens": (1, 4096), "seed": (0, 2147483647),
+    "max_tokens": (1, 32768), "seed": (0, 2147483647),
+    "num_ctx": (512, 131072), "num_gpu": (0, 999), "num_thread": (1, 256),
 }
-INTEGER_GENERATION_OPTIONS = {"top_k", "max_tokens", "seed"}
+INTEGER_GENERATION_OPTIONS = {"top_k", "max_tokens", "seed", "num_ctx", "num_gpu", "num_thread"}
 
 
 def normalize_generation_options(options=None):
     """Validate generation settings supplied by the local dashboard or API."""
     options = options if isinstance(options, dict) else {}
     normalized = {}
-    for name, default in GENERATION_DEFAULTS.items():
+    defaults = dict(GENERATION_DEFAULTS)
+    for name in ("num_ctx", "num_gpu", "num_thread"):
+        if name in options:
+            defaults[name] = GENERATION_LIMITS[name][0]
+    for name, default in defaults.items():
         try:
             value = float(options.get(name, default))
             if not math.isfinite(value):
                 raise ValueError
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             value = default
         lower, upper = GENERATION_LIMITS[name]
         value = min(upper, max(lower, value))
@@ -68,12 +74,12 @@ def _estimate_tokens(text):
     return max(1, len(text.encode("utf-8")) // 4) if text else 0
 
 
-def _response_lines(response):
+def _response_lines(response, include_read_ids=False):
     """Decode bounded response chunks into complete UTF-8 lines."""
     decoder = codecs.getincrementaldecoder("utf-8")()
     buffer = ""
     response_size = 0
-    for raw in response:
+    for read_id, raw in enumerate(response):
         response_size += len(raw)
         if response_size > MAX_MODEL_RESPONSE_BYTES:
             raise AdapterError(
@@ -81,42 +87,47 @@ def _response_lines(response):
         buffer += decoder.decode(raw)
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            yield line.rstrip("\r")
+            line = line.rstrip("\r")
+            yield (line, read_id) if include_read_ids else line
     buffer += decoder.decode(b"", final=True)
     if buffer:
-        yield buffer.rstrip("\r")
+        line = buffer.rstrip("\r")
+        yield (line, read_id) if include_read_ids else line
 
 
 def _sse_data_events(response):
-    """Yield data payloads from SSE, including events split across read chunks."""
+    """Yield SSE payloads with the ID of the read that completed each event."""
     data_lines = []
+    event_read_id = None
 
     def finish_event():
         if not data_lines:
             return None
-        return "\n".join(data_lines)
+        return "\n".join(data_lines), event_read_id
 
-    for line in _response_lines(response):
+    for line, read_id in _response_lines(response, include_read_ids=True):
         if not line:
             event = finish_event()
             data_lines.clear()
+            event_read_id = None
             if event is not None:
-                yield event
+                yield event[0], read_id
         elif line.startswith(":"):
             continue
         elif line.startswith("data:"):
             if data_lines:
-                previous = finish_event()
+                previous, previous_read_id = finish_event()
                 try:
                     json.loads(previous)
                     previous_is_complete = True
                 except json.JSONDecodeError:
                     previous_is_complete = previous.strip() == "[DONE]"
                 if previous_is_complete:
-                    yield previous
+                    yield previous, previous_read_id
                     data_lines.clear()
             value = line[5:]
             data_lines.append(value[1:] if value.startswith(" ") else value)
+            event_read_id = read_id
     event = finish_event()
     if event is not None:
         yield event
@@ -255,17 +266,193 @@ def model_info(model):
     }
 
 
-def hardware_info():
-    import platform
-    return {"cpu": platform.processor() or "Unknown", "cores": __import__("os").cpu_count(),
-            "threads": __import__("os").cpu_count(), "architecture": platform.machine() or "Unknown",
-            "gpu": "Unknown", "gpu_vram": "Unknown", "ram": "Unknown",
-            "os": platform.platform(), "driver": "Unknown", "cuda": "Unknown", "rocm": "Unknown",
-            "collected_at": datetime.now(timezone.utc).isoformat()}
+def _nonnegative(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+        return value if math.isfinite(value) and value >= 0 else None
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
-def ask_model(model, prompt, history=None, options=None):
-    """Send one isolated prompt, or an explicit history for context accumulation tests."""
+class _StreamTelemetry:
+    def __init__(self, messages, callback, backend):
+        self.started = time.perf_counter()
+        self.first_token_at = None
+        self.callback = callback
+        self.backend = backend
+        self.prompt_estimate = _estimate_tokens("\n".join(
+            str(message.get("content", "")) for message in messages if isinstance(message, dict)))
+        self.generated_bytes = 0
+        self.first_arrival_bytes = 0
+        self.first_content_read_id = None
+        self.last_content_read_id = None
+        self.content_arrivals = 0
+        self.last_event_read_id = None
+        self.last_event_at = None
+        self.completed_at = None
+        self.content_chunks = 0
+        self.prompt_tokens = self.output_tokens = None
+        self.prefill_s = self.decode_s = None
+        self.prefill_rate = self.decode_rate = None
+        self.timing_source = "client_estimate"
+        self.finish_reason = None
+        self.backend_metrics = {}
+        self.emit("prefill", self.started)
+
+    def event_time(self, read_id=None):
+        if read_id is not None and read_id == self.last_event_read_id:
+            return self.last_event_at
+        arrived_at = time.perf_counter()
+        if read_id is not None:
+            self.last_event_read_id = read_id
+            self.last_event_at = arrived_at
+        return arrived_at
+
+    def ingest(self, item, text="", reasoning="", read_id=None):
+        event_at = self.event_time(read_id)
+        if text or reasoning:
+            if self.first_token_at is None:
+                self.first_token_at = event_at
+            chunk_bytes = len((text + reasoning).encode("utf-8"))
+            self.generated_bytes += chunk_bytes
+            self.content_chunks += 1
+            if self.content_chunks == 1:
+                self.first_content_read_id = read_id
+                self.first_arrival_bytes = chunk_bytes
+            elif read_id is not None and read_id == self.first_content_read_id:
+                self.first_arrival_bytes += chunk_bytes
+            if self.content_chunks == 1 or read_id is None or read_id != self.last_content_read_id:
+                self.content_arrivals += 1
+                self.last_content_read_id = read_id
+        if self.backend == "Ollama":
+            for source, target in (("prompt_eval_count", "prompt_tokens"), ("eval_count", "output_tokens")):
+                value = _nonnegative(item.get(source))
+                if value is not None:
+                    setattr(self, target, int(value))
+                    self.backend_metrics[source] = value
+            for source, target in (("prompt_eval_duration", "prefill_s"), ("eval_duration", "decode_s")):
+                value = _nonnegative(item.get(source))
+                if value is not None:
+                    setattr(self, target, value / 1e9)
+                    self.backend_metrics[source] = value
+            if item.get("done_reason") is not None:
+                self.finish_reason = str(item["done_reason"])
+            if self.prefill_s is not None or self.decode_s is not None:
+                self.timing_source = "ollama"
+        usage = item.get("usage")
+        if isinstance(usage, dict):
+            for source, target in (("prompt_tokens", "prompt_tokens"), ("completion_tokens", "output_tokens")):
+                value = _nonnegative(usage.get(source))
+                if value is not None:
+                    setattr(self, target, int(value))
+                    self.backend_metrics[source] = value
+        if self.finish_reason is not None or item.get("done") is True:
+            if self.completed_at is None:
+                self.completed_at = event_at
+        timings = item.get("timings")
+        if isinstance(timings, dict):
+            for source, target in (("prompt_n", "prompt_tokens"), ("predicted_n", "output_tokens"),
+                                   ("prompt_ms", "prefill_s"), ("predicted_ms", "decode_s"),
+                                   ("prompt_per_second", "prefill_rate"),
+                                   ("predicted_per_second", "decode_rate")):
+                value = _nonnegative(timings.get(source))
+                if value is not None:
+                    setattr(self, target, value / 1000 if source.endswith("_ms") else value)
+                    self.backend_metrics[source] = value
+            if self.prefill_s is not None or self.decode_s is not None or self.prefill_rate is not None or self.decode_rate is not None:
+                self.timing_source = "llama.cpp"
+        if self.callback:
+            self.emit("generating" if self.first_token_at is not None else "prefill",
+                      time.perf_counter())
+
+    def snapshot(self, phase, now):
+        end_at = self.completed_at if self.completed_at is not None else now
+        elapsed = max(0.0, end_at - (self.first_token_at if self.first_token_at is not None else end_at))
+        prompt_tokens = self.prompt_tokens if self.prompt_tokens is not None else self.prompt_estimate
+        output_tokens = self.output_tokens if self.output_tokens is not None else (
+            max(1, self.generated_bytes // 4) if self.generated_bytes else 0)
+        prefill_rate = self.prefill_rate
+        if prefill_rate is None and self.prompt_tokens is not None and self.prefill_s:
+            prefill_rate = self.prompt_tokens / self.prefill_s
+        decode_rate = self.decode_rate
+        if decode_rate is None and self.output_tokens is not None and self.decode_s:
+            decode_rate = self.output_tokens / self.decode_s
+        source = self.timing_source
+        if source == "client_estimate" and self.prompt_tokens is not None and self.output_tokens is not None:
+            source = "backend_usage"
+        # The first observed content arrival is outside the measured interval.
+        client_decode_tokens = max(1, (self.generated_bytes - self.first_arrival_bytes) // 4)
+        client_sample = elapsed >= CLIENT_DECODE_MIN_INTERVAL_SECONDS and self.content_arrivals > 1
+        if decode_rate is not None:
+            decode_token_count = self.output_tokens
+            decode_measurement_s = self.decode_s
+            if decode_measurement_s is None and self.output_tokens is not None and decode_rate > 0:
+                decode_measurement_s = self.output_tokens / decode_rate
+        else:
+            decode_token_count = client_decode_tokens if client_sample else None
+            decode_measurement_s = elapsed if client_sample else None
+        return {
+            "phase": phase, "prompt_tokens": int(prompt_tokens), "output_tokens": int(output_tokens),
+            "ttft_s": None if self.first_token_at is None else self.first_token_at - self.started,
+            "generation_s": self.decode_s if self.decode_s is not None else elapsed,
+            "client_generation_s": elapsed, "prefill_s": self.prefill_s, "decode_s": self.decode_s,
+            "prefill_tokens_per_second": prefill_rate,
+            "decode_tokens_per_second": decode_rate if decode_rate is not None else (
+                client_decode_tokens / elapsed if client_sample else None),
+            "decode_token_count": decode_token_count,
+            "decode_measurement_s": decode_measurement_s,
+            "decode_token_count_is_estimated": decode_rate is None,
+            "token_count_is_estimated": self.prompt_tokens is None or self.output_tokens is None,
+            "timing_source": source,
+            "timing_is_estimated": (
+                (self.prefill_s is None and prefill_rate is None) or
+                (self.decode_s is None and decode_rate is None)),
+            "decode_timing_is_estimated": decode_rate is None,
+            "finish_reason": self.finish_reason,
+            "truncated": self.finish_reason in ("length", "max_tokens", "max_output_tokens"),
+            "backend_metrics": dict(self.backend_metrics),
+        }
+
+    def emit(self, phase, now):
+        metrics = self.snapshot(phase, now)
+        if self.callback:
+            self.callback(metrics)
+        return metrics
+
+    def finish(self, answer, completed, backend_name):
+        if completed and self.completed_at is None:
+            self.completed_at = time.perf_counter()
+        metrics = self.emit("completed" if completed else "incomplete",
+                            self.completed_at if completed else time.perf_counter())
+        if not completed:
+            raise AdapterError("INCOMPLETE_STREAM",
+                               f"{backend_name} ended the response without a completion marker.")
+        if not answer:
+            error = AdapterError("EMPTY_RESPONSE",
+                                 "The model server completed the request without generated text.")
+            error.finish_reason = self.finish_reason
+            error.truncated = metrics["truncated"]
+            raise error
+        return {"text": answer, **metrics}
+
+
+def _metadata_timeout(response):
+    """Give optional trailing usage a short grace period after a finish marker."""
+    try:
+        response.fp.raw._sock.settimeout(0.25)
+    except (AttributeError, OSError):
+        pass
+
+
+def ask_model(model, prompt, history=None, options=None, progress_callback=None):
+    """Stream an answer and optionally publish telemetry without exposing reasoning.
+
+    Prefill throughput is None until reported by the backend, never derived from
+    TTFT. Token counts and client-side decode estimates are explicitly marked.
+    Ollama runtime options are not sent to external OpenAI-compatible servers.
+    """
     options = normalize_generation_options(options)
     messages = list(history or []) + [{"role": "user", "content": prompt}]
     try:
@@ -279,12 +466,14 @@ def ask_model(model, prompt, history=None, options=None):
                         "top_k": options["top_k"], "min_p": options["min_p"],
                         "repeat_penalty": options["repeat_penalty"], "num_predict": options["max_tokens"],
                         "seed": options["seed"],
+                        **{key: options[key] for key in ("num_ctx", "num_gpu", "num_thread")
+                           if key in options},
                     },
                 }).encode(),
                 headers={"Content-Type": "application/json"})
-            started = time.perf_counter()
-            with _open(request, timeout=60) as response:
-                chunks, first_token_at = [], None
+            telemetry = _StreamTelemetry(messages, progress_callback, "Ollama")
+            with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
+                chunks = []
                 completed = False
                 for line in _response_lines(response):
                     if not line.strip():
@@ -298,94 +487,84 @@ def ask_model(model, prompt, history=None, options=None):
                     text = message.get("content", "") if isinstance(message, dict) else None
                     if not isinstance(text, str):
                         raise ValueError("invalid Ollama response content")
-                    if text and first_token_at is None:
-                        first_token_at = time.perf_counter()
+                    reasoning = message.get("thinking", "") if isinstance(message, dict) else ""
+                    if not isinstance(reasoning, str):
+                        raise ValueError("invalid Ollama reasoning content")
+                    telemetry.ingest(item, text, reasoning)
                     chunks.append(text)
                     if item.get("done"):
                         completed = True
                         break
-                answer = "".join(chunks).strip()[:50_000]
-                if not completed:
-                    raise AdapterError(
-                        "INCOMPLETE_STREAM",
-                        "Ollama ended the response before its completion marker.")
-                if not answer:
-                    raise AdapterError(
-                        "EMPTY_RESPONSE",
-                        "The model server completed the request without generated text.")
-                prompt_text = "\n".join(str(message.get("content", ""))
-                                        for message in messages if isinstance(message, dict))
-                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt_text),
-                        "output_tokens": _estimate_tokens(answer),
-                        "ttft_s": (first_token_at or time.perf_counter()) - started,
-                        "generation_s": time.perf_counter() - (first_token_at or started)}
+                return telemetry.finish("".join(chunks).strip(), completed, "Ollama")
         body = {
             "model": model["id"], "messages": messages,
             "temperature": options["temperature"], "top_p": options["top_p"],
             "max_tokens": options["max_tokens"], "seed": options["seed"], "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if model.get("llama_cpp"):
             body.update({"top_k": options["top_k"], "min_p": options["min_p"],
-                         "repeat_penalty": options["repeat_penalty"]})
+                         "repeat_penalty": options["repeat_penalty"], "timings_per_token": True})
         request = urllib.request.Request(
             model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
-        started = time.perf_counter()
-        with _open(request, timeout=60) as response:
-            chunks, first_token_at = [], None
+        telemetry = _StreamTelemetry(messages, progress_callback, "OpenAI-compatible")
+        with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
+            chunks = []
             completed = False
-            finish_reason = None
-            for event in _sse_data_events(response):
-                if event.strip() == "[DONE]":
-                    completed = True
-                    break
-                item = json.loads(event)
-                if not isinstance(item, dict):
-                    raise ValueError("invalid OpenAI-compatible response")
-                if item.get("error"):
-                    raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
-                choices = item.get("choices", [])
-                if not isinstance(choices, list):
-                    raise ValueError("invalid OpenAI-compatible choices")
-                if not choices:
-                    continue
-                choice = choices[0]
-                if not isinstance(choice, dict):
-                    raise ValueError("invalid OpenAI-compatible choice")
-                content_source = choice.get("delta", choice.get("message", {}))
-                if isinstance(content_source, str):
-                    text = content_source
-                elif isinstance(content_source, dict):
-                    text = content_source.get("content", choice.get("text", ""))
-                else:
-                    raise ValueError("invalid OpenAI-compatible content")
-                if isinstance(text, list):
-                    text = "".join(part.get("text", "") for part in text
-                                   if isinstance(part, dict) and isinstance(part.get("text"), str))
-                if text is None:
-                    text = ""
-                if not isinstance(text, str):
-                    raise ValueError("invalid OpenAI-compatible content")
-                if text and first_token_at is None:
-                    first_token_at = time.perf_counter()
-                chunks.append(text)
-                if choice.get("finish_reason") is not None:
-                    finish_reason = str(choice["finish_reason"])
-                    completed = True
-            answer = "".join(chunks).strip()[:50_000]
-            if not completed:
-                raise AdapterError(
-                    "INCOMPLETE_STREAM",
-                    "The response stream ended without a completion marker.")
-            if not answer:
-                raise AdapterError(
-                    "EMPTY_RESPONSE",
-                    "The model server completed the request without generated text.")
-            return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
-                    "output_tokens": _estimate_tokens(answer),
-                    "ttft_s": (first_token_at or time.perf_counter()) - started,
-                    "generation_s": time.perf_counter() - (first_token_at or started),
-                    "finish_reason": finish_reason}
+            metadata_deadline = None
+            try:
+                for event, read_id in _sse_data_events(response):
+                    if metadata_deadline is not None and time.monotonic() > metadata_deadline:
+                        break
+                    if event.strip() == "[DONE]":
+                        completed = True
+                        if telemetry.completed_at is None:
+                            telemetry.completed_at = telemetry.event_time(read_id)
+                        break
+                    item = json.loads(event)
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid OpenAI-compatible response")
+                    if item.get("error"):
+                        raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
+                    choices = item.get("choices", [])
+                    if not isinstance(choices, list):
+                        raise ValueError("invalid OpenAI-compatible choices")
+                    if not choices:
+                        telemetry.ingest(item, read_id=read_id)
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        raise ValueError("invalid OpenAI-compatible choice")
+                    content_source = choice.get("delta", choice.get("message", {}))
+                    if isinstance(content_source, str):
+                        text = content_source
+                    elif isinstance(content_source, dict):
+                        text = content_source.get("content", choice.get("text", ""))
+                    else:
+                        raise ValueError("invalid OpenAI-compatible content")
+                    if isinstance(text, list):
+                        text = "".join(part.get("text", "") for part in text
+                                       if isinstance(part, dict) and isinstance(part.get("text"), str))
+                    if text is None:
+                        text = ""
+                    if not isinstance(text, str):
+                        raise ValueError("invalid OpenAI-compatible content")
+                    reasoning = (content_source.get("reasoning_content") or
+                                 content_source.get("reasoning") or "") if isinstance(content_source, dict) else ""
+                    if not isinstance(reasoning, str):
+                        raise ValueError("invalid reasoning content")
+                    chunks.append(text)
+                    if choice.get("finish_reason") is not None:
+                        telemetry.finish_reason = str(choice["finish_reason"])
+                        completed = True
+                        metadata_deadline = time.monotonic() + 0.25
+                        _metadata_timeout(response)
+                    telemetry.ingest(item, text, reasoning, read_id)
+            except (TimeoutError, ConnectionError, OSError, http.client.HTTPException):
+                if not completed:
+                    raise
+            return telemetry.finish("".join(chunks).strip(), completed, "The model server")
     except AdapterError:
         raise
     except urllib.error.HTTPError as exc:

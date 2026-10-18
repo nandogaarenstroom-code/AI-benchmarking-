@@ -191,12 +191,6 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <label>Full path to GGUF model file
       <input id="llama-model" type="text" placeholder="C:\models\model.gguf" autocomplete="off">
     </label>
-    <label>Requested context tokens
-      <input id="llama-context" type="number" min="512" max="2147483647" step="1" value="32768">
-    </label>
-    <label>GPU layers (0 = CPU)
-      <input id="llama-gpu-layers" type="number" min="0" max="1000" step="1" value="0">
-    </label>
   </div>
   <p class="muted">WinGet does not launch apps itself; this option locates <code>llama-server.exe</code> inside an already-installed WinGet package.
     Enter that package's ID (including a custom-fork package ID).
@@ -210,6 +204,14 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <div class="toolbar"><h2>Detected local models</h2><button class="secondary" id="refresh-models" type="button">Refresh scan</button></div>
   <div id="models">Scanning local AI servers…</div>
   <p id="discovery-status" class="muted" role="status"></p>
+  <p id="hardware-summary" class="muted" role="status">Detecting this computer's hardware…</p>
+  <p id="hardware-advice" class="notice"></p>
+  <button id="apply-recommendations" class="secondary" type="button" disabled>Apply hardware suggestions</button>
+  <div role="tablist" aria-label="Benchmark settings">
+    <button id="basic-tab" role="tab" aria-selected="true" aria-controls="basic-settings" type="button">Basic</button>
+    <button id="advanced-tab" role="tab" aria-selected="false" aria-controls="advanced-settings" tabindex="-1" type="button">Advanced</button>
+  </div>
+  <div id="basic-settings" role="tabpanel" aria-labelledby="basic-tab">
   <div class="controls">
   <label>Benchmark profile <select id="profile"><option>STANDARD</option><option>QUICK</option><option>FULL</option><option>PERFORMANCE</option><option>QUALITY</option><option>REASONING</option><option>CODING</option><option>LONG CONTEXT</option></select></label>
   <label>Generation preset <select id="preset">
@@ -219,8 +221,19 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <option value="custom">Custom</option>
   </select></label>
   </div>
-  <details>
-    <summary>Advanced settings</summary>
+  </div>
+  <div id="advanced-settings" role="tabpanel" aria-labelledby="advanced-tab" hidden>
+    <fieldset>
+      <legend>Runtime parameters</legend>
+      <div class="settings">
+        <label>llama.cpp requested context tokens<input id="llama-context" type="number" min="512" max="131072" step="1" value="8192"></label>
+        <label>llama.cpp GPU layers (0 = CPU)<input id="llama-gpu-layers" type="number" min="0" max="999" step="1" value="0"></label>
+        <label>Ollama context tokens (blank = server default)<input id="runtime-context" type="number" min="512" max="131072" step="1" disabled></label>
+        <label>Ollama GPU layers (blank = server default)<input id="runtime-gpu" type="number" min="0" max="999" step="1" disabled></label>
+        <label>Ollama CPU threads (blank = server default)<input id="runtime-threads" type="number" min="1" max="256" step="1" disabled></label>
+      </div>
+      <p class="muted">llama.cpp load parameters take effect on the next dashboard launch: stop the app-managed server first, then start it again. For externally managed llama.cpp or LM Studio, change load settings in that server. Ollama overrides apply to benchmark requests only. Suggestions are starting points, not proof that a model fits in memory.</p>
+    </fieldset>
     <fieldset>
     <legend>Generation settings</legend>
     <div class="settings">
@@ -229,15 +242,15 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
       <label>Top K (0 disables)<input id="top-k" type="number" min="0" max="1000" step="1" value="40"></label>
       <label>Min P<input id="min-p" type="number" min="0" max="1" step="0.01" value="0.05"></label>
       <label>Repeat penalty<input id="repeat-penalty" type="number" min="0.5" max="2" step="0.05" value="1.1"></label>
-      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="4096" step="1" value="128"></label>
+      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="32768" step="1" value="2048"></label>
       <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
       <label>Primary test repeats<select id="repeat-runs"><option value="1">1 (default)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select></label>
     </div>
     <p class="muted" id="settings-note">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
     </fieldset>
-  </details>
+  </div>
   <button class="primary" id="run" disabled>Choose a model to run</button><button class="secondary" id="resume" disabled>Resume previous run</button>
-  <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>. A run creates <code>benchmark_&lt;timestamp&gt;_&lt;id&gt;.json</code>, <code>.csv</code>, <code>.pdf</code>, and <code>_quality.svg</code> files.</p>
+  <p class="muted">Results are saved on this computer in <code id="results-directory">results/</code>, grouped into a folder per model. Each run creates JSON, CSV, PDF, quality SVG, and a standalone voxel HTML report.</p>
   <p id="run-error" role="alert" hidden></p>
 </section>
 <section id="progress" class="station-progress" aria-live="polite" hidden>
@@ -245,6 +258,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <p id="activity" class="muted"></p>
   <progress id="bar" value="0" max="1" aria-label="Current benchmark phase progress"></progress>
   <p id="live"></p>
+  <p id="live-speeds" class="muted">Prefill: waiting · Decode: waiting</p>
   <p class="muted">Keep this page open to follow each phase. Completed results will appear below.</p>
   <button class="secondary" id="cancel" type="button" hidden>Cancel run</button>
 </section>
@@ -308,7 +322,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <div id="context-records"></div>
 </section>
 <script>
-let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false;
+let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false,hardwareRecommendations=null;
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
@@ -373,6 +387,10 @@ async function poll(){
   const response=await fetch('/api/status');
   if(!response.ok)throw new Error('Could not read benchmark status.');
   const status=await response.json();
+  const metrics=status.live_metrics||{};
+  const speed=value=>Number.isFinite(value)?`${value.toFixed(1)} tok/s`:'not available';
+  const timingEstimate=metrics.timing_is_estimated?' (includes estimated timing)':'';
+  $('live-speeds').textContent=`Prefill: ${speed(metrics.prefill_tokens_per_second)} · Decode: ${speed(metrics.decode_tokens_per_second)} · ${metrics.timing_source||'waiting for server telemetry'}${timingEstimate}${metrics.token_count_is_estimated?' (estimated tokens)':''}${metrics.active_requests===0?' · last completed request':''}`;
   resumeAvailable=Boolean(status.resume_available);
   if(status.state==='running'){
     $('progress').hidden=false;$('bar').max=status.total||1;$('bar').value=status.progress||0;
@@ -489,7 +507,7 @@ function show(result,resultDirectory){
   $('performance').textContent=scoreText(result.scores.performance);
   $('overall').textContent=scoreText(result.scores.overall);
   const performance=result.performance||{};
-  $('performance-detail').textContent=`Measured sample throughput: ${performance.tokens_per_second??'not available'} estimated output tokens/s · median TTFT ${performance.ttft_s??'not available'}s (${performance.timing_is_estimated?'estimated from request timing':'stream-timed'}) · token counts are estimates.`;
+  $('performance-detail').textContent=`Sample decode: ${performance.tokens_per_second??'not available'} tokens/s · prefill: ${performance.prefill_tokens_per_second??'not available'} tokens/s · median TTFT ${performance.ttft_s??'not available'}s · ${performance.timing_source||'timing source unavailable'}${performance.timing_is_estimated?' (includes estimated timing)':''} · token counts ${performance.token_count_is_estimated===false?'backend-reported':'estimated'}.`;
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
   const notRun=result.not_run||[];
   $('result-note').textContent=result.demo
@@ -514,8 +532,12 @@ function show(result,resultDirectory){
     $('repeat-summary').textContent+=` NOT RUN repeats: ${repeatOutcomes.not_run} of ${repeatOutcomes.requested_per_test*(result.tests||[]).length} requested.`;
   $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
   const links=$('result-links');links.replaceChildren();
-  [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]].forEach(([label,filename])=>{
-    const link=document.createElement('a');link.href='/results/'+encodeURIComponent(filename);
+  const downloads=[['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]];
+  const modelFolder=result.model_folder||result.artifact_directory;
+  if(modelFolder)downloads.push(['Voxel HTML',`${result.id}.html`]);
+  downloads.forEach(([label,filename])=>{
+    const relative=(modelFolder?modelFolder+'/':'')+filename;
+    const link=document.createElement('a');link.href='/results/'+relative.split('/').map(encodeURIComponent).join('/');
     link.download=filename;link.textContent=`Download ${label}`;links.append(link);
   });
   const table=$('categories');table.replaceChildren();
@@ -760,22 +782,71 @@ $('cancel').onclick=async()=>{
   finally{$('cancel').disabled=false}
 };
 const presets={
-  repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
-  balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:128,seed:12345},
-  creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:128,seed:12345}
+  repeatable:{temperature:0,top_p:1,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:2048,seed:12345},
+  balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:2048,seed:12345},
+  creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:2048,seed:12345}
 };
 const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
-$('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
+let maxTokensEdited=false;
+$('preset').onchange=()=>{const values=presets[$('preset').value];if(values){maxTokensEdited=true;Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])}};
 Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
+$('max-tokens').addEventListener('input',()=>{maxTokensEdited=true});
 function applyModelDefaults(model){
   Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=presets.repeatable[key]);
+  maxTokensEdited=false;
   const defaults=model.generation_defaults||{};
-  Object.entries(defaults).forEach(([key,value])=>{if(parameterInputs[key])$(parameterInputs[key]).value=value});
+  Object.entries(defaults).forEach(([key,value])=>{if(parameterInputs[key]&&key!=='max_tokens')$(parameterInputs[key]).value=value});
+  ['runtime-context','runtime-gpu','runtime-threads'].forEach(id=>$(id).disabled=model.backend!=='Ollama');
   $('preset').value=Object.keys(defaults).length?'custom':'repeatable';
   $('settings-note').textContent=Object.keys(defaults).length
-    ?'Values reported by this llama.cpp server are loaded into the controls. Editing a value sends it as a per-request override. Settings are recorded with each result; repeats use consecutive sampling seeds.'
+    ?'Server sampling defaults are loaded, with a more generous hardware-based output budget. Editing a value sends a per-request override. Settings are recorded with each result; repeats use consecutive sampling seeds.'
     :'Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).';
 }
+function selectSettingsTab(name){
+  ['basic','advanced'].forEach(tab=>{
+    const active=tab===name;
+    $(tab+'-settings').hidden=!active;
+    $(tab+'-tab').setAttribute('aria-selected',String(active));
+    $(tab+'-tab').tabIndex=active?0:-1;
+  });
+}
+['basic','advanced'].forEach(name=>{
+  $(name+'-tab').onclick=()=>selectSettingsTab(name);
+  $(name+'-tab').onkeydown=event=>{
+    if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){
+      event.preventDefault();
+      const next=event.key==='Home'?'basic':event.key==='End'?'advanced':name==='basic'?'advanced':'basic';
+      selectSettingsTab(next);$(next+'-tab').focus();
+    }
+  };
+});
+function applyHardwareSuggestions(){
+  if(!hardwareRecommendations)return;
+  const advice=hardwareRecommendations;
+  $('max-tokens').value=advice.generation_options.max_tokens;
+  $('llama-context').value=advice.context_size;
+  if(advice.gpu_layers!==null&&advice.gpu_layers!==undefined)$('llama-gpu-layers').value=advice.gpu_layers;
+  $('runtime-context').value=advice.context_size;
+  $('runtime-gpu').value=advice.gpu_layers??'';
+  $('runtime-threads').value=advice.threads;
+  $('preset').value='custom';
+}
+async function loadHardware(){
+  try{
+    const response=await fetch('/api/hardware');
+    if(!response.ok)throw new Error('Hardware detection unavailable; conservative editable defaults remain active.');
+    const data=await response.json(),hardware=data.hardware;
+    hardwareRecommendations=data.recommendations;
+    $('hardware-summary').textContent=`CPU: ${hardware.cpu} · threads: ${hardware.threads??'Unknown'} · RAM: ${hardware.ram} · GPU: ${hardware.gpu} · VRAM: ${hardware.gpu_vram}`;
+    const advice=hardwareRecommendations;
+    $('hardware-advice').textContent=`Suggested output budget: ${advice.generation_options.max_tokens} tokens; context: ${advice.context_size}; GPU layers: ${advice.gpu_layers??'unchanged (capacity unknown)'}. ${(advice.notes||[]).join(' ')}`;
+    Object.values(presets).forEach(preset=>preset.max_tokens=advice.generation_options.max_tokens);
+    // Do not replace settings that were edited while detection was running.
+    if(!maxTokensEdited)$('max-tokens').value=advice.generation_options.max_tokens;
+    $('apply-recommendations').disabled=false;
+  }catch(error){$('hardware-summary').textContent=error.message}
+}
+$('apply-recommendations').onclick=applyHardwareSuggestions;
 async function startRun(endpoint,payload){
   $('run-error').hidden=true;$('progress').hidden=false;$('result').hidden=true;
   $('phase').textContent=endpoint==='/api/resume'?'Resuming benchmark':'Starting benchmark';
@@ -794,6 +865,11 @@ async function startRun(endpoint,payload){
 $('run').onclick=()=>{
   if(!selected){displayError('Select a detected model before starting a benchmark.');return}
   const generation_options=Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,Number($(id).value)]));
+  if(selected.backend==='Ollama'){
+    Object.entries({num_ctx:'runtime-context',num_gpu:'runtime-gpu',num_thread:'runtime-threads'}).forEach(([key,id])=>{
+      if($(id).value!=='')generation_options[key]=Number($(id).value);
+    });
+  }
   startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
@@ -853,6 +929,7 @@ $('stop-llama-server').onclick=async()=>{
 };
 updateLlamaSource();
 updateLlamaServerStatus();
+loadHardware();
 load();
 loadResults();
 poll().catch(error=>displayError(error.message));
