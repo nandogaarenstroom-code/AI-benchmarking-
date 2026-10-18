@@ -145,7 +145,7 @@ def _macos(info):
         try:
             data = json.loads(_command(["system_profiler", "SPDisplaysDataType", "-json"]))
             for gpu in data.get("SPDisplaysDataType", []):
-                vram = gpu.get("spdisplays_vram") or gpu.get("spdisplays_vram_shared") or ""
+                vram = gpu.get("spdisplays_vram") or ""
                 match = re.search(r"([\d.]+)\s*(GB|MB)", vram, re.IGNORECASE)
                 memory = int(float(match[1]) * (GIB if match[2].upper() == "GB" else 1024 ** 2)) if match else None
                 info["gpus"].append({"name": gpu.get("sppci_model") or gpu.get("_name") or UNKNOWN,
@@ -192,7 +192,7 @@ def recommend_settings(hardware=None):
     capacity = max(ram, vram)
     max_tokens = 16384 if capacity >= 64 * GIB else 8192 if capacity >= 32 * GIB else 4096 if capacity >= 16 * GIB else 2048
     context = 16384 if capacity >= 64 * GIB else 8192 if capacity >= 32 * GIB else 4096
-    context = max(context, max_tokens + 2048)
+    context = max(context, max_tokens * 2)
     threads = _positive(info.get("cores")) or _positive(info.get("threads"))
     generation = {"max_tokens": max_tokens, "num_ctx": context}
     if threads:

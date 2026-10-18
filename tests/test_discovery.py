@@ -181,6 +181,41 @@ class DiscoveryTests(unittest.TestCase):
         self.assertAlmostEqual(result["decode_measurement_s"], 2)
         self.assertTrue(result["decode_token_count_is_estimated"])
 
+    def test_buffered_sse_content_events_do_not_form_client_decode_sample(self):
+        response = Response([
+            b'data: {"choices":[{"delta":{"content":"' + b"a" * 400 + b'"}}]}\n',
+            b'\n\ndata: {"choices":[{"delta":{"content":"' + b"b" * 40 +
+            b'"},"finish_reason":"stop"}]}\n\n',
+        ])
+        with patch("backend.discovery._open", return_value=response), \
+                patch("backend.discovery.time.perf_counter", side_effect=[10, 10.2, 12]):
+            result = ask_model(OPENAI, "prompt")
+        self.assertIsNone(result["decode_tokens_per_second"])
+        self.assertIsNone(result["decode_token_count"])
+        self.assertIsNone(result["decode_measurement_s"])
+
+    def test_near_simultaneous_sse_events_do_not_form_client_decode_sample(self):
+        with patch("backend.discovery._open", return_value=sse(
+                {"choices": [{"delta": {"content": "a" * 400}}]},
+                {"choices": [{"delta": {"content": "b" * 40}, "finish_reason": "stop"}]})), \
+                patch("backend.discovery.time.perf_counter",
+                      side_effect=[10, 10.2, 10.200001]):
+            result = ask_model(OPENAI, "prompt")
+        self.assertIsNone(result["decode_tokens_per_second"])
+        self.assertIsNone(result["decode_measurement_s"])
+
+    def test_client_decode_endpoint_excludes_trailing_metadata_wait(self):
+        with patch("backend.discovery._open", return_value=sse(
+                {"choices": [{"delta": {"content": "a" * 400}}]},
+                {"choices": [{"delta": {"content": "b" * 40}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 110}})), \
+                patch("backend.discovery.time.perf_counter",
+                      side_effect=[0, 1, 1.1, 1.35, 1.6]):
+            result = ask_model(OPENAI, "prompt")
+        self.assertAlmostEqual(result["generation_s"], 0.1)
+        self.assertAlmostEqual(result["client_generation_s"], 0.1)
+        self.assertAlmostEqual(result["decode_tokens_per_second"], 100)
+
     def test_finish_marker_preserves_answer_when_optional_metadata_times_out(self):
         class TimeoutResponse(Response):
             def __iter__(self):

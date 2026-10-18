@@ -19,6 +19,7 @@ from backend.discovery import (
     model_info, normalize_generation_options, resolve_model,
 )
 from backend.evaluation import DOCKER_PYTHON_IMAGE, evaluate, evaluate_with_details
+from backend.hardware import GIB, recommend_settings
 from backend.reporting import write_chart, write_pdf, write_html
 
 
@@ -689,6 +690,16 @@ class BenchmarkTests(unittest.TestCase):
                      if item["category"] == "Knowledge"]
         self.assertGreaterEqual(len({item["subcategory"] for item in knowledge}), 4)
         self.assertGreaterEqual(len({item["prompt"] for item in knowledge}), 8)
+
+    def test_hardware_context_recommendations_leave_a_probe_window(self):
+        for memory in (16, 32, 64):
+            with self.subTest(memory_gib=memory):
+                recommendation = recommend_settings({"ram_bytes": memory * GIB})
+                tokens = recommendation["generation_options"]["max_tokens"]
+                context = recommendation["context_size"]
+                probes = make_context_tests(7, context, output_budget=tokens + 128)
+                self.assertTrue(probes)
+                self.assertLessEqual(probes[0]["context_size"], context)
 
     def test_pilot_generators_vary_constraints_scenarios_and_edge_cases(self):
         reasoning_items = [item for seed in range(40) for item in make_tests("FULL", seed)

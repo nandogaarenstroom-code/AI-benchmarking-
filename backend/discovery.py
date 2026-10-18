@@ -15,6 +15,7 @@ from .llama_server import llama_server_manager
 MAX_MODEL_RESPONSE_BYTES = 16_777_216
 MAX_DISCOVERY_RESPONSE_BYTES = 1_048_576
 MODEL_READ_TIMEOUT_SECONDS = 300
+CLIENT_DECODE_MIN_INTERVAL_SECONDS = 0.01
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -73,12 +74,12 @@ def _estimate_tokens(text):
     return max(1, len(text.encode("utf-8")) // 4) if text else 0
 
 
-def _response_lines(response):
+def _response_lines(response, include_read_ids=False):
     """Decode bounded response chunks into complete UTF-8 lines."""
     decoder = codecs.getincrementaldecoder("utf-8")()
     buffer = ""
     response_size = 0
-    for raw in response:
+    for read_id, raw in enumerate(response):
         response_size += len(raw)
         if response_size > MAX_MODEL_RESPONSE_BYTES:
             raise AdapterError(
@@ -86,42 +87,47 @@ def _response_lines(response):
         buffer += decoder.decode(raw)
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            yield line.rstrip("\r")
+            line = line.rstrip("\r")
+            yield (line, read_id) if include_read_ids else line
     buffer += decoder.decode(b"", final=True)
     if buffer:
-        yield buffer.rstrip("\r")
+        line = buffer.rstrip("\r")
+        yield (line, read_id) if include_read_ids else line
 
 
 def _sse_data_events(response):
-    """Yield data payloads from SSE, including events split across read chunks."""
+    """Yield SSE payloads with the ID of the read that completed each event."""
     data_lines = []
+    event_read_id = None
 
     def finish_event():
         if not data_lines:
             return None
-        return "\n".join(data_lines)
+        return "\n".join(data_lines), event_read_id
 
-    for line in _response_lines(response):
+    for line, read_id in _response_lines(response, include_read_ids=True):
         if not line:
             event = finish_event()
             data_lines.clear()
+            event_read_id = None
             if event is not None:
-                yield event
+                yield event[0], read_id
         elif line.startswith(":"):
             continue
         elif line.startswith("data:"):
             if data_lines:
-                previous = finish_event()
+                previous, previous_read_id = finish_event()
                 try:
                     json.loads(previous)
                     previous_is_complete = True
                 except json.JSONDecodeError:
                     previous_is_complete = previous.strip() == "[DONE]"
                 if previous_is_complete:
-                    yield previous
+                    yield previous, previous_read_id
                     data_lines.clear()
             value = line[5:]
             data_lines.append(value[1:] if value.startswith(" ") else value)
+            event_read_id = read_id
     event = finish_event()
     if event is not None:
         yield event
@@ -279,7 +285,13 @@ class _StreamTelemetry:
         self.prompt_estimate = _estimate_tokens("\n".join(
             str(message.get("content", "")) for message in messages if isinstance(message, dict)))
         self.generated_bytes = 0
-        self.first_chunk_bytes = 0
+        self.first_arrival_bytes = 0
+        self.first_content_read_id = None
+        self.last_content_read_id = None
+        self.content_arrivals = 0
+        self.last_event_read_id = None
+        self.last_event_at = None
+        self.completed_at = None
         self.content_chunks = 0
         self.prompt_tokens = self.output_tokens = None
         self.prefill_s = self.decode_s = None
@@ -289,15 +301,31 @@ class _StreamTelemetry:
         self.backend_metrics = {}
         self.emit("prefill", self.started)
 
-    def ingest(self, item, text="", reasoning=""):
+    def event_time(self, read_id=None):
+        if read_id is not None and read_id == self.last_event_read_id:
+            return self.last_event_at
+        arrived_at = time.perf_counter()
+        if read_id is not None:
+            self.last_event_read_id = read_id
+            self.last_event_at = arrived_at
+        return arrived_at
+
+    def ingest(self, item, text="", reasoning="", read_id=None):
+        event_at = self.event_time(read_id)
         if text or reasoning:
             if self.first_token_at is None:
-                self.first_token_at = time.perf_counter()
+                self.first_token_at = event_at
             chunk_bytes = len((text + reasoning).encode("utf-8"))
             self.generated_bytes += chunk_bytes
             self.content_chunks += 1
             if self.content_chunks == 1:
-                self.first_chunk_bytes = chunk_bytes
+                self.first_content_read_id = read_id
+                self.first_arrival_bytes = chunk_bytes
+            elif read_id is not None and read_id == self.first_content_read_id:
+                self.first_arrival_bytes += chunk_bytes
+            if self.content_chunks == 1 or read_id is None or read_id != self.last_content_read_id:
+                self.content_arrivals += 1
+                self.last_content_read_id = read_id
         if self.backend == "Ollama":
             for source, target in (("prompt_eval_count", "prompt_tokens"), ("eval_count", "output_tokens")):
                 value = _nonnegative(item.get(source))
@@ -320,6 +348,9 @@ class _StreamTelemetry:
                 if value is not None:
                     setattr(self, target, int(value))
                     self.backend_metrics[source] = value
+        if self.finish_reason is not None or item.get("done") is True:
+            if self.completed_at is None:
+                self.completed_at = event_at
         timings = item.get("timings")
         if isinstance(timings, dict):
             for source, target in (("prompt_n", "prompt_tokens"), ("predicted_n", "output_tokens"),
@@ -337,7 +368,8 @@ class _StreamTelemetry:
                       time.perf_counter())
 
     def snapshot(self, phase, now):
-        elapsed = max(0.0, now - (self.first_token_at if self.first_token_at is not None else now))
+        end_at = self.completed_at if self.completed_at is not None else now
+        elapsed = max(0.0, end_at - (self.first_token_at if self.first_token_at is not None else end_at))
         prompt_tokens = self.prompt_tokens if self.prompt_tokens is not None else self.prompt_estimate
         output_tokens = self.output_tokens if self.output_tokens is not None else (
             max(1, self.generated_bytes // 4) if self.generated_bytes else 0)
@@ -350,10 +382,9 @@ class _StreamTelemetry:
         source = self.timing_source
         if source == "client_estimate" and self.prompt_tokens is not None and self.output_tokens is not None:
             source = "backend_usage"
-        # The first chunk arrived before the measured decode interval. Counting
-        # it makes one-chunk responses appear arbitrarily fast.
-        client_decode_tokens = max(1, (self.generated_bytes - self.first_chunk_bytes) // 4)
-        client_sample = elapsed > 0 and self.content_chunks > 1
+        # The first observed content arrival is outside the measured interval.
+        client_decode_tokens = max(1, (self.generated_bytes - self.first_arrival_bytes) // 4)
+        client_sample = elapsed >= CLIENT_DECODE_MIN_INTERVAL_SECONDS and self.content_arrivals > 1
         if decode_rate is not None:
             decode_token_count = self.output_tokens
             decode_measurement_s = self.decode_s
@@ -391,7 +422,10 @@ class _StreamTelemetry:
         return metrics
 
     def finish(self, answer, completed, backend_name):
-        metrics = self.emit("completed" if completed else "incomplete", time.perf_counter())
+        if completed and self.completed_at is None:
+            self.completed_at = time.perf_counter()
+        metrics = self.emit("completed" if completed else "incomplete",
+                            self.completed_at if completed else time.perf_counter())
         if not completed:
             raise AdapterError("INCOMPLETE_STREAM",
                                f"{backend_name} ended the response without a completion marker.")
@@ -480,11 +514,13 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
             completed = False
             metadata_deadline = None
             try:
-                for event in _sse_data_events(response):
+                for event, read_id in _sse_data_events(response):
                     if metadata_deadline is not None and time.monotonic() > metadata_deadline:
                         break
                     if event.strip() == "[DONE]":
                         completed = True
+                        if telemetry.completed_at is None:
+                            telemetry.completed_at = telemetry.event_time(read_id)
                         break
                     item = json.loads(event)
                     if not isinstance(item, dict):
@@ -495,7 +531,7 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
                     if not isinstance(choices, list):
                         raise ValueError("invalid OpenAI-compatible choices")
                     if not choices:
-                        telemetry.ingest(item)
+                        telemetry.ingest(item, read_id=read_id)
                         continue
                     choice = choices[0]
                     if not isinstance(choice, dict):
@@ -524,7 +560,7 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
                         completed = True
                         metadata_deadline = time.monotonic() + 0.25
                         _metadata_timeout(response)
-                    telemetry.ingest(item, text, reasoning)
+                    telemetry.ingest(item, text, reasoning, read_id)
             except (TimeoutError, ConnectionError, OSError, http.client.HTTPException):
                 if not completed:
                     raise

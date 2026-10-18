@@ -226,11 +226,11 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <fieldset>
       <legend>Runtime parameters</legend>
       <div class="settings">
-        <label>llama.cpp requested context tokens<input id="llama-context" type="number" min="512" max="2147483647" step="1" value="8192"></label>
-        <label>llama.cpp GPU layers (0 = CPU)<input id="llama-gpu-layers" type="number" min="0" max="1000" step="1" value="0"></label>
-        <label>Ollama context tokens (blank = server default)<input id="runtime-context" type="number" min="512" max="262144" step="1" disabled></label>
-        <label>Ollama GPU layers (blank = server default)<input id="runtime-gpu" type="number" min="0" max="1000" step="1" disabled></label>
-        <label>Ollama CPU threads (blank = server default)<input id="runtime-threads" type="number" min="1" max="1024" step="1" disabled></label>
+        <label>llama.cpp requested context tokens<input id="llama-context" type="number" min="512" max="131072" step="1" value="8192"></label>
+        <label>llama.cpp GPU layers (0 = CPU)<input id="llama-gpu-layers" type="number" min="0" max="999" step="1" value="0"></label>
+        <label>Ollama context tokens (blank = server default)<input id="runtime-context" type="number" min="512" max="131072" step="1" disabled></label>
+        <label>Ollama GPU layers (blank = server default)<input id="runtime-gpu" type="number" min="0" max="999" step="1" disabled></label>
+        <label>Ollama CPU threads (blank = server default)<input id="runtime-threads" type="number" min="1" max="256" step="1" disabled></label>
       </div>
       <p class="muted">llama.cpp load parameters take effect on the next dashboard launch: stop the app-managed server first, then start it again. For externally managed llama.cpp or LM Studio, change load settings in that server. Ollama overrides apply to benchmark requests only. Suggestions are starting points, not proof that a model fits in memory.</p>
     </fieldset>
@@ -787,10 +787,13 @@ const presets={
   creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:2048,seed:12345}
 };
 const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
-$('preset').onchange=()=>{const values=presets[$('preset').value];if(values)Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])};
+let maxTokensEdited=false;
+$('preset').onchange=()=>{const values=presets[$('preset').value];if(values){maxTokensEdited=true;Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])}};
 Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
+$('max-tokens').addEventListener('input',()=>{maxTokensEdited=true});
 function applyModelDefaults(model){
   Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=presets.repeatable[key]);
+  maxTokensEdited=false;
   const defaults=model.generation_defaults||{};
   Object.entries(defaults).forEach(([key,value])=>{if(parameterInputs[key]&&key!=='max_tokens')$(parameterInputs[key]).value=value});
   ['runtime-context','runtime-gpu','runtime-threads'].forEach(id=>$(id).disabled=model.backend!=='Ollama');
@@ -839,7 +842,7 @@ async function loadHardware(){
     $('hardware-advice').textContent=`Suggested output budget: ${advice.generation_options.max_tokens} tokens; context: ${advice.context_size}; GPU layers: ${advice.gpu_layers??'unchanged (capacity unknown)'}. ${(advice.notes||[]).join(' ')}`;
     Object.values(presets).forEach(preset=>preset.max_tokens=advice.generation_options.max_tokens);
     // Do not replace settings that were edited while detection was running.
-    if($('preset').value!=='custom')$('max-tokens').value=advice.generation_options.max_tokens;
+    if(!maxTokensEdited)$('max-tokens').value=advice.generation_options.max_tokens;
     $('apply-recommendations').disabled=false;
   }catch(error){$('hardware-summary').textContent=error.message}
 }

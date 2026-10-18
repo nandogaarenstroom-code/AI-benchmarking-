@@ -106,6 +106,17 @@ class HardwareTests(unittest.TestCase):
             hardware._macos(info)
         self.assertEqual(info["gpus"][0]["vram_bytes"], 8 * hardware.GIB)
 
+    def test_mac_shared_memory_is_not_reported_as_dedicated_vram(self):
+        info = {"gpus": [], "detection_notes": []}
+
+        def command(args):
+            return json.dumps({"SPDisplaysDataType": [
+                {"sppci_model": "Apple M4", "spdisplays_vram_shared": "24 GB"}]}) if args[0] == "system_profiler" else ""
+
+        with patch("backend.hardware._command", side_effect=command):
+            hardware._macos(info)
+        self.assertIsNone(info["gpus"][0]["vram_bytes"])
+
     def test_missing_tools_and_unknown_platform_are_honest(self):
         with patch("backend.hardware.platform.system", return_value="Other"), \
                 patch("backend.hardware.platform.processor", return_value=""), \
@@ -142,6 +153,10 @@ class HardwareTests(unittest.TestCase):
         self.assertEqual(small["threads"], 1)
         self.assertLess(medium["generation_options"]["max_tokens"], large["generation_options"]["max_tokens"])
         self.assertTrue(large["advisory"])
+        self.assertEqual(medium["context_size"],
+                         2 * medium["generation_options"]["max_tokens"])
+        self.assertEqual(large["context_size"],
+                         2 * large["generation_options"]["max_tokens"])
         self.assertEqual(medium["generation_options"]["num_thread"], 8)
         self.assertEqual(medium["threads"], 8)
         self.assertEqual(large["context_size"], large["generation_options"]["num_ctx"])
