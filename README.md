@@ -72,11 +72,16 @@ On Windows, the dashboard can also start an app-managed llama.cpp server. Choose
 (the default is `ggml.llamacpp`, and custom-fork package IDs are supported). WinGet itself does not
 provide a `run` command: the app locates `llama-server.exe` under that package's local WinGet
 installation folder and launches it. Then enter the full path to a local `.gguf` model, a requested
-context size, and GPU layer count. The app binds that
-server to `127.0.0.1:8080`, waits for its health endpoint, and offers a stop control; a server already
-using that port must be stopped first. The app starts only the process it owns and stops it when the
+context size, GPU layer count, and optional port (1024–65535; default `8080`). The app binds that
+server to `127.0.0.1` on the selected port, waits for its health endpoint, and offers a stop control;
+a server already using that port must be stopped first. The app starts only the process it owns and stops it when the
 app exits normally. It does not download model files. Only select an executable you trust: it runs
 with the same operating-system permissions as the benchmark app.
+
+The **Advanced** tab also provides launch settings supported by the selected executable's `--help`
+output. Launch settings take effect only after restarting the managed server. The exact argv (without
+secrets) is retained in result configuration; parsed startup-log details are explicitly best-effort,
+not verified facts.
 
 The displayed startup context and GPU-layer values are the requested command-line settings; they do
 not guarantee the model or available memory can support them. A high context or offload request may
@@ -115,15 +120,19 @@ safe diagnostics appear in the saved attempt records and result summary.
 The interface reports observable answers and evaluator evidence; it does not ask models to disclose
 hidden chain-of-thought.
 
-Before starting, the dashboard lets you set temperature, top-p, top-k, min-p, repeat penalty,
-maximum output tokens, and the sampling seed. Defaults favor repeatable evaluation (`temperature: 0`,
-`top_p: 1`, `seed: 12345`); settings are included in saved result configuration and passed to
-Ollama or OpenAI-compatible adapters. When llama.cpp reports its startup generation defaults through
-`/props`, the dashboard displays those values on the model card and loads them into the generation
-controls, except that the output budget uses the more generous hardware recommendation.
-Edited controls are sent as request-level overrides and the actual benchmark settings are
-recorded with each result. The llama.cpp context window is configured when launching `llama-server`
-(for example, with `-c`); it cannot be changed for an individual request here.
+Before starting, the dashboard lets you set request parameters and a separate suite seed. Blank
+request fields are omitted so the backend can use its server default; nonblank values are validated
+and sent only to adapters that support them. The **Maximum output tokens** and **Suite seed** fields
+are required in the UI. API callers that omit the output budget leave it out of the request; result
+configuration records an assumed 2048-token context-budget reserve, not a sent override. The
+sampling seed is separate and may be left blank for the server default. Results distinguish requested
+options, the request fragment and transport values sent, and server-reported metadata; reported
+metadata is not an acknowledgement that an override was applied.
+When llama.cpp reports startup generation defaults through `/props`, those values are shown as
+read-only model details, not silently substituted for blank request values. Named configurations can
+save and restore request parameters, suite seed, repeat count, profile, and managed launch settings.
+The llama.cpp context window and other load settings are configured when launching `llama-server`;
+external llama.cpp and LM Studio settings must be changed in that server's own UI.
 Choose a **Repeatable**, **Balanced**, or **Creative** preset on the main screen; individual
 sampling controls and optional 2–5 repeats of the primary test suite are in the
 **Advanced** tab. This tab also contains requested llama.cpp context/GPU layers (restart the
@@ -140,8 +149,8 @@ Hardware detection reports CPU, RAM, GPU and VRAM when supported by local OS/ven
 missing tools or unsupported hardware produce `Unknown`, not invented capacity.
 Detected GPUs with unknown dedicated VRAM retain backend offload defaults instead of forcing CPU mode.
 The dashboard suggests context, output budget, GPU layers, and threads; use **Apply hardware
-suggestions** to populate runtime controls. Output defaults scale with detected memory, with a
-2048-token fallback and an editable ceiling of 32768 tokens. Recommendations are conservative
+suggestions** to populate controls. Output-budget suggestions scale with detected memory, with a
+2048-token suggestion and an editable ceiling of 32768 tokens. Recommendations are conservative
 starting points, not model-fit guarantees: model weights, quantization, KV cache, other applications,
 and server limits still determine what actually fits. Sampling temperature does not increase with
 hardware. Hardware detection runs on the computer hosting the application.
@@ -285,11 +294,14 @@ with each model's tokenizer, and each size/position is sampled only once. The ac
 OpenAI-compatible adapters so context degradation can be observed; it is not mixed into the primary
 fresh-context quality score.
 
-The suite never blindly exceeds the model's advertised context limit. If metadata reports a
-smaller limit, larger sizes are skipped and recorded in `context_skipped`. If the limit is
-unknown, the conservative 128K ceiling is used; 256K is only attempted when explicitly
-advertised. This makes large-context results transparent rather than turning an overflow into a
-misleading quality failure.
+The suite never blindly exceeds the model's context limit. For Ollama, it reads training context
+and configured `num_ctx` lazily for the resolved model; a requested or configured window is capped
+by the training limit when known. If no Ollama window is known, the context suite is marked
+`NOT RUN` with `CONTEXT_WINDOW_UNKNOWN` rather than guessing. Other backends retain their reported
+window or the existing conservative 128K fallback; 256K is attempted only when explicitly
+advertised. Earlier Ollama context-suite results used a guessed fallback and are **not comparable**
+to results produced by the source-aware limit. Older checkpoints may also be rejected if their
+context settings no longer validate under the current limit.
 Context probes reserve the requested output allowance and chat overhead. Accumulated requests
 also account for prior messages; requests that do not fit the estimated budget are not scored as
 incorrect answers. These are text-length estimates, not exact tokenizer guarantees.

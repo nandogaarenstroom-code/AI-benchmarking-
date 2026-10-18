@@ -255,6 +255,7 @@ class ApiSecurityTests(unittest.TestCase):
         status, _ = self.request("/api/benchmark", json.dumps({
             "profile": "QUICK", "tests": [{"evaluation_method": "code", "tests": ["raise Exception()"]}],
             "completed_tests": [{"id": "forged"}],
+            "seed": 8675309,
             "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
         }), {
             "Origin": f"http://127.0.0.1:{self.server.server_port}",
@@ -264,6 +265,7 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("tests", self.manager.payload)
         self.assertNotIn("completed_tests", self.manager.payload)
+        self.assertEqual(self.manager.payload["seed"], 8675309)
 
     def test_benchmark_api_requires_explicit_model_selection(self):
         status, body = self.request("/api/benchmark", '{"profile":"QUICK"}', {

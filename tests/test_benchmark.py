@@ -819,7 +819,8 @@ class BenchmarkTests(unittest.TestCase):
             with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
                     patch("backend.evaluation.subprocess.run",
                           return_value=CompletedProcess(args=[], returncode=0)):
-                manager.run({"profile": "QUICK", "generation_options": {"temperature": 0.6},
+                manager.run({"profile": "QUICK", "seed": 2026,
+                             "generation_options": {"temperature": 0.6},
                              "model": {"id": "demo-local", "name": "Demo", "backend": "Demo",
                                        "endpoint": "local://demo", "demo": True}})
             files = list(Path(directory).glob("*/benchmark_*"))
@@ -835,6 +836,18 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(data["summary"]["not_run_by_code"], {})
             self.assertTrue(data["demo"])
             self.assertEqual(data["configuration"]["generation_options"]["temperature"], 0.6)
+            self.assertEqual(data["configuration"]["suite_seed"], 2026)
+            self.assertIsNone(data["configuration"]["sampling_seed"])
+            self.assertEqual(data["configuration"]["temperature"], 0.6)
+            self.assertIsNone(data["configuration"]["top_p"])
+            self.assertEqual(data["configuration"]["requested_options"], {"temperature": 0.6})
+            self.assertEqual(data["configuration"]["max_tokens_for_context_budget"],
+                             {"value": 2048, "assumed": True})
+            self.assertEqual(data["configuration"]["request_options_sent"], {
+                "body": {"temperature": 0.6}, "transport": {"timeout_seconds": 300}})
+            self.assertNotIn("max_tokens", data["configuration"]["request_options_sent"]["body"])
+            self.assertEqual(data["tests"][0]["request_options_sent"], {
+                "body": {"temperature": 0.6}, "transport": {"timeout_seconds": 300}})
             self.assertEqual(data["task_set_version"], TASK_SET_VERSION)
             self.assertEqual(data["evaluator_version"], EVALUATOR_VERSION)
             self.assertEqual(data["difficulty_calibration_status"], "not empirically calibrated")
