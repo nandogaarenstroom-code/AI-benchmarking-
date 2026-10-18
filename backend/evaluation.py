@@ -5,14 +5,28 @@ import json
 import re
 import subprocess
 import shutil
+import uuid
 
 MAX_CODE_SIZE = 20_000
 MAX_TEST_COUNT = 20
 MAX_TEST_SIZE = 2_000
+DOCKER_PYTHON_IMAGE = (
+    "python:3-alpine@sha256:"
+    "618e7b661a89d05565fb402a5e1eab8b1b4e5df1f5ea3dc494998d092ffe1213"
+)
 
 
 def code_evaluator_available():
-    return shutil.which("docker") is not None
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    try:
+        result = subprocess.run(
+            [docker, "image", "inspect", DOCKER_PYTHON_IMAGE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        return result.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _number(text):
@@ -46,6 +60,10 @@ def _contains_terms_in_order(text, terms):
 
 def _normalized_value(value):
     return " ".join(re.findall(r"\w+", str(value).casefold(), flags=re.UNICODE))
+
+
+def _reject_json_constant(value):
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _schedule_is_valid(route, items, constraints):
@@ -103,7 +121,7 @@ def evaluation_criteria(test):
         return (f"Response must have {count}" +
                 (f" and contain: {', '.join(map(str, terms))}." if terms else ".") +
                 (f" It must also contain at least {relevance} distinct topical terms; "
-                 "this is a lexical relevance proxy, not semantic grading."
+                 "a keyword-only list is rejected, but this remains a lexical proxy, not semantic grading."
                  if relevance else ""))
     if method == "code":
         return f"Python answer must pass all {len(test.get('tests', []))} sandboxed assertions."
@@ -145,7 +163,7 @@ def evaluate_with_details(test, answer):
                        if passed else "The complete response did not match any reviewed acceptable answer.")
     elif method == "json_schema":
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             required_types = test.get("required_types", {})
             if not isinstance(required_types, dict):
                 explanation = "The required type rules are invalid; the evaluator rejected this test."
@@ -173,7 +191,7 @@ def evaluate_with_details(test, answer):
                         f"{key} should be {kind}" for key, kind in wrong_types) + "."
                 else:
                     explanation = "Valid JSON object contains all required keys with the expected types."
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             explanation = "The response is not valid JSON."
     elif method == "contains_all":
         missing = [str(item) for item in test.get("required_terms", [])
@@ -192,9 +210,9 @@ def evaluate_with_details(test, answer):
         items = test.get("schedule_items", [])
         constraints = test.get("schedule_constraints", [])
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             valid_object = isinstance(value, dict)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             value, valid_object = {}, False
         possible = value.get("possible") if valid_object else None
         route = value.get("route") if valid_object else None
@@ -226,9 +244,9 @@ def evaluate_with_details(test, answer):
     elif method == "fact_fields":
         expected_fields = test.get("expected_fields", {})
         try:
-            value = json.loads(answer)
+            value = json.loads(answer, parse_constant=_reject_json_constant)
             valid_object = isinstance(value, dict)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, ValueError):
             value, valid_object = {}, False
         checks = [
             {"name": "JSON object", "passed": valid_object},
@@ -276,10 +294,19 @@ def evaluate_with_details(test, answer):
                            "passed": len(set(matched_topics)) >= minimum_topics,
                            "expected_distinct_terms": minimum_topics,
                            "matched_terms": sorted(set(matched_topics))})
+            topic_vocabulary = {
+                token for term in [*test.get("required_terms", []), *topic_terms]
+                for token in re.findall(r"\w+", str(term).casefold(), flags=re.UNICODE)
+            }
+            has_non_keyword_word = any(
+                token not in topic_vocabulary
+                for token in re.findall(r"\w+", answer.casefold(), flags=re.UNICODE))
+            checks.append({"name": "Not a keyword-only list",
+                           "passed": has_non_keyword_word})
         passed = all(check["passed"] for check in checks)
         score = round(10 * sum(check["passed"] for check in checks) / len(checks), 2)
         explanation = (f"{sum(check['passed'] for check in checks)} of {len(checks)} lexical "
-                       "format/relevance checks passed. Topical terms are only a relevance proxy; "
+                       "format/relevance checks passed. Topic-word checks are only a relevance proxy; "
                        "semantic quality and originality are not judged.")
     elif method != "json_schema":
         passed = answer == str(expected)
@@ -311,14 +338,23 @@ def _run_code(source, tests):
     docker = shutil.which("docker")
     if not docker:
         return False
+    container_name = f"ai-benchmark-evaluator-{uuid.uuid4().hex}"
     try:
         completed = subprocess.run(
-            [docker, "run", "--rm", "--pull=never", "--network=none", "--cpus=0.5",
+            [docker, "run", "--rm", "--pull=never", "--name", container_name,
+             "--network=none", "--cpus=0.5",
              "--memory=128m", "--pids-limit=64", "--read-only", "--user=65534:65534",
              "--cap-drop=ALL", "--security-opt=no-new-privileges:true", "--ipc=none",
              "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--workdir=/tmp",
-             "python:3-alpine", "python", "-I", "-c", harness],
+             DOCKER_PYTHON_IMAGE, "python", "-I", "-c", harness],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3, check=False)
         return completed.returncode == 0
     except (subprocess.SubprocessError, OSError):
         return False
+    finally:
+        try:
+            subprocess.run([docker, "rm", "--force", container_name],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5, check=False)
+        except (subprocess.SubprocessError, OSError):
+            pass

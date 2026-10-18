@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import urllib.error
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 from backend.benchmark import (
@@ -16,7 +17,7 @@ from backend.discovery import (
     AdapterError, _get, _llama_runtime_details, ask_model, discover_models,
     model_info, normalize_generation_options, resolve_model,
 )
-from backend.evaluation import evaluate, evaluate_with_details
+from backend.evaluation import DOCKER_PYTHON_IMAGE, evaluate, evaluate_with_details
 from backend.reporting import write_chart, write_pdf
 
 
@@ -40,7 +41,9 @@ class BenchmarkTests(unittest.TestCase):
                 manager._atomic_state_write({"saved": True})
 
             self.assertEqual(attempts, 2)
-            self.assertEqual(json.loads(manager.state_file.read_text()), {"saved": True})
+            saved = json.loads(manager.state_file.read_text())
+            self.assertTrue(saved["saved"])
+            self.assertRegex(saved["_integrity"], r"^[a-f0-9]{64}$")
             self.assertEqual(list(Path(directory).glob("benchmark-*.tmp")), [])
 
     def test_checkpoint_replace_preserves_previous_state_after_access_denied(self):
@@ -119,7 +122,7 @@ class BenchmarkTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def __iter__(self):
-                return iter([b'{"response":"ok","done":true}\n'])
+                return iter([b'{"message":{"content":"ok"},"done":true}\n'])
 
         captured = {}
         def fake_urlopen(request, timeout):
@@ -135,6 +138,37 @@ class BenchmarkTests(unittest.TestCase):
             "temperature": 0.4, "top_p": 0.9, "top_k": 20, "min_p": 0.1,
             "repeat_penalty": 1.2, "num_predict": 64, "seed": 23,
         })
+        self.assertEqual(captured["messages"], [{"role": "user", "content": "prompt"}])
+
+    def test_ollama_and_openai_adapters_send_accumulated_history(self):
+        history = [
+            {"role": "user", "content": "remember this marker"},
+            {"role": "assistant", "content": "BLUE-42"},
+        ]
+        for backend, endpoint, response_body in (
+                ("Ollama", "http://localhost:11434",
+                 b'{"message":{"content":"BLUE-42"},"done":true}\n'),
+                ("OpenAI-compatible", "http://localhost:8080/v1",
+                 b'data: {"choices":[{"delta":{"content":"BLUE-42"}}]}\n'
+                 b'data: [DONE]\n')):
+            with self.subTest(backend=backend):
+                class Response:
+                    def __enter__(self): return self
+                    def __exit__(self, *_): return False
+                    def __iter__(self): return iter(response_body.splitlines(keepends=True))
+
+                captured = {}
+
+                def capture(request, timeout):
+                    captured.update(json.loads(request.data))
+                    return Response()
+
+                with patch("backend.discovery._open", side_effect=capture):
+                    answer = ask_model({"backend": backend, "endpoint": endpoint, "id": "model"},
+                                       "What marker?", history=history)
+                self.assertEqual(answer["text"], "BLUE-42")
+                self.assertEqual(captured["messages"], history + [
+                    {"role": "user", "content": "What marker?"}])
 
     def test_generation_options_reach_openai_compatible_adapter(self):
         class Response:
@@ -351,10 +385,11 @@ class BenchmarkTests(unittest.TestCase):
             self.assertTrue(evaluate(
                 {"evaluation_method": "code", "tests": ["assert add(1, 2) == 3"]},
                 "def add(a,b): return a+b"))
-        command = run.call_args.args[0]
+        command = run.call_args_list[1].args[0]
         self.assertIn("--network=none", command)
         self.assertIn("--cap-drop=ALL", command)
         self.assertIn("--read-only", command)
+        self.assertIn(DOCKER_PYTHON_IMAGE, command)
         self.assertFalse(evaluate({"evaluation_method": "numeric", "expected_answer": "42"}, "41"))
 
     def test_openai_compatible_adapter_integrates_with_loopback_server(self):
@@ -409,6 +444,8 @@ class BenchmarkTests(unittest.TestCase):
                   "required_types": {"answer": "string", "valid": "boolean"}}
         self.assertTrue(evaluate(schema, '{"answer":"ok","valid":true}'))
         self.assertFalse(evaluate(schema, '{"answer":false,"valid":"true"}'))
+        self.assertFalse(evaluate(schema, '{"answer":"ok","valid":true,"extra":NaN}'))
+        self.assertFalse(evaluate(schema, '{"answer":"ok","valid":true,"extra":Infinity}'))
         self.assertFalse(evaluate({**schema, "required_types": ["invalid"]},
                                   '{"answer":"ok","valid":true}'))
         rubric = {"evaluation_method": "rubric", "exact_words": 3,
@@ -444,12 +481,40 @@ class BenchmarkTests(unittest.TestCase):
                   "minimum_topic_terms": 2}
         result = evaluate_with_details(rubric, "rain rain rain")
         self.assertFalse(result["passed"])
-        self.assertEqual(result["score"], 6.67)
+        self.assertEqual(result["score"], 5)
         self.assertFalse(next(check for check in result["checks"]
                               if check["name"] == "Topical relevance proxy")["passed"])
-        relevant = evaluate_with_details(rubric, "rain wet drops")
+        self.assertFalse(next(check for check in result["checks"]
+                              if check["name"] == "Not a keyword-only list")["passed"])
+        self.assertFalse(evaluate(rubric, "rain wet drops"))
+        relevant = evaluate_with_details(rubric, "rain and wet")
         self.assertTrue(relevant["passed"])
         self.assertEqual(relevant["score"], 10)
+
+    def test_fingerprints_are_unique_and_duplicate_digests_fail_closed(self):
+        tests = make_tests("QUICK", 19)
+        self.assertEqual(len({test["item_fingerprint"] for test in tests}), len(tests))
+
+        class DuplicateDigest:
+            def hexdigest(self):
+                return "same"
+
+        with patch("backend.benchmark.hashlib.sha256", return_value=DuplicateDigest()):
+            with self.assertRaisesRegex(ValueError, "duplicate generated test fingerprint"):
+                make_tests("QUICK", 19)
+
+    def test_quality_is_equal_weighted_across_available_categories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            result = manager._scores([
+                {"category": "Mathematics", "score": 10},
+                {"category": "Mathematics", "score": 10},
+                {"category": "Coding", "score": 0},
+            ])
+        self.assertEqual(result["categories"]["Mathematics"], 100)
+        self.assertEqual(result["categories"]["Coding"], 0)
+        self.assertEqual(result["overall"], 50)
+        self.assertEqual(result["method"], "equal-weighted mean of available category scores")
 
     def test_evaluators_explain_observable_pass_and_fail_evidence(self):
         test = {"evaluation_method": "contains_all", "required_terms": ["amber", "wug"]}
@@ -497,6 +562,22 @@ class BenchmarkTests(unittest.TestCase):
                 {"evaluation_method": "code", "tests": ["assert True"]}, "print('not run')"))
         run.assert_not_called()
 
+    def test_code_evaluation_requires_pinned_image_and_available_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "coding-1", "category": "Coding", "prompt": "define f",
+                    "evaluation_method": "code", "tests": ["assert f() == 1"]}
+            with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                    patch("backend.evaluation.subprocess.run",
+                          return_value=CompletedProcess(args=[], returncode=1)) as run:
+                result = manager._execute({"demo": False}, test)
+        self.assertEqual(result["status"], "NOT RUN")
+        self.assertIsNone(result["score"])
+        self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0],
+                         ["/usr/bin/docker", "image", "inspect", DOCKER_PYTHON_IMAGE])
+
     def test_unavailable_code_evaluator_is_reported_in_test_results(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
@@ -528,7 +609,36 @@ class BenchmarkTests(unittest.TestCase):
                 patch("backend.evaluation.subprocess.run") as run:
             self.assertFalse(evaluate({"evaluation_method": "code", "tests": ["x" * 2001]}, "pass"))
             self.assertFalse(evaluate({"evaluation_method": "code", "tests": "assert True"}, "pass"))
-        run.assert_not_called()
+        self.assertEqual(run.call_count, 2)
+        self.assertTrue(all(call.args[0][1:3] == ["image", "inspect"]
+                            for call in run.call_args_list))
+
+    def test_docker_timeout_and_failure_force_remove_named_container(self):
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run", side_effect=[
+                    CompletedProcess(args=[], returncode=0),
+                    TimeoutExpired("docker", 3),
+                    CompletedProcess(args=[], returncode=0),
+                ]) as run:
+            self.assertFalse(evaluate(
+                {"evaluation_method": "code", "tests": ["assert True"]}, "pass"))
+        cleanup = run.call_args_list[2].args[0]
+        self.assertEqual(cleanup[:3], ["/usr/bin/docker", "rm", "--force"])
+        container_name = cleanup[3]
+        self.assertTrue(container_name.startswith("ai-benchmark-evaluator-"))
+        launch = run.call_args_list[1].args[0]
+        self.assertIn("--name", launch)
+        self.assertEqual(launch[launch.index("--name") + 1], container_name)
+
+        with patch("backend.evaluation.shutil.which", return_value="/usr/bin/docker"), \
+                patch("backend.evaluation.subprocess.run", side_effect=[
+                    CompletedProcess(args=[], returncode=0),
+                    CompletedProcess(args=[], returncode=1),
+                    CompletedProcess(args=[], returncode=0),
+                ]) as run:
+            self.assertFalse(evaluate(
+                {"evaluation_method": "code", "tests": ["assert True"]}, "pass"))
+        self.assertEqual(run.call_count, 3)
 
     def test_deterministic_test_generation(self):
         self.assertEqual(make_tests("QUICK", 7), make_tests("QUICK", 7))
@@ -710,17 +820,22 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.compare([data["id"]])["best_overall"], data["id"])
             self.assertEqual(manager.status()["state"], "complete")
             self.assertEqual(manager.status()["phase"], "Benchmark complete")
-            self.assertEqual(manager.status()["result_directory"], str(Path(directory).resolve()))
+            self.assertEqual(manager.status()["result_directory"], Path(directory).name)
             self.assertTrue(all(item["evaluation"]["criteria"] for item in data["tests"]))
             self.assertTrue(all(item["evaluation"]["explanation"] for item in data["tests"]))
             self.assertTrue(all(item["difficulty_rationale"] for item in data["tests"]))
             csv_header = (Path(directory) / f"{data['id']}.csv").read_text().splitlines()[0]
             self.assertIn("prompt", csv_header)
+            self.assertIn("run_type", csv_header)
             self.assertIn("subcategory", csv_header)
             self.assertIn("item_fingerprint", csv_header)
             self.assertIn("failure_code", csv_header)
             pdf_text = (Path(directory) / f"{data['id']}.pdf").read_bytes()
             self.assertIn(b"Not-run reasons: none recorded", pdf_text)
+            self.assertIn(b"Run type: DEMO DATA", pdf_text)
+            with (Path(directory) / f"{data['id']}.csv").open(newline="") as stream:
+                self.assertTrue(all(row["run_type"] == "DEMO DATA"
+                                    for row in csv.DictReader(stream)))
             chart = (Path(directory) / f"{data['id']}_quality.svg").read_text()
             self.assertIn("<svg", chart)
 
@@ -776,6 +891,11 @@ class BenchmarkTests(unittest.TestCase):
         result = write_outputs.call_args.args[0]
         replicate = result["tests"][0]["replicates"][1]
         self.assertEqual(result["summary"]["not_run_by_code"], {"TIMEOUT": 1})
+        self.assertEqual(result["tests"][0]["status"], "PASS")
+        self.assertEqual(result["tests"][0]["score"], 10)
+        self.assertEqual(result["tests"][0]["missing_repeat_count"], 1)
+        self.assertEqual(result["summary"]["repeat_outcomes"]["scored"], 1)
+        self.assertEqual(result["summary"]["repeat_outcomes"]["not_run"], 1)
         self.assertEqual(replicate["error"], "TIMEOUT")
         self.assertEqual(replicate["diagnostic"], "The local model server timed out.")
         self.assertEqual(replicate["attempts"][0]["error"], "TIMEOUT")
@@ -824,16 +944,95 @@ class BenchmarkTests(unittest.TestCase):
             snapshot["state"] = "corrupted"
             self.assertEqual(manager.status()["state"], "idle")
 
+    def test_status_suppresses_exception_paths_and_uses_relative_result_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            with patch.object(manager, "_run", side_effect=ValueError(
+                    f"failed to read {Path(directory) / 'private.txt'}")):
+                self.assertFalse(manager.run({}))
+            serialized = json.dumps(manager.status())
+            self.assertNotIn(str(Path(directory).resolve()), serialized)
+            self.assertNotIn("private.txt", serialized)
+            self.assertNotIn("ValueError", serialized)
+            self.assertEqual(manager.status()["result_directory"], Path(directory).name)
+
     def test_resume_refuses_a_checkpoint_from_another_task_or_evaluator_version(self):
-            with tempfile.TemporaryDirectory() as directory:
-                manager = BenchmarkManager(Path(directory))
-                manager.state_file.write_text(json.dumps({
-                    "task_set_version": "older-task-set",
-                    "evaluator_version": EVALUATOR_VERSION,
-                    "profile": "QUICK",
-                }))
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            manager._atomic_state_write({
+                "task_set_version": "older-task-set",
+                "evaluator_version": EVALUATOR_VERSION,
+            })
+            self.assertFalse(manager.resume())
+            self.assertIn("invalid or has been modified", manager.status()["activity"])
+
+    @staticmethod
+    def _write_valid_checkpoint(manager):
+        profile, seed = "QUICK", 12345
+        manager._atomic_state_write({
+            "model": {"id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
+                      "endpoint": "local://demo", "demo": True},
+            "profile": profile, "seed": seed,
+            "generation_options": normalize_generation_options(),
+            "repeat_runs": 1, "tests": make_tests(profile, seed),
+            "task_set_version": TASK_SET_VERSION, "evaluator_version": EVALUATOR_VERSION,
+            "resume_phase": "primary", "completed_tests": [], "failures": [],
+            "not_run": [], "warmup_errors": [], "context_results": [],
+            "accumulated_results": [],
+        })
+
+    def test_resume_rejects_tampered_and_non_object_checkpoints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self._write_valid_checkpoint(manager)
+            state = json.loads(manager.state_file.read_text())
+            state["completed_tests"] = [{"id": "forged", "score": 10, "status": "PASS"}]
+            manager.state_file.write_text(json.dumps(state))
+            with patch.object(manager, "_start_locked") as start:
                 self.assertFalse(manager.resume())
-                self.assertIn("version changed", manager.status()["activity"])
+            start.assert_not_called()
+            self.assertIn("invalid or has been modified", manager.status()["activity"])
+
+            manager.state_file.write_text("[]")
+            self.assertFalse(manager.resume())
+            self.assertIn("invalid or has been modified", manager.status()["activity"])
+
+    def test_resume_validates_checkpoint_before_starting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self._write_valid_checkpoint(manager)
+            with patch.object(manager, "_start_locked", return_value=True) as start:
+                self.assertTrue(manager.resume())
+            payload = start.call_args.args[0]
+            self.assertNotIn("_integrity", payload)
+            self.assertEqual(payload["tests"], make_tests("QUICK", 12345))
+
+    def test_resume_accepts_accumulated_warmup_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self._write_valid_checkpoint(manager)
+            state = json.loads(manager.state_file.read_text())
+            state.pop("_integrity")
+            state["warmup_errors"] = [{"attempt": attempt} for attempt in range(6)]
+            manager._validate_checkpoint(state)
+
+    def test_resume_rejects_signed_checkpoint_with_unknown_completed_test(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            tests = make_tests("QUICK", 12345)
+            forged = {**tests[0], "id": "forged", "score": 10,
+                      "passed": True, "status": "PASS"}
+            manager._atomic_state_write({
+                "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
+                "profile": "QUICK", "seed": 12345,
+                "generation_options": normalize_generation_options(), "repeat_runs": 1,
+                "tests": tests, "task_set_version": TASK_SET_VERSION,
+                "evaluator_version": EVALUATOR_VERSION, "resume_phase": "primary",
+                "completed_tests": [forged], "failures": [], "not_run": [],
+                "warmup_errors": [], "context_results": [], "accumulated_results": [],
+            })
+            self.assertFalse(manager.resume())
+            self.assertIn("invalid or has been modified", manager.status()["activity"])
 
     def test_cancelled_context_phase_checkpoints_and_resumes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -865,6 +1064,74 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertTrue(manager.run(state))
             self.assertEqual(manager.status()["state"], "complete")
 
+    def test_cancellation_checkpoints_warmup_primary_and_accumulated_phases(self):
+        demo = {"id": "demo-local", "name": "Demo", "backend": "Demo",
+                "endpoint": "local://demo", "demo": True}
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+
+            def cancel_warmup(model, test, history=None, generation_options=None):
+                if test["prompt"] == "warm up":
+                    manager.cancel_requested.set()
+                    return ""
+                return ""
+
+            with patch.object(manager, "_answer", side_effect=cancel_warmup):
+                self.assertTrue(manager.run({"profile": "QUICK", "model": demo}))
+            self.assertEqual(json.loads(manager.state_file.read_text())["resume_phase"], "warmup")
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            tests = make_tests("QUICK", 12345)[:2]
+
+            def cancel_primary(model, test, history=None, generation_options=None):
+                result = {**test, "answer": "ok", "passed": True, "score": 10,
+                          "status": "PASS", "attempts": [], "error": None,
+                          "latency_s": 0.1, "ttft_s": 0.1, "generation_s": 0.1,
+                          "prompt_tokens": 1, "output_tokens": 1,
+                          "timing_is_estimated": True, "evaluation": {
+                              "passed": True, "status": "PASS", "criteria": "test",
+                              "explanation": "passed"}}
+                manager.cancel_requested.set()
+                return result
+
+            with patch("backend.benchmark.make_tests", return_value=tests), \
+                    patch.object(manager, "_execute", side_effect=cancel_primary):
+                self.assertTrue(manager.run({"profile": "QUICK", "model": demo}))
+            self.assertEqual(json.loads(manager.state_file.read_text())["resume_phase"], "primary")
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            context_tests = [
+                {"id": "context-4096-beginning", "category": "Context Scaling",
+                 "context_size": 4096, "context_position": "beginning", "prompt": "first",
+                 "expected_answer": "CTX-1", "estimated_prompt_tokens": 4096,
+                 "evaluation_method": "contains_all", "required_terms": ["CTX-1"], "max_score": 10},
+                {"id": "context-8192-middle", "category": "Context Scaling",
+                 "context_size": 8192, "context_position": "middle", "prompt": "second",
+                 "expected_answer": "CTX-2", "estimated_prompt_tokens": 8192,
+                 "evaluation_method": "contains_all", "required_terms": ["CTX-2"], "max_score": 10},
+            ]
+
+            def cancel_accumulated(model, test, history=None, generation_options=None):
+                result = {**test, "answer": test["expected_answer"], "passed": True, "score": 10,
+                          "status": "PASS", "attempts": [], "error": None,
+                          "latency_s": 0.1, "ttft_s": 0.1, "generation_s": 0.1,
+                          "prompt_tokens": 1, "output_tokens": 1,
+                          "timing_is_estimated": True, "evaluation": {
+                              "passed": True, "status": "PASS", "criteria": "test",
+                              "explanation": "passed"}}
+                if history is not None:
+                    manager.cancel_requested.set()
+                return result
+
+            with patch("backend.benchmark.make_tests", return_value=[]), \
+                    patch("backend.benchmark.make_context_tests", return_value=context_tests), \
+                    patch.object(manager, "_execute", side_effect=cancel_accumulated):
+                self.assertTrue(manager.run({"profile": "QUICK", "model": demo}))
+            self.assertEqual(
+                json.loads(manager.state_file.read_text())["resume_phase"], "accumulated_context")
+
     def test_cancelled_performance_phase_can_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
@@ -895,6 +1162,30 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(len(state["context_results"]), len(state["accumulated_results"]))
                 self.assertTrue(manager.run(state))
             self.assertEqual(manager.status()["state"], "complete")
+
+    def test_start_resume_and_cancel_are_serialized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            self._write_valid_checkpoint(manager)
+            entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+            def block_run(payload):
+                entered.set()
+                release.wait(timeout=3)
+                with manager._run_lock:
+                    manager.running = False
+                    manager._update_status(state="complete")
+                finished.set()
+
+            with patch.object(manager, "_run_guarded", side_effect=block_run):
+                self.assertTrue(manager.start({"profile": "QUICK"}))
+                self.assertTrue(entered.wait(timeout=2))
+                self.assertFalse(manager.start({"profile": "QUICK"}))
+                self.assertFalse(manager.resume())
+                self.assertTrue(manager.cancel())
+                release.set()
+                self.assertTrue(finished.wait(timeout=3))
+            self.assertFalse(manager.running)
 
     def test_custom_tests_are_ignored_and_run_state_recovers_after_invalid_input(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -928,14 +1219,17 @@ class BenchmarkTests(unittest.TestCase):
                 "id": "benchmark_20261008_000000_abcdef",
                 "model": {"name": "test"}, "timestamp": "now",
                 "scores": {"quality": 0, "performance": 0, "overall": 0},
-                "tests": [{"id": "test", "category": "=1+1", "difficulty": "Easy",
+                "tests": [{"id": "test", "category": "=1+1", "answer": "=2+2",
+                           "difficulty": "Easy",
                            "score": 0, "status": "PASS", "latency_s": 0}],
                 "failures": [], "quality": {"categories": {}},
             }
             manager._write_outputs(result)
             self.assertTrue((root / f"{result['id']}.json").is_file())
-            csv_row = (root / f"{result['id']}.csv").read_text().splitlines()[1]
-            self.assertIn(",'=1+1,", csv_row)
+            with (root / f"{result['id']}.csv").open(newline="") as stream:
+                csv_row = next(csv.DictReader(stream))
+            self.assertEqual(csv_row["category"], "'=1+1")
+            self.assertEqual(csv_row["answer"], "'=2+2")
             result["id"] = "../escaped"
             with self.assertRaises(ValueError):
                 manager._write_outputs(result)
@@ -944,17 +1238,21 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             chart = root / "chart.svg"
-            write_chart(chart, {"Coding": None, "Mathematics": 100, "overall": None})
+            write_chart(chart, {"<script>&": 100, "Coding": None, "overall": None})
             self.assertIn("N/T", chart.read_text())
+            self.assertIn("&lt;script&gt;&amp;", chart.read_text())
             pdf = root / "result.pdf"
             write_pdf(pdf, {
-                "model": {"name": "test"}, "timestamp": "now",
+                "model": {"name": "evil) Tj (\\\nInjected"}, "timestamp": "now", "demo": True,
                 "scores": {"quality": None, "performance": None, "overall": None},
                 "tests": [{"status": "NOT RUN"}],
                 "failures": [],
             })
             self.assertIn(b"0 passed, 0 failed, 1 not run", pdf.read_bytes())
             self.assertIn(b"Not available", pdf.read_bytes())
+            self.assertIn(b"DEMO DATA", pdf.read_bytes())
+            self.assertIn(b"evil\\) Tj \\(\\\\ Injected", pdf.read_bytes())
+            self.assertNotIn(b"evil) Tj (", pdf.read_bytes())
 
     def test_result_listing_and_loading_ignore_symlinks_outside_results(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -967,13 +1265,34 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(manager.list_results(), [])
             self.assertIsNone(manager.load_result("linked"))
 
+    def test_result_reads_use_safe_files_and_downloads_hide_checkpoint_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "results"
+            root.mkdir()
+            manager = BenchmarkManager(root)
+            result_id = "benchmark_20261016_091700_" + "a" * 32
+            (root / f"{result_id}.json").write_text('{"id":"safe"}')
+            (root / f"{result_id}.csv").write_text("run_type\nMODEL DATA\n")
+            manager._atomic_state_write({"resume_phase": "warmup"})
+            self.assertEqual(manager.read_artifact(f"{result_id}.csv"), b"run_type\nMODEL DATA\n")
+            self.assertIsNone(manager.read_artifact("current.json"))
+            self.assertIsNone(manager.read_artifact(".checkpoint.key"))
+            self.assertIsNone(manager.load_result("../current"))
+
+            external = Path(directory) / "outside.csv"
+            external.write_text("private")
+            (root / f"{result_id}.pdf").symlink_to(external)
+            self.assertIsNone(manager.read_artifact(f"{result_id}.pdf"))
+
     def test_result_listing_skips_corrupt_json(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "broken.json").write_text("{")
+            (root / "invalid-utf8.json").write_bytes(b"\xff")
             manager = BenchmarkManager(root)
             self.assertEqual(manager.list_results(), [])
             self.assertIsNone(manager.load_result("broken"))
+            self.assertIsNone(manager.load_result("invalid-utf8"))
 
 
 if __name__ == "__main__":

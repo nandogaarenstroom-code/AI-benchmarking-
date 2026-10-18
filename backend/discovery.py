@@ -271,9 +271,9 @@ def ask_model(model, prompt, history=None, options=None):
     try:
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
-                model["endpoint"] + "/api/generate",
+                model["endpoint"] + "/api/chat",
                 data=json.dumps({
-                    "model": model["id"], "prompt": prompt, "stream": True,
+                    "model": model["id"], "messages": messages, "stream": True,
                     "options": {
                         "temperature": options["temperature"], "top_p": options["top_p"],
                         "top_k": options["top_k"], "min_p": options["min_p"],
@@ -294,7 +294,8 @@ def ask_model(model, prompt, history=None, options=None):
                         raise ValueError("invalid Ollama response")
                     if item.get("error"):
                         raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
-                    text = item.get("response", "")
+                    message = item.get("message", {})
+                    text = message.get("content", "") if isinstance(message, dict) else None
                     if not isinstance(text, str):
                         raise ValueError("invalid Ollama response content")
                     if text and first_token_at is None:
@@ -312,7 +313,9 @@ def ask_model(model, prompt, history=None, options=None):
                     raise AdapterError(
                         "EMPTY_RESPONSE",
                         "The model server completed the request without generated text.")
-                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt),
+                prompt_text = "\n".join(str(message.get("content", ""))
+                                        for message in messages if isinstance(message, dict))
+                return {"text": answer, "prompt_tokens": _estimate_tokens(prompt_text),
                         "output_tokens": _estimate_tokens(answer),
                         "ttft_s": (first_token_at or time.perf_counter()) - started,
                         "generation_s": time.perf_counter() - (first_token_at or started)}

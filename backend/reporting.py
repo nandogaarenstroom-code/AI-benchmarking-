@@ -3,6 +3,12 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 
+def _pdf_literal(value):
+    text = "".join(character if ord(character) >= 32 and ord(character) != 127 else " "
+                   for character in str(value))
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
 def write_chart(path, values):
     bars = []
     for i, (name, value) in enumerate(values.items()):
@@ -28,7 +34,9 @@ def write_pdf(path, result):
     not_run_by_code = result.get("summary", {}).get("not_run_by_code", {})
     score = lambda key: (f"{result['scores'][key]}/100"
                          if result["scores"].get(key) is not None else "Not available")
-    lines = ["LOCAL AI BENCHMARK", f"Model: {result['model']['name']}",
+    lines = ["LOCAL AI BENCHMARK",
+             f"Run type: {'DEMO DATA' if result.get('demo') else 'MODEL DATA'}",
+             f"Model: {result['model']['name']}",
              f"Date: {result['timestamp']}", f"Quality: {score('quality')}",
              f"Performance: {score('performance')}",
              f"Overall: {score('overall')}",
@@ -42,7 +50,8 @@ def write_pdf(path, result):
              "Pilot coverage: constraint reasoning, inventory code, incident handoff.",
              "", "Methodology: deterministic generated tasks with documented rule-based checks.",
              "Measurements are controlled benchmark results, not universal guarantees."]
-    text = "BT /F1 12 Tf 48 760 Td " + " ".join(f"({line.replace('(', '[').replace(')', ']')}) Tj 0 -20 Td" for line in lines) + " ET"
+    text = "BT /F1 12 Tf 48 760 Td " + " ".join(
+        f"({_pdf_literal(line)}) Tj 0 -20 Td" for line in lines) + " ET"
     objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", f"<< /Length {len(text.encode())} >>\nstream\n{text}\nendstream"]

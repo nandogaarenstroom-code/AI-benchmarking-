@@ -4,10 +4,13 @@ from __future__ import annotations
 import csv
 import copy
 import hashlib
+import hmac
 import itertools
 import json
 import math
 import random
+import secrets
+import stat
 import statistics
 import time
 import uuid
@@ -31,13 +34,14 @@ COUNTS = {"QUICK": 25, "STANDARD": 100, "FULL": 252, "PERFORMANCE": 25,
           "QUALITY": 100, "REASONING": 40, "CODING": 40, "LONG CONTEXT": 30}
 DIFFICULTIES = ("Easy", "Medium", "Hard", "Uncalibrated")
 TASK_SET_VERSION = "pilot-3"
-EVALUATOR_VERSION = "pilot-2"
+EVALUATOR_VERSION = "pilot-3"
 DIFFICULTY_DESCRIPTIONS = {
     "Easy": "A direct, single-step task with one clear requirement.",
     "Medium": "A routine task with a larger input or an additional constraint.",
     "Hard": "A multi-step task or one that combines several constraints.",
     "Uncalibrated": "A pilot task with higher constructed complexity; difficulty has not been calibrated.",
 }
+MAX_CHECKPOINT_SIZE = 128 * 1024 * 1024
 
 
 def _valid_schedule(route, items, constraints):
@@ -132,7 +136,7 @@ def _inventory_adjustment_test(common, difficulty, a, b):
     }
 
 
-def _long_context_test(common, difficulty, rng):
+def _long_context_test(common: dict, difficulty: str, rng: random.Random) -> dict:
     noise_count = {"Easy": 24, "Medium": 40, "Hard": 56, "Uncalibrated": 72}[difficulty]
     noise = [
         f"Archive note {index + 1}: batch {rng.randint(1000, 9999)} was checked by desk "
@@ -216,7 +220,7 @@ def _long_context_test(common, difficulty, rng):
             "acceptable_answers": [answer]}
 
 
-def _test(category, i, rng, difficulty=None):
+def _test(category: str, i: int, rng: random.Random, difficulty: str | None = None) -> dict:
     difficulty = difficulty or DIFFICULTIES[i % 4]
     a, b = rng.randint(2, 99), rng.randint(2, 99)
     common = {"id": f"{category.lower().replace(' ', '-')}-{i+1:03d}",
@@ -727,10 +731,10 @@ def _test(category, i, rng, difficulty=None):
             "evaluation_method": "contains_all", "required_terms": ["ok"]}
 
 
-def make_tests(profile, seed):
+def make_tests(profile: str, seed: int) -> list[dict]:
     rng = random.Random(seed)
     count = COUNTS.get(profile.upper(), COUNTS["STANDARD"])
-    tests, seen = [], set()
+    tests, seen, fingerprints = [], set(), set()
     while len(tests) < count:
         index = len(tests)
         category = CATEGORIES[index % len(CATEGORIES)]
@@ -751,6 +755,9 @@ def make_tests(profile, seed):
         fingerprint = hashlib.sha256(json.dumps(
             fingerprint_data, sort_keys=True, ensure_ascii=False,
             separators=(",", ":")).encode("utf-8")).hexdigest()
+        if fingerprint in fingerprints:
+            raise ValueError("duplicate generated test fingerprint")
+        fingerprints.add(fingerprint)
         test["item_fingerprint"] = fingerprint
         category_key = test["category"].lower().replace(" ", "-")
         test["item_instance_id"] = f"{category_key}@{fingerprint}"
@@ -758,7 +765,7 @@ def make_tests(profile, seed):
     return tests
 
 
-def make_context_tests(seed, max_context=131072):
+def make_context_tests(seed: int, max_context: int = 131072) -> list[dict]:
     rng = random.Random(seed)
     tests = []
     marker_positions = ("beginning", "middle", "end")
@@ -783,6 +790,8 @@ def make_context_tests(seed, max_context=131072):
 
 
 class BenchmarkManager:
+    _state_key_lock = threading.Lock()
+
     def __init__(self, root):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
         self.state_file = self.root / "current.json"; self.running = False
@@ -792,7 +801,7 @@ class BenchmarkManager:
         self._status = {
             "state": "idle", "phase": "Ready to start", "activity": "",
             "progress": 0, "total": 0, "passed": 0, "failed": 0,
-            "result_directory": str(self.root.resolve()),
+            "result_directory": self.root.name,
         }
 
     def status(self):
@@ -812,7 +821,10 @@ class BenchmarkManager:
             if path.name == "current.json" or path.is_symlink() or path.resolve().parent != root:
                 continue
             try:
-                data = json.loads(path.read_text())
+                raw = self._read_result_file(path.name)
+                if raw is None:
+                    continue
+                data = json.loads(raw)
             except (OSError, json.JSONDecodeError):
                 continue
             model = data.get("model") if isinstance(data, dict) else {}
@@ -823,16 +835,88 @@ class BenchmarkManager:
         return results
 
     def load_result(self, result_id):
-        root = self.root.resolve()
+        if (not isinstance(result_id, str) or
+                re.fullmatch(r"[A-Za-z0-9_-]{1,100}", result_id) is None or
+                result_id == "current"):
+            return None
         for path in self.root.glob("*.json"):
-            if (path.name != "current.json" and path.stem == result_id and
-                    not path.is_symlink() and path.resolve().parent == root):
+            if path.name == f"{result_id}.json" and not path.is_symlink():
                 try:
-                    data = json.loads(path.read_text())
+                    raw = self._read_result_file(path.name)
+                    if raw is None:
+                        return None
+                    data = json.loads(raw)
                 except (OSError, json.JSONDecodeError):
                     return None
                 return data if isinstance(data, dict) else None
         return None
+
+    def _read_result_file(self, filename):
+        if (not isinstance(filename, str) or
+                re.fullmatch(r"[A-Za-z0-9_-]{1,100}\.json", filename) is None or
+                filename == "current.json"):
+            return None
+        root = self.root.resolve()
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            finally:
+                os.close(directory_fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return None
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    try:
+                        return stream.read().decode("utf-8")
+                    except UnicodeDecodeError:
+                        return None
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+        path = self.root / filename
+        if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+            return None
+        try:
+            return path.read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def read_artifact(self, filename):
+        if (not isinstance(filename, str) or
+                re.fullmatch(
+                    r"benchmark_[0-9]{8}_[0-9]{6}_[a-f0-9]{32}"
+                    r"(?:\.json|\.csv|\.pdf|_quality\.svg)", filename) is None):
+            return None
+        filename = os.path.basename(filename)
+        try:
+            root = self.root.resolve()
+            with os.scandir(root) as entries:
+                entry = next((item for item in entries if item.name == filename), None)
+            if entry is None or not entry.is_file(follow_symlinks=False):
+                return None
+            if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+                directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                finally:
+                    os.close(directory_fd)
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        return None
+                    with os.fdopen(fd, "rb") as stream:
+                        fd = -1
+                        return stream.read()
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+            path = Path(entry.path)
+            if path.is_symlink() or path.resolve().parent != root or not path.is_file():
+                return None
+            return path.read_bytes()
+        except OSError:
+            return None
 
     def compare(self, result_ids):
         rows = []
@@ -867,35 +951,197 @@ class BenchmarkManager:
                 "best_overall": max(comparable, key=lambda x: x["overall"])["id"]
                 if comparable else None}
 
-    def resume(self):
-        if not self.state_file.exists(): return False
+    def _state_key(self, create=False):
+        key_path = self.root / ".checkpoint.key"
+        with self._state_key_lock:
+            if key_path.is_symlink():
+                return None
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(key_path, flags)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                try:
+                    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    fd = os.open(key_path, flags)
+                else:
+                    key = secrets.token_bytes(32)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(key)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    return key
+            try:
+                key_stat = os.fstat(fd)
+                if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_size != 32:
+                    return None
+                with os.fdopen(fd, "rb") as stream:
+                    fd = -1
+                    key = stream.read(33)
+                    return key if len(key) == 32 else None
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+
+    def _checkpoint_signature(self, state, key):
+        encoded = json.dumps(state, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return hmac.new(key, encoded, hashlib.sha256).hexdigest()
+
+    def _read_checkpoint_file(self) -> object:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.state_file, flags)
         try:
-            state = json.loads(self.state_file.read_text())
-        except (OSError, json.JSONDecodeError):
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_size > MAX_CHECKPOINT_SIZE:
+                raise ValueError("checkpoint file is invalid or too large")
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                content = stream.read(MAX_CHECKPOINT_SIZE + 1)
+            if len(content) > MAX_CHECKPOINT_SIZE:
+                raise ValueError("checkpoint file is too large")
+            return json.loads(content.decode("utf-8"))
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    @staticmethod
+    def _valid_checkpoint_outcome(item: dict) -> bool:
+        if not isinstance(item, dict):
             return False
+        status, passed, score = item.get("status"), item.get("passed"), item.get("score")
+        if status == "NOT RUN":
+            return passed is None and score is None
+        if status not in ("PASS", "FAILED") or passed is not (status == "PASS"):
+            return False
+        return (isinstance(score, (int, float)) and not isinstance(score, bool) and
+                math.isfinite(score) and 0 <= score <= 10)
+
+    def _validate_checkpoint(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            raise ValueError("checkpoint must be an object")
         if (state.get("task_set_version") != TASK_SET_VERSION or
                 state.get("evaluator_version") != EVALUATOR_VERSION):
-            self._update_status(
-                phase="Saved run is incompatible",
-                activity="Task or evaluator version changed. Start a new run to avoid mixing results.")
-            return False
-        return self.start(state)
+            raise ValueError("checkpoint task or evaluator version changed")
+        profile, seed = state.get("profile"), state.get("seed")
+        if not isinstance(profile, str) or profile.upper() not in COUNTS:
+            raise ValueError("checkpoint profile is invalid")
+        if (not isinstance(seed, int) or isinstance(seed, bool) or
+                not 0 <= seed <= 2_147_483_647):
+            raise ValueError("checkpoint seed is invalid")
+        if state.get("resume_phase") not in (
+                "warmup", "primary", "fresh_context", "accumulated_context", "performance"):
+            raise ValueError("checkpoint phase is invalid")
+        if not isinstance(state.get("model"), dict):
+            raise ValueError("checkpoint model is invalid")
+        model = resolve_model(state["model"])
+        options = state.get("generation_options")
+        if (not isinstance(options, dict) or
+                normalize_generation_options(options) != options):
+            raise ValueError("checkpoint generation settings are invalid")
+        repeats = state.get("repeat_runs")
+        if not isinstance(repeats, int) or isinstance(repeats, bool) or not 1 <= repeats <= 5:
+            raise ValueError("checkpoint repeat count is invalid")
+
+        tests = make_tests(profile, seed)
+        if len({test["item_fingerprint"] for test in tests}) != len(tests):
+            raise ValueError("generated test fingerprints are not unique")
+        saved_tests = state.get("tests")
+        if (not isinstance(saved_tests, list) or
+                [(test.get("id"), test.get("item_fingerprint")) for test in saved_tests
+                 if isinstance(test, dict)] !=
+                [(test["id"], test["item_fingerprint"]) for test in tests] or
+                len(saved_tests) != len(tests)):
+            raise ValueError("checkpoint tests do not match the generated suite")
+
+        generated = {test["id"]: test for test in tests}
+        completed = state.get("completed_tests")
+        if not isinstance(completed, list) or len(completed) > len(tests):
+            raise ValueError("checkpoint completed tests are invalid")
+        completed_ids = set()
+        for item in completed:
+            if (not isinstance(item, dict) or item.get("id") not in generated or
+                    item.get("id") in completed_ids or
+                    item.get("item_fingerprint") != generated[item["id"]]["item_fingerprint"] or
+                    not self._valid_checkpoint_outcome(item)):
+                raise ValueError("checkpoint contains an invalid completed test")
+            completed_ids.add(item["id"])
+            replicates = item.get("replicates")
+            if repeats == 1:
+                if replicates:
+                    raise ValueError("checkpoint has unexpected repeats")
+            elif (not isinstance(replicates, list) or len(replicates) != repeats or
+                  any(not self._valid_checkpoint_outcome(entry) for entry in replicates)):
+                raise ValueError("checkpoint repeats are invalid")
+
+        advertised = model.get("context_length", 131072)
+        try:
+            max_context = min(int(advertised), 262144)
+        except (TypeError, ValueError, OverflowError):
+            max_context = 131072
+        if model.get("demo"):
+            max_context = min(max_context, 32768)
+        context_tests = {test["id"]: test for test in make_context_tests(seed, max_context)}
+        for field in ("context_results", "accumulated_results"):
+            records = state.get(field)
+            if not isinstance(records, list) or len(records) > len(context_tests):
+                raise ValueError(f"checkpoint {field} are invalid")
+            seen = set()
+            for item in records:
+                expected = context_tests.get(item.get("id")) if isinstance(item, dict) else None
+                if (expected is None or item["id"] in seen or
+                        item.get("prompt") != expected["prompt"] or
+                        item.get("expected_answer") != expected["expected_answer"] or
+                        item.get("context_size") != expected["context_size"] or
+                        not self._valid_checkpoint_outcome(item)):
+                    raise ValueError(f"checkpoint {field} contain an invalid result")
+                seen.add(item["id"])
+        for field, limit in (("failures", len(tests)), ("not_run", len(tests))):
+            if not isinstance(state.get(field), list) or len(state[field]) > limit:
+                raise ValueError(f"checkpoint {field} are invalid")
+        if not isinstance(state.get("warmup_errors"), list):
+            raise ValueError("checkpoint warmup_errors are invalid")
+
+    def resume(self):
+        with self._run_lock:
+            if self.running or not self.state_file.exists():
+                return False
+            try:
+                state = self._read_checkpoint_file()
+                if not isinstance(state, dict):
+                    raise ValueError("checkpoint must be an object")
+                signature = state.pop("_integrity", None)
+                key = self._state_key()
+                if (not isinstance(signature, str) or key is None or
+                        not hmac.compare_digest(signature, self._checkpoint_signature(state, key))):
+                    raise ValueError("checkpoint integrity check failed")
+                self._validate_checkpoint(state)
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                self._update_status(
+                    phase="Saved run rejected",
+                    activity="The saved checkpoint is invalid or has been modified; start a new run.")
+                return False
+            return self._start_locked(state)
 
     def start(self, payload):
         with self._run_lock:
-            if self.running:
-                return False
-            self.running = True
-            self.cancel_requested.clear()
-            self._update_status(state="running", phase="Starting benchmark",
-                                activity="Preparing the local model and test suite.",
-                                progress=0, total=1)
-            worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
-            try:
-                worker.start()
-            except RuntimeError:
-                self.running = False
-                raise
+            return self._start_locked(payload)
+
+    def _start_locked(self, payload):
+        if self.running:
+            return False
+        self.running = True
+        self.cancel_requested.clear()
+        self._update_status(state="running", phase="Starting benchmark",
+                            activity="Preparing the local model and test suite.",
+                            progress=0, total=1)
+        worker = threading.Thread(target=self._run_guarded, args=(payload,), daemon=True)
+        try:
+            worker.start()
+        except RuntimeError:
+            self.running = False
+            raise
         return True
 
     def run(self, payload):
@@ -910,20 +1156,24 @@ class BenchmarkManager:
         try:
             self._run(payload)
             return True
-        except Exception as exc:
-            self._update_status(state="error", error=str(exc)[:500])
+        except Exception:
+            self._update_status(state="error",
+                                error="The benchmark failed; internal details were not exposed.")
             return False
         finally:
             with self._run_lock:
                 self.running = False
 
     def cancel(self):
-        if not self.running:
-            return False
-        self.cancel_requested.set()
-        return True
+        with self._run_lock:
+            if (not self.running or self._status.get("state") != "running" or
+                    self._status.get("phase") == "Saving result files"):
+                return False
+            self.cancel_requested.set()
+            return True
 
-    def _answer(self, model, test, history=None, generation_options=None):
+    def _answer(self, model: dict, test: dict, history: list | None = None,
+                generation_options: dict | None = None) -> str | dict:
         if model.get("demo"):
             if test["evaluation_method"] == "constraint_schedule":
                 route = next((list(candidate) for candidate in itertools.permutations(
@@ -943,11 +1193,14 @@ class BenchmarkManager:
             if test["evaluation_method"] == "rubric":
                 count = test.get("exact_words", test.get("minimum_words", 4))
                 words = list(test.get("required_terms", []))[:count]
+                target_topic_words = max(0, count - 1) if test.get("minimum_topic_terms") else count
                 for term in test.get("topic_terms", []):
-                    if len(words) >= count:
+                    if len(words) >= target_topic_words:
                         break
                     if term not in words:
                         words.append(term)
+                if test.get("minimum_topic_terms") and len(words) < count:
+                    words.append("builds")
                 words.extend(["careful", "reliable", "local", "testing"][:count - len(words)])
                 return " ".join(words)
             if test["evaluation_method"] == "contains_all":
@@ -957,7 +1210,8 @@ class BenchmarkManager:
         response = ask_model(model, test["prompt"], history=history, options=generation_options)
         return response
 
-    def _execute(self, model, test, history=None, generation_options=None):
+    def _execute(self, model: dict, test: dict, history: list | None = None,
+                 generation_options: dict | None = None) -> dict:
         criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
         if test.get("evaluation_method") == "code" and not code_evaluator_available():
             evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -1063,6 +1317,59 @@ class BenchmarkManager:
             return "CONNECTION_ERROR"
         return "MODEL_ERROR"
 
+    @staticmethod
+    def _aggregate_repeats(
+            test: dict, repetitions: list[dict], generation_options: dict,
+            repeat_runs: int) -> dict:
+        measured = [
+            entry for entry in repetitions
+            if entry["status"] != "NOT RUN" and entry.get("score") is not None
+        ]
+        representative = measured[0] if measured else repetitions[0]
+        replicates = [
+            {"seed": (generation_options["seed"] + index) % 2147483648,
+             "score": entry["score"], "passed": entry["passed"],
+             "status": entry["status"], "latency_s": entry["latency_s"],
+             "answer": entry["answer"], "evaluation": entry["evaluation"],
+             "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
+             "attempts": entry["attempts"]}
+            for index, entry in enumerate(repetitions)
+        ]
+        missing = repeat_runs - len(measured)
+        passed = all(entry["passed"] for entry in measured) if measured else None
+        item = {
+            **representative,
+            "score": round(statistics.mean(entry["score"] for entry in measured), 2)
+            if measured else None,
+            "passed": passed,
+            "status": ("PASS" if passed is True else
+                       "FAILED" if passed is False else "NOT RUN"),
+            "latency_s": round(statistics.mean(entry["latency_s"] for entry in measured), 4)
+            if measured else 0,
+            "ttft_s": round(statistics.mean(entry["ttft_s"] for entry in measured), 4)
+            if measured else 0,
+            "generation_s": round(statistics.mean(
+                entry["generation_s"] for entry in measured), 4)
+            if measured else 0,
+            "prompt_tokens": round(statistics.mean(
+                entry["prompt_tokens"] for entry in measured))
+            if measured else max(1, len(test["prompt"]) // 4),
+            "output_tokens": round(statistics.mean(
+                entry["output_tokens"] for entry in measured))
+            if measured else 0,
+            "replicates": replicates,
+            "missing_repeat_count": missing,
+        }
+        if measured:
+            item["evaluation"] = {
+                "passed": passed, "status": item["status"],
+                "criteria": representative["evaluation"]["criteria"],
+                "explanation": (
+                    f"{sum(entry['passed'] is True for entry in measured)} of "
+                    f"{len(measured)} measured repeats passed; {missing} repeat(s) were NOT RUN."),
+            }
+        return item
+
     def _run(self, payload):
         if not isinstance(payload, dict):
             raise ValueError("invalid benchmark request")
@@ -1146,45 +1453,9 @@ class BenchmarkManager:
                 run_options = dict(generation_options)
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
                 repetitions.append(self._execute(model, test, generation_options=run_options))
-            if repeat_runs > 1:
-                if any(entry["status"] == "NOT RUN" for entry in repetitions):
-                    item = {**repetitions[0], "replicates": [
-                        {"seed": (generation_options["seed"] + index) % 2147483648,
-                         "score": entry["score"], "passed": entry["passed"],
-                         "status": entry["status"], "answer": entry["answer"],
-                         "evaluation": entry["evaluation"], "error": entry.get("error"),
-                         "diagnostic": entry.get("diagnostic"), "attempts": entry["attempts"]}
-                        for index, entry in enumerate(repetitions)]}
-                else:
-                    item = {
-                    **repetitions[0],
-                    "score": round(statistics.mean(entry["score"] for entry in repetitions), 2),
-                    "passed": all(entry["passed"] for entry in repetitions),
-                    "status": "PASS" if all(entry["passed"] for entry in repetitions) else "FAILED",
-                    "latency_s": round(statistics.mean(entry["latency_s"] for entry in repetitions), 4),
-                    "ttft_s": round(statistics.mean(entry["ttft_s"] for entry in repetitions), 4),
-                    "generation_s": round(statistics.mean(entry["generation_s"] for entry in repetitions), 4),
-                    "prompt_tokens": round(statistics.mean(entry["prompt_tokens"] for entry in repetitions)),
-                    "output_tokens": round(statistics.mean(entry["output_tokens"] for entry in repetitions)),
-                    "replicates": [
-                        {"seed": (generation_options["seed"] + index) % 2147483648,
-                         "score": entry["score"], "passed": entry["passed"],
-                         "status": entry["status"], "latency_s": entry["latency_s"],
-                         "answer": entry["answer"], "evaluation": entry["evaluation"],
-                         "error": entry.get("error"), "diagnostic": entry.get("diagnostic"),
-                         "attempts": entry["attempts"]}
-                        for index, entry in enumerate(repetitions)
-                    ],
-                    }
-                    item["evaluation"] = {
-                        "passed": item["passed"], "status": item["status"],
-                        "criteria": repetitions[0]["evaluation"]["criteria"],
-                        "explanation": (f"{sum(entry['passed'] for entry in repetitions)} of "
-                                        f"{repeat_runs} repeated answers passed; all repeats must "
-                                        "pass for the aggregate test to pass."),
-                    }
-            else:
-                item = repetitions[0]
+            item = (self._aggregate_repeats(
+                test, repetitions, generation_options, repeat_runs)
+                    if repeat_runs > 1 else repetitions[0])
             completed.append(item)
             if item["status"] == "NOT RUN":
                 not_run.append({"test_id": test["id"],
@@ -1295,8 +1566,9 @@ class BenchmarkManager:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
             return
-        result = {"benchmark_version": "2.1.0", "task_set_version": TASK_SET_VERSION,
+        result = {"benchmark_version": "2.2.0", "task_set_version": TASK_SET_VERSION,
                   "evaluator_version": EVALUATOR_VERSION,
+                  "quality_aggregation": "equal-weighted mean of available category scores",
                   "difficulty_calibration_status": "not empirically calibrated",
                   "timestamp": datetime.now(timezone.utc).isoformat(),
                   "seed": seed, "demo": bool(model.get("demo")), "model": model_info(model),
@@ -1349,6 +1621,17 @@ class BenchmarkManager:
             "passed": sum(item["status"] == "PASS" for item in completed),
             "failed": sum(item["status"] == "FAILED" for item in completed),
             "not_run": sum(item["status"] == "NOT RUN" for item in completed),
+            "repeat_outcomes": {
+                "requested_per_test": repeat_runs,
+                "scored": sum(
+                    replicate.get("score") is not None
+                    for item in completed for replicate in
+                    (item.get("replicates") or [item])),
+                "not_run": sum(
+                    replicate.get("status") == "NOT RUN"
+                    for item in completed for replicate in
+                    (item.get("replicates") or [item])),
+            },
             "not_run_by_code": dict(sorted(not_run_by_code.items())),
             "by_difficulty": {
                 level: {
@@ -1361,17 +1644,22 @@ class BenchmarkManager:
                 } for level in DIFFICULTIES
             },
         }
-        self._update_status(phase="Saving result files",
-                            activity=f"Writing JSON, CSV, PDF, and SVG to {self.root.resolve()}.",
-                            total=1, progress=0)
+        with self._run_lock:
+            if self.cancel_requested.is_set():
+                save_checkpoint("performance")
+                self._update_status(state="cancelled")
+                return
+            self._update_status(phase="Saving result files",
+                                activity="Writing JSON, CSV, PDF, and SVG to the results directory.",
+                                total=1, progress=0)
         self._write_outputs(result); self.state_file.unlink(missing_ok=True)
         self._update_status(state="complete", phase="Benchmark complete",
                             activity="All result files are ready.", progress=1, total=1,
-                            result_id=result["id"], result_directory=str(self.root.resolve()),
+                            result_id=result["id"], result_directory=self.root.name,
                             quality=quality["overall"], performance=perf["score"],
                             overall=result["scores"]["overall"])
 
-    def _scores(self, results):
+    def _scores(self, results: list[dict]) -> dict:
         categories = {}
         for category in CATEGORIES:
             values = [x["score"] * 10 for x in results
@@ -1379,7 +1667,8 @@ class BenchmarkManager:
             categories[category] = round(statistics.mean(values), 2) if values else None
         measured = [value for value in categories.values() if value is not None]
         categories["overall"] = round(statistics.mean(measured), 2) if measured else None
-        return {"categories": categories, "overall": categories["overall"], "method": "objective category evaluators"}
+        return {"categories": categories, "overall": categories["overall"],
+                "method": "equal-weighted mean of available category scores"}
 
     @staticmethod
     def _context_score(fresh, accumulated):
@@ -1392,10 +1681,19 @@ class BenchmarkManager:
                 if fresh_score is not None and accumulated_score is not None else None}
 
     def _atomic_state_write(self, state):
+        signed_state = dict(state)
+        signed_state.pop("_integrity", None)
+        key = self._state_key(create=True)
+        if key is None:
+            raise OSError("could not load checkpoint signing key")
+        signed_state["_integrity"] = self._checkpoint_signature(signed_state, key)
+        encoded = json.dumps(signed_state, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > MAX_CHECKPOINT_SIZE:
+            raise ValueError("checkpoint exceeds the configured size limit")
         fd, name = tempfile.mkstemp(prefix="benchmark-", suffix=".tmp", dir=self.root)
         try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump(state, stream)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
             for attempt in range(5):
@@ -1502,7 +1800,7 @@ class BenchmarkManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         with (result_dir / f"{result_id}.csv").open("w", newline="") as stream:
-            fields = ["id", "category", "subcategory", "difficulty", "difficulty_calibration_status",
+            fields = ["run_type", "id", "category", "subcategory", "difficulty", "difficulty_calibration_status",
                       "task_set_version", "evaluator_version", "item_instance_id",
                       "item_fingerprint", "difficulty_rationale", "prompt",
                       "answer", "evaluation_criteria", "evaluation_explanation",
@@ -1511,6 +1809,7 @@ class BenchmarkManager:
                       "attempt_count", "attempts", "repeats", "latency_s"]
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader()
             writer.writerows({
+                "run_type": "DEMO DATA" if result.get("demo") else "MODEL DATA",
                 "id": self._csv_cell(row.get("id")),
                 "category": self._csv_cell(row.get("category")),
                 "subcategory": self._csv_cell(row.get("subcategory")),
