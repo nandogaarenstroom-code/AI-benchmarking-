@@ -175,7 +175,8 @@ class LlamaServerManagerTests(unittest.TestCase):
         for extra in (
                 ["--model", "evil.gguf"], ["--custom", "C:\\secret"],
                 ["--custom", "127.0.0.1"], ["--custom", "1;touch"],
-                ["--custom", "--host"],
+                ["--custom", "--host"], ["--custom", "example.local"],
+                ["--custom", "localhost:8080"], ["--custom", "999.999.999.999"],
                 ["--unknown"]):
             flags = {
                 "--model": {"takes_value": True, "choices": []},
@@ -183,6 +184,11 @@ class LlamaServerManagerTests(unittest.TestCase):
             }
             with self.subTest(extra=extra), self.assertRaises(LlamaServerError):
                 self.manager._build_launch_args({"extra_args": extra}, {"flags": flags})
+        self.assertEqual(
+            self.manager._build_launch_args(
+                {"extra_args": ["--custom", "0.5"]},
+                {"flags": {"--custom": {"takes_value": True, "choices": []}}}),
+            ["--custom", "0.5"])
 
     def test_failure_output_is_limited_and_sanitizes_full_model_path(self):
         process = MagicMock()

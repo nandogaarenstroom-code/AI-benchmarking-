@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import os
 import re
 import socket
@@ -333,16 +334,38 @@ class LlamaServerManager:
                 if (not isinstance(value, str) or value.startswith("-") or
                         not re.fullmatch(r"[A-Za-z0-9_.:,=+-]{1,128}", value)):
                     raise LlamaServerError(f"Extra argument value for {flag} is invalid.")
-                if (value.casefold() == "localhost" or
-                        re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", value) or
-                        (re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+", value) and
-                         not re.fullmatch(r"\d+(?:\.\d+)+", value))):
+                if cls._is_network_address(value):
                     raise LlamaServerError(f"Extra argument value for {flag} cannot be a network address.")
                 result.extend((flag, value))
             else:
                 result.append(flag)
             index += 1
         return result
+
+    @staticmethod
+    def _is_network_address(value):
+        if ":" in value:
+            return True
+        if value.casefold() == "localhost":
+            return True
+        try:
+            ipaddress.ip_address(value)
+            return True
+        except ValueError:
+            pass
+        labels = value.split(".")
+        decimal_number = value.count(".") == 1 and all(label.isdigit() for label in labels)
+        if decimal_number:
+            return False
+        if len(labels) >= 3 and all(label.isdigit() for label in labels):
+            return True
+        return (
+            len(labels) > 1 and
+            any(not label.isdigit() for label in labels) and
+            all(label and len(label) <= 63 and label[0] != "-" and label[-1] != "-" and
+                all(character.isalnum() or character == "-" for character in label)
+                for label in labels)
+        )
 
     def start(self, source, executable_path, package_id, model_path, context_size,
               gpu_layers, launch_options=None, port=SERVER_PORT):
