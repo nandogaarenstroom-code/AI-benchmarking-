@@ -1705,6 +1705,9 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result["configuration"]["context_suite_status"], "NOT RUN")
             self.assertEqual(result["configuration"]["context_suite_reason"],
                              "CONTEXT_WINDOW_UNKNOWN")
+            self.assertNotIn("context_train", result["configuration"]["server_reported_options"])
+            self.assertNotIn("context_configured", result["configuration"]["server_reported_options"])
+            self.assertNotIn("context_default_assumed", result["configuration"]["server_reported_options"])
             self.assertEqual(result["context_scaling"], {"fresh": [], "accumulated": []})
             self.assertIsNone(result["scores"]["context_behavior"]["fresh"])
 

@@ -1905,7 +1905,8 @@ class BenchmarkManager:
                   "server_reported_options": {
                       key: model[key] for key in ("generation_defaults", "context_length",
                           "context_train", "context_configured", "context_default_assumed",
-                          "gpu_offload", "backend_version") if model.get(key) is not None
+                          "gpu_offload", "backend_version")
+                      if model.get(key) is not None and model.get(key) != "Unknown"
                   },
                   "server_reported_options_note": (
                       "Reported server defaults/runtime metadata; not an acknowledgement "
