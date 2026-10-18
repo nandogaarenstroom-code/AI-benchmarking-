@@ -117,6 +117,8 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(parser.elements["advanced-settings"]["role"], "tabpanel")
         self.assertIn("hidden", parser.elements["advanced-settings"])
         self.assertEqual(parser.elements["max-tokens"]["max"], "32768")
+        self.assertIn("required", parser.elements["max-tokens"])
+        self.assertIn("required", parser.elements["suite-seed"])
         for control in ("llama-gpu-layers", "llama-context", "runtime-context",
                         "runtime-gpu", "runtime-threads", "live-speeds",
                         "hardware-summary", "apply-recommendations"):
@@ -271,25 +273,47 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertIn("explicitly", json.loads(body)["error"])
         self.assertIsNone(self.manager.payload)
 
-    def test_api_output_default_scales_but_respects_explicit_override(self):
+    def test_api_omits_missing_output_limit_and_preserves_explicit_override(self):
         headers = {
             "Origin": f"http://127.0.0.1:{self.server.server_port}",
             "Content-Type": "application/json",
             "X-CSRF-Token": app.CSRF_TOKEN,
         }
-        for supplied, expected in (({}, 8192), ({"max_tokens": 512}, 512)):
+        for supplied, expected in (({}, None), ({"max_tokens": 512}, 512)):
             with self.subTest(supplied=supplied), patch.object(
-                    app, "hardware_info", return_value={}), patch.object(
-                    app, "recommend_settings",
-                    return_value={"generation_options": {"max_tokens": 8192}}) as recommend:
+                    app, "hardware_info", return_value={}):
                 status, _ = self.request("/api/benchmark", json.dumps({
                     "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
                     "generation_options": supplied,
                 }), headers)
                 self.assertEqual(status, 200)
-                self.assertEqual(self.manager.payload["generation_options"]["max_tokens"], expected)
+                self.assertEqual(self.manager.payload["generation_options"].get("max_tokens"), expected)
                 self.assertNotIn("num_gpu", self.manager.payload["generation_options"])
-                self.assertEqual(recommend.call_count, 0 if supplied else 1)
+
+    def test_api_model_response_exposes_request_capability_matrix(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        connection.request("GET", "/api/models")
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+        self.assertIn("parameter_capabilities", payload)
+        self.assertEqual(set(payload["parameter_capabilities"]),
+                         {"ollama", "lm_studio", "openai_compatible", "llama_cpp"})
+
+    def test_api_invalid_option_returns_field_specific_error(self):
+        headers = {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        }
+        status, body = self.request("/api/benchmark", json.dumps({
+            "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
+            "generation_options": {"top_p": 9},
+        }), headers)
+        response = json.loads(body)
+        self.assertEqual(status, 400)
+        self.assertEqual(response["field"], "top_p")
+        self.assertIn("top_p", response["error"])
 
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({

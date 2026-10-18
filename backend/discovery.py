@@ -36,29 +36,143 @@ GENERATION_LIMITS = {
     "min_p": (0.0, 1.0), "repeat_penalty": (0.5, 2.0),
     "max_tokens": (1, 32768), "seed": (0, 2147483647),
     "num_ctx": (512, 131072), "num_gpu": (0, 999), "num_thread": (1, 256),
+    "presence_penalty": (-2.0, 2.0), "frequency_penalty": (-2.0, 2.0),
+    "request_timeout_seconds": (10, 3600),
 }
-INTEGER_GENERATION_OPTIONS = {"top_k", "max_tokens", "seed", "num_ctx", "num_gpu", "num_thread"}
+INTEGER_GENERATION_OPTIONS = {
+    "top_k", "max_tokens", "seed", "num_ctx", "num_gpu", "num_thread",
+    "request_timeout_seconds",
+}
+REQUEST_OPTION_NAMES = {
+    *GENERATION_DEFAULTS, "num_ctx", "num_gpu", "num_thread", "presence_penalty",
+    "frequency_penalty", "stop", "system_prompt", "cache_prompt",
+    "request_timeout_seconds",
+}
 
 
-def normalize_generation_options(options=None):
+class GenerationOptionsError(ValueError):
+    def __init__(self, field, message):
+        super().__init__(message)
+        self.field = field
+
+
+def normalize_generation_options(options=None, include_defaults=True):
     """Validate generation settings supplied by the local dashboard or API."""
-    options = options if isinstance(options, dict) else {}
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise GenerationOptionsError("generation_options", "must be an object")
+    unknown = next((name for name in options if name not in REQUEST_OPTION_NAMES), None)
+    if unknown is not None:
+        raise GenerationOptionsError(str(unknown), "is not a supported request parameter")
     normalized = {}
-    defaults = dict(GENERATION_DEFAULTS)
-    for name in ("num_ctx", "num_gpu", "num_thread"):
-        if name in options:
-            defaults[name] = GENERATION_LIMITS[name][0]
-    for name, default in defaults.items():
+    values = dict(GENERATION_DEFAULTS) if include_defaults else {}
+    values.update({name: options[name] for name in options if name in GENERATION_LIMITS})
+    for name, value in values.items():
         try:
-            value = float(options.get(name, default))
+            value = float(value)
             if not math.isfinite(value):
                 raise ValueError
         except (TypeError, ValueError, OverflowError):
-            value = default
+            raise GenerationOptionsError(name, "must be a finite number") from None
         lower, upper = GENERATION_LIMITS[name]
-        value = min(upper, max(lower, value))
+        if not lower <= value <= upper:
+            raise GenerationOptionsError(name, f"must be between {lower} and {upper}")
+        if name in INTEGER_GENERATION_OPTIONS and not value.is_integer():
+            raise GenerationOptionsError(name, "must be a whole number")
         normalized[name] = int(value) if name in INTEGER_GENERATION_OPTIONS else value
+    for name in ("stop", "system_prompt", "cache_prompt"):
+        if name not in options:
+            continue
+        value = options[name]
+        if name == "stop":
+            if (not isinstance(value, list) or len(value) > 8 or
+                    any(not isinstance(item, str) or len(item) > 256 for item in value)):
+                raise GenerationOptionsError(name, "must be a list of up to 8 strings (256 characters each)")
+            normalized[name] = list(value)
+        elif name == "system_prompt":
+            if not isinstance(value, str) or len(value) > 8192:
+                raise GenerationOptionsError(name, "must be text no longer than 8192 characters")
+            normalized[name] = value
+        elif value in (None, "default"):
+            continue
+        elif isinstance(value, bool):
+            normalized[name] = value
+        else:
+            raise GenerationOptionsError(name, "must be true, false, or default")
     return normalized
+
+
+REQUEST_CAPABILITY_MATRIX = {
+    "ollama": {
+        "temperature": "options.temperature", "top_p": "options.top_p",
+        "top_k": "options.top_k", "min_p": "options.min_p",
+        "repeat_penalty": "options.repeat_penalty", "max_tokens": "options.num_predict",
+        "seed": "options.seed", "num_ctx": "options.num_ctx",
+        "num_gpu": "options.num_gpu", "num_thread": "options.num_thread",
+        "presence_penalty": "options.presence_penalty",
+        "frequency_penalty": "options.frequency_penalty", "stop": "options.stop",
+        "system_prompt": "messages.system", "request_timeout_seconds": "transport.timeout",
+    },
+    "lm_studio": {
+        "temperature": "temperature", "top_p": "top_p", "max_tokens": "max_tokens",
+        "seed": "seed", "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty", "stop": "stop",
+        "system_prompt": "messages.system", "request_timeout_seconds": "transport.timeout",
+    },
+    "openai_compatible": {
+        "temperature": "temperature", "top_p": "top_p", "max_tokens": "max_tokens",
+        "seed": "seed", "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty", "stop": "stop",
+        "system_prompt": "messages.system", "request_timeout_seconds": "transport.timeout",
+    },
+    "llama_cpp": {
+        "temperature": "temperature", "top_p": "top_p", "max_tokens": "max_tokens",
+        "seed": "seed", "top_k": "top_k", "min_p": "min_p",
+        "repeat_penalty": "repeat_penalty", "presence_penalty": "presence_penalty",
+        "frequency_penalty": "frequency_penalty", "stop": "stop",
+        "system_prompt": "messages.system", "cache_prompt": "cache_prompt",
+        "request_timeout_seconds": "transport.timeout",
+    },
+}
+
+
+def request_capability_key(model):
+    if model.get("backend") == "Ollama":
+        return "ollama"
+    if model.get("backend") == "LM Studio":
+        return "lm_studio"
+    return "llama_cpp" if model.get("llama_cpp") else "openai_compatible"
+
+
+def map_request_options(model, options):
+    capabilities = REQUEST_CAPABILITY_MATRIX[request_capability_key(model)]
+    mapped = {"body": {}, "ollama_options": {}, "system_prompt": None,
+              "timeout": MODEL_READ_TIMEOUT_SECONDS}
+    for parameter, value in options.items():
+        mapping = capabilities.get(parameter)
+        if mapping is None:
+            continue
+        if mapping.startswith("options."):
+            mapped["ollama_options"][mapping.removeprefix("options.")] = value
+        elif mapping == "messages.system":
+            mapped["system_prompt"] = value
+        elif mapping == "transport.timeout":
+            mapped["timeout"] = value
+        else:
+            mapped["body"][mapping] = value
+    return mapped
+
+
+def request_options_snapshot(model, options):
+    mapped = map_request_options(model, options)
+    body = {"options": mapped["ollama_options"]} if model.get("backend") == "Ollama" else dict(mapped["body"])
+    messages = []
+    if mapped["system_prompt"] is not None:
+        messages.append({"role": "system", "content": mapped["system_prompt"]})
+    if messages:
+        body["messages"] = messages
+    return {"body": body, "transport": {"timeout_seconds": mapped["timeout"]}}
 
 
 class AdapterError(RuntimeError):
@@ -453,26 +567,23 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
     TTFT. Token counts and client-side decode estimates are explicitly marked.
     Ollama runtime options are not sent to external OpenAI-compatible servers.
     """
-    options = normalize_generation_options(options)
-    messages = list(history or []) + [{"role": "user", "content": prompt}]
+    options = normalize_generation_options(options, include_defaults=False)
+    mapped = map_request_options(model, options)
+    messages = list(history or [])
+    if mapped["system_prompt"] is not None:
+        messages.insert(0, {"role": "system", "content": mapped["system_prompt"]})
+    messages.append({"role": "user", "content": prompt})
     try:
         if model.get("backend") == "Ollama":
             request = urllib.request.Request(
                 model["endpoint"] + "/api/chat",
                 data=json.dumps({
                     "model": model["id"], "messages": messages, "stream": True,
-                    "options": {
-                        "temperature": options["temperature"], "top_p": options["top_p"],
-                        "top_k": options["top_k"], "min_p": options["min_p"],
-                        "repeat_penalty": options["repeat_penalty"], "num_predict": options["max_tokens"],
-                        "seed": options["seed"],
-                        **{key: options[key] for key in ("num_ctx", "num_gpu", "num_thread")
-                           if key in options},
-                    },
+                    "options": mapped["ollama_options"],
                 }).encode(),
                 headers={"Content-Type": "application/json"})
             telemetry = _StreamTelemetry(messages, progress_callback, "Ollama")
-            with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
+            with _open(request, timeout=mapped["timeout"]) as response:
                 chunks = []
                 completed = False
                 for line in _response_lines(response):
@@ -496,20 +607,15 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
                         completed = True
                         break
                 return telemetry.finish("".join(chunks).strip(), completed, "Ollama")
-        body = {
-            "model": model["id"], "messages": messages,
-            "temperature": options["temperature"], "top_p": options["top_p"],
-            "max_tokens": options["max_tokens"], "seed": options["seed"], "stream": True,
-            "stream_options": {"include_usage": True},
-        }
+        body = {"model": model["id"], "messages": messages, **mapped["body"],
+                "stream": True, "stream_options": {"include_usage": True}}
         if model.get("llama_cpp"):
-            body.update({"top_k": options["top_k"], "min_p": options["min_p"],
-                         "repeat_penalty": options["repeat_penalty"], "timings_per_token": True})
+            body["timings_per_token"] = True
         request = urllib.request.Request(
             model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
         telemetry = _StreamTelemetry(messages, progress_callback, "OpenAI-compatible")
-        with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
+        with _open(request, timeout=mapped["timeout"]) as response:
             chunks = []
             completed = False
             metadata_deadline = None

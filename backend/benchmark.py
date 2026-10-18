@@ -23,7 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .discovery import (
-    hardware_info, model_info, normalize_generation_options, resolve_model,
+    hardware_info, model_info, normalize_generation_options, request_options_snapshot,
+    resolve_model,
 )
 from .evaluation import code_evaluator_available, evaluation_criteria, evaluate_with_details
 from .reporting import write_pdf, write_chart, write_html
@@ -1009,6 +1010,10 @@ class BenchmarkManager:
                              "demo": bool(result.get("demo")),
                              "task_set_version": result.get("task_set_version"),
                              "evaluator_version": result.get("evaluator_version"),
+                             "suite_seed": (result.get("configuration") or {}).get(
+                                 "suite_seed", result.get("seed")),
+                             "sampling_seed": (result.get("configuration") or {}).get(
+                                 "sampling_seed"),
                              "profile": (result.get("configuration") or {}).get("profile"),
                              "generation_options": (result.get("configuration") or {}).get(
                                  "generation_options"),
@@ -1017,6 +1022,7 @@ class BenchmarkManager:
         warnings = []
         for field, label in (
                 ("task_set_version", "task set"), ("evaluator_version", "evaluator"),
+                ("suite_seed", "suite seed"), ("sampling_seed", "sampling seed"),
                 ("profile", "profile"), ("generation_options", "generation settings"),
                 ("repeat_runs", "repeat count"), ("demo", "demo/real run type")):
             values = {json.dumps(row.get(field), sort_keys=True) for row in rows}
@@ -1251,7 +1257,8 @@ class BenchmarkManager:
             return True
 
     def _answer(self, model: dict, test: dict, history: list | None = None,
-                generation_options: dict | None = None) -> str | dict:
+                generation_options: dict | None = None,
+                request_options: dict | None = None) -> str | dict:
         if model.get("demo"):
             if test["evaluation_method"] == "constraint_schedule":
                 route = next((list(candidate) for candidate in itertools.permutations(
@@ -1294,7 +1301,9 @@ class BenchmarkManager:
                   "timing_source": "awaiting backend"})
         try:
             return ask_model(model, test["prompt"], history=history,
-                             options=generation_options, progress_callback=progress)
+                             options=(request_options if request_options is not None
+                                      else generation_options),
+                             progress_callback=progress)
         finally:
             with self._status_lock:
                 completed = self._live_requests.pop(request_id, None)
@@ -1399,7 +1408,11 @@ class BenchmarkManager:
         return None
 
     def _execute(self, model: dict, test: dict, history: list | None = None,
-                 generation_options: dict | None = None) -> dict:
+                 generation_options: dict | None = None,
+                 request_options: dict | None = None) -> dict:
+        sent_options = (request_options if request_options is not None
+                        else generation_options or {})
+        sent_snapshot = request_options_snapshot(model, sent_options)
         criteria = test.get("evaluation_criteria") or evaluation_criteria(test)
         context_exceeded = False
         if test.get("context_size") is not None:
@@ -1426,6 +1439,7 @@ class BenchmarkManager:
                     "attempts": [{"attempt": 0, "status": "NOT RUN",
                                   "error": error,
                                   "evaluation": evaluation}],
+                    "request_options_sent": sent_snapshot,
                     "status": "NOT RUN"}
         attempts = []
         last_answer = ""
@@ -1437,7 +1451,8 @@ class BenchmarkManager:
         for attempt in range(1, 4):
             started = time.perf_counter()
             try:
-                answer = self._answer(model, test, history, generation_options)
+                answer = self._answer(model, test, history, generation_options,
+                                      request_options=request_options)
                 error = None
             except Exception as exc:
                 answer, error = "", getattr(exc, "code", self._failure_code(exc))
@@ -1492,7 +1507,8 @@ class BenchmarkManager:
                         "output_tokens": response_metrics.get("output_tokens", max(1, len(answer.split()))),
                         "error": "EVALUATOR_UNAVAILABLE", "diagnostic": evaluation.get("explanation"),
                         "output_truncated": truncated,
-                        "context_reset": history is None, "attempts": attempts}
+                        "context_reset": history is None, "attempts": attempts,
+                        "request_options_sent": sent_snapshot}
             if evaluation["passed"] is True:
                 return {**test, "answer": answer, "evaluation": evaluation,
                         "passed": True, "score": evaluation.get("score", 10),
@@ -1504,7 +1520,7 @@ class BenchmarkManager:
                         "error": None, "diagnostic": diagnostic,
                         "output_truncated": truncated,
                         "context_reset": history is None, "attempts": attempts,
-                        "status": "PASS"}
+                        "request_options_sent": sent_snapshot, "status": "PASS"}
             if attempt == 3:
                 if last_evaluation is None:
                     evaluation = {"passed": None, "status": "NOT RUN", "criteria": criteria,
@@ -1518,7 +1534,8 @@ class BenchmarkManager:
                             "diagnostic": last_diagnostic,
                             "output_truncated": truncated,
                             "finish_reason": response_metrics.get("finish_reason"),
-                            "attempts": attempts, "status": "NOT RUN"}
+                            "attempts": attempts, "request_options_sent": sent_snapshot,
+                            "status": "NOT RUN"}
                 return {**test, "answer": last_answer, "evaluation": last_evaluation,
                         "passed": False, "score": last_evaluation.get("score", 0),
                         "latency_s": last_latency,
@@ -1536,7 +1553,8 @@ class BenchmarkManager:
                         "output_truncated": (last_metrics.get("finish_reason") in (
                             "length", "max_tokens", "max_output_tokens") or
                             last_metrics.get("truncated") is True),
-                        "attempts": attempts, "status": "FAILED"}
+                        "attempts": attempts, "request_options_sent": sent_snapshot,
+                        "status": "FAILED"}
 
     @staticmethod
     def _failure_code(exc):
@@ -1632,9 +1650,12 @@ class BenchmarkManager:
             "id": "demo-local", "name": "Demo Local Model", "backend": "Demo",
             "endpoint": "local://demo", "demo": True})
         hardware = hardware_info()
-        generation_options = normalize_generation_options(
-            payload.get("generation_options", payload.get("parameters")))
-        payload["generation_options"] = generation_options
+        requested_options = normalize_generation_options(
+            payload.get("generation_options", payload.get("parameters")),
+            include_defaults=False)
+        generation_options = normalize_generation_options(requested_options)
+        payload["requested_options"] = requested_options
+        payload["generation_options"] = requested_options
         try:
             repeat_runs = min(5, max(1, int(payload.get("repeat_runs", 1))))
         except (TypeError, ValueError):
@@ -1674,7 +1695,8 @@ class BenchmarkManager:
                 try:
                     self._answer(model, {"prompt": "warm up", "evaluation_method": "raw",
                                          "expected_answer": ""},
-                                 generation_options=generation_options)
+                                 generation_options=generation_options,
+                                 request_options=requested_options)
                 except Exception as exc:
                     warmup_errors.append({"attempt": warmup + 1,
                                           "error": getattr(exc, "code", self._failure_code(exc)),
@@ -1700,7 +1722,12 @@ class BenchmarkManager:
             for repeat_index in range(repeat_runs):
                 run_options = dict(generation_options)
                 run_options["seed"] = (generation_options["seed"] + repeat_index) % 2147483648
-                repetitions.append(self._execute(model, test, generation_options=run_options))
+                run_request_options = dict(requested_options)
+                if "seed" in run_request_options:
+                    run_request_options["seed"] = run_options["seed"]
+                repetitions.append(self._execute(
+                    model, test, generation_options=run_options,
+                    request_options=run_request_options))
             item = (self._aggregate_repeats(
                 test, repetitions, generation_options, repeat_runs)
                     if repeat_runs > 1 else repetitions[0])
@@ -1739,7 +1766,9 @@ class BenchmarkManager:
             self._update_status(current_test=test["id"],
                                 activity=f"Testing a fresh {test['context_size']:,}-token window "
                                 "with output and chat overhead reserved.")
-            context_results.append(self._execute(model, test, generation_options=generation_options))
+            context_results.append(self._execute(
+                model, test, generation_options=generation_options,
+                request_options=requested_options))
             self._update_status(progress=len(context_results))
             save_checkpoint("fresh_context")
         if self.cancel_requested.is_set():
@@ -1766,7 +1795,9 @@ class BenchmarkManager:
             test = self._accumulated_test(test, history, generation_options)
             self._update_status(current_test=test["id"],
                                 activity=f"Accumulating history through {test['context_size']:,} tokens.")
-            item = self._execute(model, test, history=history, generation_options=generation_options)
+            item = self._execute(model, test, history=history,
+                                 generation_options=generation_options,
+                                 request_options=requested_options)
             accumulated_results.append(item)
             history.extend([{"role": "user", "content": test["prompt"]},
                             {"role": "assistant", "content": item["answer"]}])
@@ -1802,7 +1833,8 @@ class BenchmarkManager:
         perf = self._performance(
             model, tests[:min(5, len(tests))], generation_options,
             progress_callback=lambda progress, activity: self._update_status(
-                progress=progress, activity=activity))
+                progress=progress, activity=activity),
+            request_options=requested_options)
         if self.cancel_requested.is_set() or perf is None:
             save_checkpoint("performance")
             self._update_status(state="cancelled")
@@ -1812,11 +1844,29 @@ class BenchmarkManager:
                   "quality_aggregation": "equal-weighted mean of available category scores",
                   "difficulty_calibration_status": "not empirically calibrated",
                   "timestamp": datetime.now(timezone.utc).isoformat(),
-                  "seed": seed, "demo": bool(model.get("demo")),
+                  "seed": seed, "suite_seed": seed,
+                  "sampling_seed": requested_options.get("seed"),
+                  "demo": bool(model.get("demo")),
                   "model": {**model_info(model), "id": model.get("id")},
                   "hardware": hardware, "configuration": {"profile": profile, "warmup_runs": 3,
-                  "measured_runs": 5, "retries": 2, "temperature": generation_options["temperature"],
-                  "top_p": generation_options["top_p"], "generation_options": generation_options,
+                  "measured_runs": 5, "retries": 2,
+                  "suite_seed": seed, "sampling_seed": requested_options.get("seed"),
+                  "temperature": requested_options.get("temperature"),
+                  "top_p": requested_options.get("top_p"),
+                  "generation_options": requested_options,
+                  "requested_options": requested_options,
+                  "request_options_sent": request_options_snapshot(model, requested_options),
+                  "server_reported_options": {
+                      key: model[key] for key in ("generation_defaults", "context_length",
+                          "gpu_offload", "backend_version") if model.get(key) is not None
+                  },
+                  "server_reported_options_note": (
+                      "Reported server defaults/runtime metadata; not an acknowledgement "
+                      "that per-request options were applied."),
+                  "max_tokens_for_context_budget": (
+                      {"value": 2048, "assumed": True}
+                      if "max_tokens" not in requested_options else
+                      {"value": requested_options["max_tokens"], "assumed": False}),
                   "repeat_runs": repeat_runs,
                   "repeat_seed_policy": "sampling seed increments by one per repeat" if repeat_runs > 1 else "single run",
                   "context_reset_per_test": True, "context_suite": context_sizes,
@@ -1969,12 +2019,14 @@ class BenchmarkManager:
             if os.path.exists(name):
                 os.unlink(name)
 
-    def _performance(self, model, samples, generation_options=None, progress_callback=None):
+    def _performance(self, model, samples, generation_options=None, progress_callback=None,
+                     request_options=None):
         progress = 0
         def safe_answer(test):
             started = time.perf_counter()
             try:
-                answer = self._answer(model, test, generation_options=generation_options)
+                answer = self._answer(model, test, generation_options=generation_options,
+                                      request_options=request_options)
             except Exception:
                 return {"success": False, "latency_s": time.perf_counter() - started,
                         "output_tokens": 0}
@@ -2019,7 +2071,8 @@ class BenchmarkManager:
             if self.cancel_requested.is_set():
                 return None
             measurements.append(self._execute(
-                model, test, generation_options=generation_options))
+                model, test, generation_options=generation_options,
+                request_options=request_options))
             progress += 1
             if progress_callback:
                 progress_callback(progress, f"Measured latency sample {index + 1} of {len(samples)}.")

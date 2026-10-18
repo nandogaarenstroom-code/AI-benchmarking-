@@ -221,6 +221,15 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <option value="custom">Custom</option>
   </select></label>
   </div>
+  <div class="controls" aria-label="Named benchmark configurations">
+    <label>Configuration name<input id="configuration-name" type="text" maxlength="64"></label>
+    <label>Saved configuration<select id="saved-configuration"><option value="">Select a saved configuration</option></select></label>
+    <button id="save-configuration" class="secondary" type="button">Save</button>
+    <button id="load-configuration" class="secondary" type="button" disabled>Load</button>
+    <button id="delete-configuration" class="secondary" type="button" disabled>Delete</button>
+    <button id="export-configuration" class="secondary" type="button" disabled>Export JSON</button>
+  </div>
+  <p id="configuration-status" class="muted" aria-live="polite"></p>
   </div>
   <div id="advanced-settings" role="tabpanel" aria-labelledby="advanced-tab" hidden>
     <fieldset>
@@ -242,8 +251,15 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
       <label>Top K (0 disables)<input id="top-k" type="number" min="0" max="1000" step="1" value="40"></label>
       <label>Min P<input id="min-p" type="number" min="0" max="1" step="0.01" value="0.05"></label>
       <label>Repeat penalty<input id="repeat-penalty" type="number" min="0.5" max="2" step="0.05" value="1.1"></label>
-      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="32768" step="1" value="2048"></label>
+      <label>Maximum output tokens<input id="max-tokens" type="number" min="1" max="32768" step="1" value="2048" required></label>
+      <label>Suite seed<input id="suite-seed" type="number" min="0" max="2147483647" step="1" value="12345" required></label>
       <label>Sampling seed<input id="sampling-seed" type="number" min="0" max="2147483647" step="1" value="12345"></label>
+      <label>Presence penalty<input id="presence-penalty" type="number" min="-2" max="2" step="0.1"></label>
+      <label>Frequency penalty<input id="frequency-penalty" type="number" min="-2" max="2" step="0.1"></label>
+      <label>Stop sequences (one per line)<textarea id="stop-sequences" rows="2"></textarea></label>
+      <label>System prompt<textarea id="system-prompt" rows="2" maxlength="8192"></textarea></label>
+      <label>llama.cpp prompt cache<select id="cache-prompt"><option value="default">Server default</option><option value="true">On</option><option value="false">Off</option></select></label>
+      <label>Request timeout (seconds)<input id="request-timeout" type="number" min="10" max="3600" step="1" value="300"></label>
       <label>Primary test repeats<select id="repeat-runs"><option value="1">1 (default)</option><option value="2">2</option><option value="3">3</option><option value="5">5</option></select></label>
     </div>
     <p class="muted" id="settings-note">Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).</p>
@@ -276,6 +292,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
     <div>Overall <div class="metric" id="overall"></div></div>
   </div>
   <p id="performance-detail" class="muted"></p>
+  <p id="run-seeds" class="muted"></p>
   <p id="result-directory" class="muted"></p>
   <p id="result-links"></p>
   <h3>Voxel benchmark laboratory</h3>
@@ -322,7 +339,7 @@ code{color:#d6f39d;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
   <div id="context-records"></div>
 </section>
 <script>
-let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false,hardwareRecommendations=null;
+let selected=null,currentResult=null,hitAreas=[],focusedTower=0,lastActivityAt=Date.now(),lastPollActivity=null,resumeAvailable=false,hardwareRecommendations=null,parameterCapabilities={};
 const $=id=>document.getElementById(id);
 const escapeText=value=>String(value??'');
 const csrfToken='__CSRF_TOKEN__';
@@ -335,6 +352,7 @@ async function load(){
     const response=await fetch('/api/models');
     if(!response.ok)throw new Error('The local model scan failed. Check that the app is still running.');
     const data=await response.json(),container=$('models');
+    parameterCapabilities=data.parameter_capabilities||{};
     selected=null;$('run').disabled=true;$('run').textContent='Choose a model to run';
     container.replaceChildren();
     data.models.forEach(model=>{
@@ -352,7 +370,7 @@ async function load(){
       card.append(title,document.createElement('br'),meta);
       const choose=()=>{
         document.querySelectorAll('.model').forEach(item=>{item.classList.remove('selected');item.setAttribute('aria-pressed','false')});
-        card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);
+        card.classList.add('selected');card.setAttribute('aria-pressed','true');selected=model;applyModelDefaults(model);refreshParameterStates();
         $('run').disabled=false;$('run').textContent=model.demo?'Run demo benchmark':'Run benchmark';
         $('discovery-status').textContent=model.demo?'Demo results test the app only; they are not model measurements.':'Selected local model: '+model.name;
       };
@@ -508,6 +526,7 @@ function show(result,resultDirectory){
   $('overall').textContent=scoreText(result.scores.overall);
   const performance=result.performance||{};
   $('performance-detail').textContent=`Sample decode: ${performance.tokens_per_second??'not available'} tokens/s · prefill: ${performance.prefill_tokens_per_second??'not available'} tokens/s · median TTFT ${performance.ttft_s??'not available'}s · ${performance.timing_source||'timing source unavailable'}${performance.timing_is_estimated?' (includes estimated timing)':''} · token counts ${performance.token_count_is_estimated===false?'backend-reported':'estimated'}.`;
+  $('run-seeds').textContent=`Suite seed: ${result.configuration.suite_seed??result.seed??'Unknown'} · Sampling seed: ${result.configuration.sampling_seed??'server default'}`;
   $('demo-label').textContent=result.demo?'— DEMO DATA':'';
   const notRun=result.not_run||[];
   $('result-note').textContent=result.demo
@@ -757,13 +776,13 @@ $('compare-results').onclick=async()=>{
     if(!response.ok)throw new Error('Could not compare the selected results.');
     const data=await response.json(),table=document.createElement('table');
     const header=document.createElement('tr');
-    ['Model','Run type','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
+    ['Model','Run type','Suite seed','Sampling seed','Quality','Performance','Overall','Best overall'].forEach(value=>{const cell=document.createElement('th');cell.textContent=value;header.append(cell)});
     table.append(header);
     const comparable=data.results.filter(item=>Number.isFinite(item.overall));
     const best=comparable.length?comparable.reduce((current,item)=>item.overall>current.overall?item:current).id:null;
     data.results.forEach(item=>{
       const row=document.createElement('tr');
-      [item.model,item.demo?'DEMO DATA':'MODEL DATA',item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
+      [item.model,item.demo?'DEMO DATA':'MODEL DATA',item.suite_seed,item.sampling_seed,item.quality,item.performance,item.overall,item.id===best?'Yes':''].forEach(value=>{const cell=document.createElement('td');cell.textContent=String(value??'Not available');row.append(cell)});
       table.append(row);
     });
     const warnings=document.createElement('p');
@@ -786,22 +805,138 @@ const presets={
   balanced:{temperature:0.4,top_p:0.9,top_k:40,min_p:0.05,repeat_penalty:1.1,max_tokens:2048,seed:12345},
   creative:{temperature:0.8,top_p:0.95,top_k:40,min_p:0.05,repeat_penalty:1.05,max_tokens:2048,seed:12345}
 };
-const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed'};
+const parameterInputs={temperature:'temperature',top_p:'top-p',top_k:'top-k',min_p:'min-p',repeat_penalty:'repeat-penalty',max_tokens:'max-tokens',seed:'sampling-seed',presence_penalty:'presence-penalty',frequency_penalty:'frequency-penalty',num_ctx:'runtime-context',num_gpu:'runtime-gpu',num_thread:'runtime-threads',request_timeout_seconds:'request-timeout',stop:'stop-sequences',system_prompt:'system-prompt',cache_prompt:'cache-prompt'};
+const dirtyFields=new Set();
 let maxTokensEdited=false;
-$('preset').onchange=()=>{const values=presets[$('preset').value];if(values){maxTokensEdited=true;Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=values[key])}};
-Object.values(parameterInputs).forEach(id=>$(id).addEventListener('input',()=>{$('preset').value='custom'}));
-$('max-tokens').addEventListener('input',()=>{maxTokensEdited=true});
-function applyModelDefaults(model){
-  Object.entries(parameterInputs).forEach(([key,id])=>$(id).value=presets.repeatable[key]);
-  maxTokensEdited=false;
-  const defaults=model.generation_defaults||{};
-  Object.entries(defaults).forEach(([key,value])=>{if(parameterInputs[key]&&key!=='max_tokens')$(parameterInputs[key]).value=value});
-  ['runtime-context','runtime-gpu','runtime-threads'].forEach(id=>$(id).disabled=model.backend!=='Ollama');
-  $('preset').value=Object.keys(defaults).length?'custom':'repeatable';
-  $('settings-note').textContent=Object.keys(defaults).length
-    ?'Server sampling defaults are loaded, with a more generous hardware-based output budget. Editing a value sends a per-request override. Settings are recorded with each result; repeats use consecutive sampling seeds.'
-    :'Settings are recorded with each result. Repeats use consecutive sampling seeds; context and performance tests run once. Context window size is set when starting llama-server (for example, with -c).';
+function capabilityKey(model){
+  if(model.backend==='Ollama')return 'ollama';
+  if(model.backend==='LM Studio')return 'lm_studio';
+  return model.llama_cpp?'llama_cpp':'openai_compatible';
 }
+function readParameter(name){
+  const input=$(parameterInputs[name]);
+  if(!input)return undefined;
+  if(name==='stop'){
+    const lines=input.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    return lines.length?lines:undefined;
+  }
+  if(name==='cache_prompt')return input.value==='default'?undefined:input.value==='true';
+  if(input.value==='')return undefined;
+  if(input.type==='number')return Number(input.value);
+  return input.value;
+}
+function refreshParameterStates(){
+  if(!selected)return;
+  const capabilities=parameterCapabilities[capabilityKey(selected)]||{};
+  Object.entries(parameterInputs).forEach(([name,id])=>{
+    const input=$(id),supported=Object.hasOwn(capabilities,name);
+    input.disabled=!supported;
+    input.title=supported?'':'Not supported by this backend';
+    let state=$('state-'+id);
+    if(!state){state=document.createElement('span');state.id='state-'+id;state.className='muted';input.insertAdjacentElement('afterend',state)}
+    state.textContent=!supported?'Not supported by this backend':
+      readParameter(name)===undefined?'Server default':'Applied: sent to backend';
+  });
+}
+$('preset').onchange=()=>{
+  const values=presets[$('preset').value];
+  if(values)Object.entries(values).forEach(([key,value])=>{
+    if(!dirtyFields.has(key))$(parameterInputs[key]).value=value;
+  });
+  refreshParameterStates();
+};
+Object.entries(parameterInputs).forEach(([name,id])=>$(id).addEventListener(
+  id==='cache-prompt'?'change':'input',()=>{
+    dirtyFields.add(name);if(name==='max_tokens')maxTokensEdited=true;
+    $('preset').value='custom';refreshParameterStates();
+  }));
+function applyModelDefaults(model){
+  Object.entries(presets.repeatable).forEach(([key,value])=>{
+    if(!dirtyFields.has(key))$(parameterInputs[key]).value=value;
+  });
+  const defaults=model.generation_defaults||{};
+  Object.entries(defaults).forEach(([key,value])=>{
+    if(parameterInputs[key]&&!dirtyFields.has(key))$(parameterInputs[key]).value=value;
+  });
+  if(model.backend==='Ollama'){
+    ['num_ctx','num_gpu','num_thread'].forEach(name=>{
+      if(!dirtyFields.has(name)&&model.context_configured!==undefined&&name==='num_ctx')
+        $(parameterInputs[name]).value=model.context_configured==='Unknown'?'':model.context_configured;
+    });
+  }
+  maxTokensEdited=dirtyFields.has('max_tokens');
+  $('preset').value=dirtyFields.size||Object.keys(defaults).length?'custom':'repeatable';
+  refreshParameterStates();
+  $('settings-note').textContent='Blank request fields use server defaults. Reported settings are not confirmation that a server applied a request override.';
+}
+const CONFIG_KEY='ai-benchmarking-configurations-v1';
+function readConfigs(){
+  try{
+    const value=JSON.parse(localStorage.getItem(CONFIG_KEY)||'[]');
+    return Array.isArray(value)?value.filter(x=>x&&typeof x.name==='string'&&x.name.length<=64&&x.configuration&&typeof x.configuration==='object').slice(0,50):[];
+  }catch(error){return []}
+}
+function refreshConfigs(selectName=''){
+  const select=$('saved-configuration');
+  select.replaceChildren(new Option('Select a saved configuration',''));
+  readConfigs().forEach(x=>select.add(new Option(x.name,x.name)));
+  if(selectName)select.value=selectName;
+  ['load-configuration','delete-configuration','export-configuration'].forEach(id=>$(id).disabled=!select.value);
+}
+function configurationState(){
+  const launch={};
+  ['llama-source','llama-executable','llama-package','llama-model','llama-context','llama-gpu-layers']
+    .forEach(id=>{const input=$(id);if(input)launch[id]=input.value});
+  return {version:1,profile:$('profile').value,preset:$('preset').value,
+    suite_seed:$('suite-seed').value,repeat_runs:$('repeat-runs').value,
+    parameters:Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,$(id).value])),
+    launch};
+}
+function configStatus(text){$('configuration-status').textContent=text}
+function saveConfig(){
+  const name=$('configuration-name').value.trim(),current=readConfigs();
+  if(!name||name.length>64){configStatus('Enter a name up to 64 characters.');return}
+  const configs=current.filter(x=>x.name!==name);
+  if(configs.length>=50){configStatus('Delete a saved configuration before adding another.');return}
+  configs.push({name,configuration:configurationState()});
+  try{localStorage.setItem(CONFIG_KEY,JSON.stringify(configs));refreshConfigs(name);configStatus(`Saved “${name}”.`)}
+  catch(error){configStatus('Could not save browser configuration.')}
+}
+function loadConfig(){
+  const entry=readConfigs().find(x=>x.name===$('saved-configuration').value);
+  if(!entry)return;
+  const config=entry.configuration;
+  Object.entries(config.parameters||{}).forEach(([name,value])=>{
+    if(parameterInputs[name]&&typeof value==='string'){
+      $(parameterInputs[name]).value=value;dirtyFields.add(name);
+    }
+  });
+  if(typeof config.suite_seed==='string'){$('suite-seed').value=config.suite_seed;dirtyFields.add('suite_seed')}
+  if(typeof config.repeat_runs==='string')$('repeat-runs').value=config.repeat_runs;
+  if(typeof config.profile==='string'&&[...$('profile').options].some(x=>x.value===config.profile))$('profile').value=config.profile;
+  Object.entries(config.launch||{}).forEach(([id,value])=>{if($(id)&&typeof value==='string')$(id).value=value});
+  $('preset').value=['repeatable','balanced','creative','custom'].includes(config.preset)?config.preset:'custom';
+  maxTokensEdited=dirtyFields.has('max_tokens');refreshParameterStates();configStatus(`Loaded “${entry.name}”.`);
+}
+function deleteConfig(){
+  const name=$('saved-configuration').value;
+  try{localStorage.setItem(CONFIG_KEY,JSON.stringify(readConfigs().filter(x=>x.name!==name)));refreshConfigs();configStatus(`Deleted “${name}”.`)}
+  catch(error){configStatus('Could not update browser configuration.')}
+}
+function exportConfig(){
+  const entry=readConfigs().find(x=>x.name===$('saved-configuration').value);
+  if(!entry)return;
+  const url=URL.createObjectURL(new Blob([JSON.stringify(entry,null,2)],{type:'application/json'}));
+  const link=document.createElement('a');link.href=url;
+  link.download=`benchmark-config-${entry.name.replace(/[^a-z0-9_-]/gi,'_')}.json`;
+  link.click();URL.revokeObjectURL(url);
+}
+refreshConfigs();
+$('saved-configuration').addEventListener('change',()=>refreshConfigs($('saved-configuration').value));
+$('save-configuration').onclick=saveConfig;
+$('load-configuration').onclick=loadConfig;
+$('delete-configuration').onclick=deleteConfig;
+$('export-configuration').onclick=exportConfig;
 function selectSettingsTab(name){
   ['basic','advanced'].forEach(tab=>{
     const active=tab===name;
@@ -823,6 +958,8 @@ function selectSettingsTab(name){
 function applyHardwareSuggestions(){
   if(!hardwareRecommendations)return;
   const advice=hardwareRecommendations;
+  ['max_tokens','num_ctx','num_gpu','num_thread'].forEach(key=>dirtyFields.add(key));
+  maxTokensEdited=true;
   $('max-tokens').value=advice.generation_options.max_tokens;
   $('llama-context').value=advice.context_size;
   if(advice.gpu_layers!==null&&advice.gpu_layers!==undefined)$('llama-gpu-layers').value=advice.gpu_layers;
@@ -858,19 +995,30 @@ async function startRun(endpoint,payload){
   try{
     const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrfToken},body:JSON.stringify(payload)});
     const data=await response.json();
-    if(!response.ok)throw new Error(data.error||'The benchmark could not be started.');
+    if(!response.ok){const error=new Error(data.error||'The benchmark could not be started.');error.field=data.field;throw error}
     await poll();
-  }catch(error){displayError(error.message)}
+  }catch(error){displayError(error.message);if(error.field)showFieldError(error.field,error.message)}
+}
+function showFieldError(field,message){
+  const input=$(parameterInputs[field]||({'suite_seed':'suite-seed'}[field])||field);
+  if(!input)return;
+  let node=$('error-'+input.id);
+  if(!node){node=document.createElement('span');node.id='error-'+input.id;node.className='field-error';input.insertAdjacentElement('afterend',node)}
+  node.textContent=message;input.setAttribute('aria-invalid','true');
+  input.addEventListener('input',()=>{node.textContent='';input.removeAttribute('aria-invalid')},{once:true});
 }
 $('run').onclick=()=>{
   if(!selected){displayError('Select a detected model before starting a benchmark.');return}
-  const generation_options=Object.fromEntries(Object.entries(parameterInputs).map(([key,id])=>[key,Number($(id).value)]));
-  if(selected.backend==='Ollama'){
-    Object.entries({num_ctx:'runtime-context',num_gpu:'runtime-gpu',num_thread:'runtime-threads'}).forEach(([key,id])=>{
-      if($(id).value!=='')generation_options[key]=Number($(id).value);
-    });
-  }
-  startRun('/api/benchmark',{model:selected,profile:$('profile').value,generation_options,repeat_runs:Number($('repeat-runs').value)});
+  if($('suite-seed').value===''){showFieldError('suite_seed','Suite seed is required.');return}
+  if($('max-tokens').value===''){showFieldError('max_tokens','Maximum output tokens is required.');return}
+  const generation_options={};
+  const capabilities=parameterCapabilities[capabilityKey(selected)]||{};
+  Object.keys(parameterInputs).forEach(key=>{
+    if(!Object.hasOwn(capabilities,key))return;
+    const value=readParameter(key);
+    if(value!==undefined)generation_options[key]=value;
+  });
+  startRun('/api/benchmark',{model:selected,profile:$('profile').value,seed:Number($('suite-seed').value),generation_options,repeat_runs:Number($('repeat-runs').value)});
 };
 $('resume').onclick=()=>startRun('/api/resume',{});
 function updateLlamaSource(){

@@ -175,6 +175,8 @@ def write_html(path, result):
         f"<p><strong>{'DEMO DATA — not measured model performance' if result.get('demo') else 'MODEL DATA'}</strong></p>"
         f"<h2>{escaped(result.get('model', {}).get('name', 'Unknown model'))}</h2>"
         f"<p>{escaped(result.get('timestamp', ''))} · {escaped(result.get('id', ''))}</p>"
+        f"<p>Suite seed: {escaped(result.get('suite_seed', result.get('seed', 'Unknown')))} · "
+        f"Sampling seed: {escaped((result.get('configuration') or {}).get('sampling_seed', 'Unknown'))}</p>"
         '<p>Controlled benchmark results, not universal guarantees. Difficulty tiers are not empirically '
         'calibrated. Token counts and timings may be estimated: see measurement flags below. '
         'All content is embedded; this report works offline.</p>'

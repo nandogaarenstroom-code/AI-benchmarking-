@@ -17,7 +17,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from backend.benchmark import BenchmarkManager
-from backend.discovery import discover_models, hardware_info, recommend_settings, resolve_model
+from backend.discovery import (
+    GenerationOptionsError, REQUEST_CAPABILITY_MATRIX, discover_models, hardware_info,
+    normalize_generation_options, recommend_settings, resolve_model,
+)
 from backend.llama_server import LlamaServerConflict, LlamaServerError, llama_server_manager
 
 ROOT = Path(__file__).parent
@@ -148,7 +151,8 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             return self._static("index.html")
         if path == "/api/models":
-            return self._json({"models": discover_models()})
+            return self._json({"models": discover_models(),
+                               "parameter_capabilities": REQUEST_CAPABILITY_MATRIX})
         if path == "/api/hardware":
             hardware = hardware_info()
             return self._json({"hardware": hardware, "recommendations": recommend_settings(hardware)})
@@ -232,11 +236,11 @@ class Handler(BaseHTTPRequestHandler):
                 "generation_options": payload.get("generation_options", {}),
                 "repeat_runs": payload.get("repeat_runs", 1),
             }
-            options = clean_payload["generation_options"]
-            options = dict(options) if isinstance(options, dict) else {}
-            if "max_tokens" not in options:
-                options["max_tokens"] = recommend_settings(hardware_info())["generation_options"]["max_tokens"]
-            clean_payload["generation_options"] = options
+            try:
+                clean_payload["generation_options"] = normalize_generation_options(
+                    clean_payload["generation_options"], include_defaults=False)
+            except GenerationOptionsError as exc:
+                return self._json({"error": f"{exc.field}: {exc}", "field": exc.field}, 400)
             try:
                 clean_payload["seed"] = int(clean_payload["seed"])
             except (TypeError, ValueError, OverflowError):

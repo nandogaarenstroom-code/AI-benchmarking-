@@ -110,14 +110,13 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(model_info(model)["managed_launch"], launch)
 
     def test_generation_options_are_normalized(self):
-        options = normalize_generation_options({
-            "temperature": 3, "top_p": "invalid", "top_k": -1,
-            "min_p": 0.2, "repeat_penalty": float("nan"), "max_tokens": 5000, "seed": 7,
-        })
-        self.assertEqual(options, {
-            "temperature": 2.0, "top_p": 1.0, "top_k": 0, "min_p": 0.2,
-            "repeat_penalty": 1.1, "max_tokens": 5000, "seed": 7,
-        })
+        options = normalize_generation_options({"min_p": 0.2, "max_tokens": 5000, "seed": 7})
+        self.assertEqual(options["min_p"], 0.2)
+        self.assertEqual(options["max_tokens"], 5000)
+        with self.assertRaises(ValueError):
+            normalize_generation_options({"temperature": 3})
+        with self.assertRaises(ValueError):
+            normalize_generation_options({"top_p": "invalid"})
 
     def test_generation_options_reach_ollama_adapter(self):
         class Response:
@@ -1058,9 +1057,10 @@ class BenchmarkTests(unittest.TestCase):
             execute = manager._execute
             cancelled = False
 
-            def cancel_after_first_fresh(model, test, history=None, generation_options=None):
+            def cancel_after_first_fresh(model, test, history=None, generation_options=None,
+                                         request_options=None):
                 nonlocal cancelled
-                result = execute(model, test, history, generation_options)
+                result = execute(model, test, history, generation_options, request_options)
                 if "context_size" in test and history is None and not cancelled:
                     cancelled = True
                     manager.cancel_requested.set()
@@ -1085,7 +1085,8 @@ class BenchmarkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
 
-            def cancel_warmup(model, test, history=None, generation_options=None):
+            def cancel_warmup(model, test, history=None, generation_options=None,
+                              request_options=None):
                 if test["prompt"] == "warm up":
                     manager.cancel_requested.set()
                     return ""
@@ -1099,7 +1100,8 @@ class BenchmarkTests(unittest.TestCase):
             manager = BenchmarkManager(Path(directory))
             tests = make_tests("QUICK", 12345)[:2]
 
-            def cancel_primary(model, test, history=None, generation_options=None):
+            def cancel_primary(model, test, history=None, generation_options=None,
+                               request_options=None):
                 result = {**test, "answer": "ok", "passed": True, "score": 10,
                           "status": "PASS", "attempts": [], "error": None,
                           "latency_s": 0.1, "ttft_s": 0.1, "generation_s": 0.1,
@@ -1128,7 +1130,8 @@ class BenchmarkTests(unittest.TestCase):
                  "evaluation_method": "contains_all", "required_terms": ["CTX-2"], "max_score": 10},
             ]
 
-            def cancel_accumulated(model, test, history=None, generation_options=None):
+            def cancel_accumulated(model, test, history=None, generation_options=None,
+                                   request_options=None):
                 result = {**test, "answer": test["expected_answer"], "passed": True, "score": 10,
                           "status": "PASS", "attempts": [], "error": None,
                           "latency_s": 0.1, "ttft_s": 0.1, "generation_s": 0.1,
@@ -1740,7 +1743,9 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertTrue(manager.run({"profile": "QUICK", "generation_options": supplied}))
                 result = outputs.call_args.args[0]
                 options = result["configuration"]["generation_options"]
-                self.assertEqual(options["max_tokens"], expected)
+                self.assertEqual(options.get("max_tokens"), supplied.get("max_tokens"))
+                self.assertEqual(result["configuration"]["max_tokens_for_context_budget"],
+                                 {"value": expected, "assumed": "max_tokens" not in supplied})
                 self.assertNotIn("num_gpu", options)
                 self.assertNotIn("num_thread", options)
                 self.assertEqual(options.get("num_ctx"), supplied.get("num_ctx"))

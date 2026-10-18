@@ -3,8 +3,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from backend.discovery import (
-    AdapterError, MAX_MODEL_RESPONSE_BYTES, MODEL_READ_TIMEOUT_SECONDS, ask_model,
-    normalize_generation_options,
+    AdapterError, MAX_MODEL_RESPONSE_BYTES, MODEL_READ_TIMEOUT_SECONDS, REQUEST_CAPABILITY_MATRIX,
+    ask_model, map_request_options, normalize_generation_options, request_options_snapshot,
 )
 
 
@@ -37,13 +37,78 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn("num_ctx", defaults)
         self.assertNotIn("num_gpu", defaults)
         self.assertNotIn("num_thread", defaults)
-        options = normalize_generation_options({"max_tokens": 999999, "num_ctx": 999999,
-                                                "num_gpu": -5, "num_thread": 1000})
-        self.assertEqual(options["max_tokens"], 32768)
-        self.assertEqual(options["num_ctx"], 131072)
-        self.assertEqual(options["num_gpu"], 0)
-        self.assertEqual(options["num_thread"], 256)
+        for options, field in (({"max_tokens": 999999}, "max_tokens"),
+                               ({"num_ctx": 999999}, "num_ctx"),
+                               ({"num_gpu": -5}, "num_gpu"),
+                               ({"num_thread": 1000}, "num_thread"),
+                               ({"unknown": 1}, "unknown")):
+            with self.subTest(options=options), self.assertRaises(ValueError) as caught:
+                normalize_generation_options(options)
+            self.assertEqual(caught.exception.field, field)
         self.assertEqual(normalize_generation_options({"max_tokens": 5000})["max_tokens"], 5000)
+        self.assertEqual(normalize_generation_options(
+            {"max_tokens": 512}, include_defaults=False), {"max_tokens": 512})
+
+    def test_every_parameter_maps_to_exact_backend_request_body_or_is_omitted(self):
+        models = {
+            "ollama": OLLAMA,
+            "lm_studio": {"id": "model", "backend": "LM Studio", "endpoint": "http://localhost/v1"},
+            "openai_compatible": OPENAI,
+            "llama_cpp": {**OPENAI, "llama_cpp": True},
+        }
+        values = {
+            "temperature": 0.5, "top_p": 0.8, "top_k": 20, "min_p": 0.1,
+            "repeat_penalty": 1.2, "max_tokens": 128, "seed": 42,
+            "num_ctx": 4096, "num_gpu": 2, "num_thread": 4,
+            "presence_penalty": 0.4, "frequency_penalty": 0.3, "stop": ["STOP"],
+            "system_prompt": "system", "cache_prompt": False,
+            "request_timeout_seconds": 60,
+        }
+        for backend, model in models.items():
+            mappings = REQUEST_CAPABILITY_MATRIX[backend]
+            for parameter, value in values.items():
+                captured = {}
+
+                def opened(request, timeout):
+                    captured.update(body=json.loads(request.data), timeout=timeout)
+                    if backend == "ollama":
+                        return Response([b'{"message":{"content":"ok"},"done":true}\n'])
+                    return sse({"choices": [{"delta": {"content": "ok"},
+                                             "finish_reason": "stop"}]})
+
+                with self.subTest(backend=backend, parameter=parameter), patch(
+                        "backend.discovery._open", side_effect=opened):
+                    ask_model(model, "prompt", options={parameter: value})
+                mapping = mappings.get(parameter)
+                base = ({"model": "model",
+                         "messages": [{"role": "user", "content": "prompt"}],
+                         "stream": True, "options": {}}
+                        if backend == "ollama" else
+                        {"model": "model",
+                         "messages": [{"role": "user", "content": "prompt"}],
+                         "stream": True, "stream_options": {"include_usage": True}})
+                if backend == "llama_cpp":
+                    base["timings_per_token"] = True
+                if mapping:
+                    mapped = map_request_options(model, {parameter: value})
+                    if mapping.startswith("options."):
+                        base["options"][mapping.split(".", 1)[1]] = value
+                    elif mapping == "messages.system":
+                        base["messages"].insert(0, {"role": "system", "content": value})
+                    elif mapping != "transport.timeout":
+                        base[mapping] = value
+                self.assertEqual(captured["body"], base)
+                self.assertEqual(captured["timeout"],
+                                 value if mapping == "transport.timeout" else 300)
+
+    def test_request_option_snapshot_records_mapped_fields_and_transport(self):
+        snapshot = request_options_snapshot(
+            {**OPENAI, "llama_cpp": True},
+            {"temperature": 0.5, "top_k": 10, "request_timeout_seconds": 40})
+        self.assertEqual(snapshot, {
+            "body": {"temperature": 0.5, "top_k": 10},
+            "transport": {"timeout_seconds": 40},
+        })
 
     def test_runtime_settings_only_reach_ollama(self):
         for model in (OPENAI, {**OPENAI, "llama_cpp": True}, OLLAMA):
