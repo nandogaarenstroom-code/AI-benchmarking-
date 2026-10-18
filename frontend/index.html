@@ -531,8 +531,11 @@ function show(result,resultDirectory){
     $('repeat-summary').textContent+=` NOT RUN repeats: ${repeatOutcomes.not_run} of ${repeatOutcomes.requested_per_test*(result.tests||[]).length} requested.`;
   $('result-directory').textContent=`Saved to ${resultDirectory||'results/'} · files use the name ${result.id}`;
   const links=$('result-links');links.replaceChildren();
-  [['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`],['Voxel HTML',`${result.id}.html`]].forEach(([label,filename])=>{
-    const relative=(result.artifact_directory?result.artifact_directory+'/':'')+filename;
+  const downloads=[['JSON',`${result.id}.json`],['CSV',`${result.id}.csv`],['PDF',`${result.id}.pdf`],['SVG',`${result.id}_quality.svg`]];
+  const modelFolder=result.model_folder||result.artifact_directory;
+  if(modelFolder)downloads.push(['Voxel HTML',`${result.id}.html`]);
+  downloads.forEach(([label,filename])=>{
+    const relative=(modelFolder?modelFolder+'/':'')+filename;
     const link=document.createElement('a');link.href='/results/'+relative.split('/').map(encodeURIComponent).join('/');
     link.download=filename;link.textContent=`Download ${label}`;links.append(link);
   });

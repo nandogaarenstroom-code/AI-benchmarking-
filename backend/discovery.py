@@ -14,6 +14,7 @@ from .llama_server import llama_server_manager
 
 MAX_MODEL_RESPONSE_BYTES = 16_777_216
 MAX_DISCOVERY_RESPONSE_BYTES = 1_048_576
+MODEL_READ_TIMEOUT_SECONDS = 300
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -278,6 +279,8 @@ class _StreamTelemetry:
         self.prompt_estimate = _estimate_tokens("\n".join(
             str(message.get("content", "")) for message in messages if isinstance(message, dict)))
         self.generated_bytes = 0
+        self.first_chunk_bytes = 0
+        self.content_chunks = 0
         self.prompt_tokens = self.output_tokens = None
         self.prefill_s = self.decode_s = None
         self.prefill_rate = self.decode_rate = None
@@ -290,7 +293,11 @@ class _StreamTelemetry:
         if text or reasoning:
             if self.first_token_at is None:
                 self.first_token_at = time.perf_counter()
-            self.generated_bytes += len((text + reasoning).encode("utf-8"))
+            chunk_bytes = len((text + reasoning).encode("utf-8"))
+            self.generated_bytes += chunk_bytes
+            self.content_chunks += 1
+            if self.content_chunks == 1:
+                self.first_chunk_bytes = chunk_bytes
         if self.backend == "Ollama":
             for source, target in (("prompt_eval_count", "prompt_tokens"), ("eval_count", "output_tokens")):
                 value = _nonnegative(item.get(source))
@@ -343,15 +350,22 @@ class _StreamTelemetry:
         source = self.timing_source
         if source == "client_estimate" and self.prompt_tokens is not None and self.output_tokens is not None:
             source = "backend_usage"
+        # The first chunk arrived before the measured decode interval. Counting
+        # it makes one-chunk responses appear arbitrarily fast.
+        client_decode_tokens = max(1, (self.generated_bytes - self.first_chunk_bytes) // 4)
         return {
             "phase": phase, "prompt_tokens": int(prompt_tokens), "output_tokens": int(output_tokens),
             "ttft_s": None if self.first_token_at is None else self.first_token_at - self.started,
-            "generation_s": elapsed, "prefill_s": self.prefill_s, "decode_s": self.decode_s,
+            "generation_s": self.decode_s if self.decode_s is not None else elapsed,
+            "client_generation_s": elapsed, "prefill_s": self.prefill_s, "decode_s": self.decode_s,
             "prefill_tokens_per_second": prefill_rate,
             "decode_tokens_per_second": decode_rate if decode_rate is not None else (
-                output_tokens / elapsed if elapsed > 0 else None),
+                client_decode_tokens / elapsed if elapsed > 0 and self.content_chunks > 1 else None),
             "token_count_is_estimated": self.prompt_tokens is None or self.output_tokens is None,
             "timing_source": source,
+            "timing_is_estimated": (
+                (self.prefill_s is None and prefill_rate is None) or
+                (self.decode_s is None and decode_rate is None)),
             "decode_timing_is_estimated": decode_rate is None,
             "finish_reason": self.finish_reason,
             "truncated": self.finish_reason in ("length", "max_tokens", "max_output_tokens"),
@@ -376,6 +390,14 @@ class _StreamTelemetry:
             error.truncated = metrics["truncated"]
             raise error
         return {"text": answer, **metrics}
+
+
+def _metadata_timeout(response):
+    """Give optional trailing usage a short grace period after a finish marker."""
+    try:
+        response.fp.raw._sock.settimeout(0.25)
+    except (AttributeError, OSError):
+        pass
 
 
 def ask_model(model, prompt, history=None, options=None, progress_callback=None):
@@ -404,7 +426,7 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
                 }).encode(),
                 headers={"Content-Type": "application/json"})
             telemetry = _StreamTelemetry(messages, progress_callback, "Ollama")
-            with _open(request, timeout=60) as response:
+            with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
                 chunks = []
                 completed = False
                 for line in _response_lines(response):
@@ -441,50 +463,59 @@ def ask_model(model, prompt, history=None, options=None, progress_callback=None)
             model["endpoint"] + "/chat/completions", data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"})
         telemetry = _StreamTelemetry(messages, progress_callback, "OpenAI-compatible")
-        with _open(request, timeout=60) as response:
+        with _open(request, timeout=MODEL_READ_TIMEOUT_SECONDS) as response:
             chunks = []
             completed = False
-            for event in _sse_data_events(response):
-                if event.strip() == "[DONE]":
-                    completed = True
-                    break
-                item = json.loads(event)
-                if not isinstance(item, dict):
-                    raise ValueError("invalid OpenAI-compatible response")
-                if item.get("error"):
-                    raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
-                choices = item.get("choices", [])
-                if not isinstance(choices, list):
-                    raise ValueError("invalid OpenAI-compatible choices")
-                if not choices:
-                    telemetry.ingest(item)
-                    continue
-                choice = choices[0]
-                if not isinstance(choice, dict):
-                    raise ValueError("invalid OpenAI-compatible choice")
-                content_source = choice.get("delta", choice.get("message", {}))
-                if isinstance(content_source, str):
-                    text = content_source
-                elif isinstance(content_source, dict):
-                    text = content_source.get("content", choice.get("text", ""))
-                else:
-                    raise ValueError("invalid OpenAI-compatible content")
-                if isinstance(text, list):
-                    text = "".join(part.get("text", "") for part in text
-                                   if isinstance(part, dict) and isinstance(part.get("text"), str))
-                if text is None:
-                    text = ""
-                if not isinstance(text, str):
-                    raise ValueError("invalid OpenAI-compatible content")
-                reasoning = (content_source.get("reasoning_content") or
-                             content_source.get("reasoning") or "") if isinstance(content_source, dict) else ""
-                if not isinstance(reasoning, str):
-                    raise ValueError("invalid reasoning content")
-                chunks.append(text)
-                if choice.get("finish_reason") is not None:
-                    telemetry.finish_reason = str(choice["finish_reason"])
-                    completed = True
-                telemetry.ingest(item, text, reasoning)
+            metadata_deadline = None
+            try:
+                for event in _sse_data_events(response):
+                    if metadata_deadline is not None and time.monotonic() > metadata_deadline:
+                        break
+                    if event.strip() == "[DONE]":
+                        completed = True
+                        break
+                    item = json.loads(event)
+                    if not isinstance(item, dict):
+                        raise ValueError("invalid OpenAI-compatible response")
+                    if item.get("error"):
+                        raise AdapterError("SERVER_ERROR", "Local model server reported a generation error.")
+                    choices = item.get("choices", [])
+                    if not isinstance(choices, list):
+                        raise ValueError("invalid OpenAI-compatible choices")
+                    if not choices:
+                        telemetry.ingest(item)
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):
+                        raise ValueError("invalid OpenAI-compatible choice")
+                    content_source = choice.get("delta", choice.get("message", {}))
+                    if isinstance(content_source, str):
+                        text = content_source
+                    elif isinstance(content_source, dict):
+                        text = content_source.get("content", choice.get("text", ""))
+                    else:
+                        raise ValueError("invalid OpenAI-compatible content")
+                    if isinstance(text, list):
+                        text = "".join(part.get("text", "") for part in text
+                                       if isinstance(part, dict) and isinstance(part.get("text"), str))
+                    if text is None:
+                        text = ""
+                    if not isinstance(text, str):
+                        raise ValueError("invalid OpenAI-compatible content")
+                    reasoning = (content_source.get("reasoning_content") or
+                                 content_source.get("reasoning") or "") if isinstance(content_source, dict) else ""
+                    if not isinstance(reasoning, str):
+                        raise ValueError("invalid reasoning content")
+                    chunks.append(text)
+                    if choice.get("finish_reason") is not None:
+                        telemetry.finish_reason = str(choice["finish_reason"])
+                        completed = True
+                        metadata_deadline = time.monotonic() + 0.25
+                        _metadata_timeout(response)
+                    telemetry.ingest(item, text, reasoning)
+            except (TimeoutError, ConnectionError, OSError, http.client.HTTPException):
+                if not completed:
+                    raise
             return telemetry.finish("".join(chunks).strip(), completed, "The model server")
     except AdapterError:
         raise

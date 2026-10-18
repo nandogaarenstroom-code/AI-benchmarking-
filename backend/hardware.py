@@ -19,7 +19,7 @@ def _command(args):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=4,
                                 check=False, shell=False)
-        if result.returncode == 0 and len(result.stdout) <= 1_048_576:
+        if result.returncode == 0 and isinstance(result.stdout, str) and len(result.stdout) <= 1_048_576:
             return result.stdout.strip()
     except (OSError, subprocess.SubprocessError, UnicodeError):
         pass
@@ -44,6 +44,13 @@ def _positive(value):
 
 def _memory_label(value):
     return f"{value / GIB:.1f} GiB" if value else UNKNOWN
+
+
+def _platform_value(getter):
+    try:
+        return getter() or UNKNOWN
+    except (OSError, ValueError, TypeError, AttributeError):
+        return UNKNOWN
 
 
 def _nvidia_gpus():
@@ -152,14 +159,14 @@ def _macos(info):
 def hardware_info():
     """Return detected values, with Unknown/None rather than invented capacity."""
     info = {
-        "cpu": platform.processor() or UNKNOWN, "cores": UNKNOWN,
-        "threads": os.cpu_count() or UNKNOWN, "architecture": platform.machine() or UNKNOWN,
-        "gpu": UNKNOWN, "gpu_vram": UNKNOWN, "ram": UNKNOWN, "os": platform.platform(),
+        "cpu": _platform_value(platform.processor), "cores": UNKNOWN,
+        "threads": os.cpu_count() or UNKNOWN, "architecture": _platform_value(platform.machine),
+        "gpu": UNKNOWN, "gpu_vram": UNKNOWN, "ram": UNKNOWN, "os": _platform_value(platform.platform),
         "driver": UNKNOWN, "cuda": UNKNOWN, "rocm": UNKNOWN,
         "ram_bytes": None, "gpu_vram_bytes": None, "gpus": _nvidia_gpus(),
         "detection_notes": [], "collected_at": datetime.now(timezone.utc).isoformat(),
     }
-    detector = {"Linux": _linux, "Windows": _windows, "Darwin": _macos}.get(platform.system())
+    detector = {"Linux": _linux, "Windows": _windows, "Darwin": _macos}.get(_platform_value(platform.system))
     if detector:
         try:
             detector(info)
@@ -195,6 +202,7 @@ def recommend_settings(hardware=None):
         generation["num_gpu"] = gpu_layers
     return {
         "generation_options": generation,
+        "context_size": context, "gpu_layers": gpu_layers, "threads": generation.get("num_thread", 1),
         "runtime_settings": {"context_length": context, "gpu_layers": gpu_layers},
         "advisory": True,
         "notes": [

@@ -271,6 +271,26 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertIn("explicitly", json.loads(body)["error"])
         self.assertIsNone(self.manager.payload)
 
+    def test_api_output_default_scales_but_respects_explicit_override(self):
+        headers = {
+            "Origin": f"http://127.0.0.1:{self.server.server_port}",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": app.CSRF_TOKEN,
+        }
+        for supplied, expected in (({}, 8192), ({"max_tokens": 512}, 512)):
+            with self.subTest(supplied=supplied), patch.object(
+                    app, "hardware_info", return_value={}), patch.object(
+                    app, "recommend_settings",
+                    return_value={"generation_options": {"max_tokens": 8192}}) as recommend:
+                status, _ = self.request("/api/benchmark", json.dumps({
+                    "model": {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo"},
+                    "generation_options": supplied,
+                }), headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(self.manager.payload["generation_options"]["max_tokens"], expected)
+                self.assertNotIn("num_gpu", self.manager.payload["generation_options"])
+                self.assertEqual(recommend.call_count, 0 if supplied else 1)
+
     def test_llama_server_start_requires_csrf_and_passes_only_launcher_options(self):
         body = json.dumps({
             "source": "path", "executable_path": "C:\\models\\llama-server.exe",

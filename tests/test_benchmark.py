@@ -115,7 +115,7 @@ class BenchmarkTests(unittest.TestCase):
         })
         self.assertEqual(options, {
             "temperature": 2.0, "top_p": 1.0, "top_k": 0, "min_p": 0.2,
-            "repeat_penalty": 1.1, "max_tokens": 4096, "seed": 7,
+            "repeat_penalty": 1.1, "max_tokens": 5000, "seed": 7,
         })
 
     def test_generation_options_reach_ollama_adapter(self):
@@ -1313,6 +1313,7 @@ class BenchmarkTests(unittest.TestCase):
             result = self._export_fixture()
             manager._write_outputs(result)
             folder = result["model_folder"]
+            self.assertEqual(result["artifact_directory"], folder)
             self.assertRegex(folder, r"^unsafe-model-x-[a-f0-9]{20}$")
             self.assertEqual(set(result["files"]), {"json", "csv", "pdf", "html", "quality_chart"})
             self.assertFalse((root / f"{result['id']}.json").exists())
@@ -1470,11 +1471,27 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertIn("max_tokens", outcome["evaluation"]["explanation"])
                 self.assertIn("output-token budget", outcome["attempts"][0]["diagnostic"])
 
+    def test_empty_response_after_reasoning_exhausts_budget_retains_truncation_diagnostic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            error = AdapterError("EMPTY_RESPONSE", "No generated text.")
+            error.truncated = True
+            error.finish_reason = "length"
+            test = {"id": "math", "prompt": "42", "category": "Mathematics",
+                    "evaluation_method": "numeric", "expected_answer": "42"}
+            with patch.object(manager, "_answer", side_effect=error):
+                outcome = manager._execute({}, test)
+            self.assertEqual(outcome["status"], "NOT RUN")
+            self.assertTrue(outcome["output_truncated"])
+            self.assertEqual(outcome["finish_reason"], "length")
+            self.assertIn("max_tokens", outcome["diagnostic"])
+
     def test_performance_uses_reported_counters_without_calling_them_estimates(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = BenchmarkManager(Path(directory))
             response = {"text": "42", "output_tokens": 24, "prompt_tokens": 10,
-                        "ttft_s": 0.2, "generation_s": 2, "timing_is_estimated": False,
+                        "ttft_s": 0.2, "generation_s": 99, "decode_s": 2,
+                        "timing_is_estimated": False,
                         "token_count_is_estimated": False, "timing_source": "llama.cpp",
                         "prefill_tokens_per_second": 50}
             test = {"id": "math", "prompt": "42", "category": "Mathematics",
@@ -1492,6 +1509,28 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertIsNone(sample["estimated_output_tokens_per_second"])
                 self.assertGreater(sample["output_tokens_per_second"], 0)
 
+    def test_repeat_aggregation_does_not_hide_estimation_or_truncation_in_later_repeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "math", "prompt": "42", "category": "Mathematics",
+                    "evaluation_method": "numeric", "expected_answer": "42"}
+            measured = {"text": "42", "prompt_tokens": 2, "output_tokens": 1,
+                        "ttft_s": 0.1, "generation_s": 0.2, "token_count_is_estimated": False,
+                        "timing_is_estimated": False, "timing_source": "ollama"}
+            estimated = {**measured, "token_count_is_estimated": True,
+                         "timing_is_estimated": True, "timing_source": "client_estimate",
+                         "finish_reason": "length"}
+            with patch.object(manager, "_answer", side_effect=[measured, estimated]):
+                repetitions = [manager._execute({}, test) for _ in range(2)]
+            result = manager._aggregate_repeats(test, repetitions, {"seed": 1}, 2)
+            self.assertTrue(result["token_count_is_estimated"])
+            self.assertTrue(result["timing_is_estimated"])
+            self.assertEqual(result["timing_source"], "mixed")
+            self.assertTrue(result["output_truncated"])
+            self.assertIn("max_tokens", result["diagnostic"])
+            self.assertFalse(result["replicates"][0]["token_count_is_estimated"])
+            self.assertTrue(result["replicates"][1]["token_count_is_estimated"])
+
     def test_context_prompts_reserve_output_budget_and_chat_overhead(self):
         tests = make_context_tests(7, max_context=8192, output_budget=512 + 128)
         self.assertEqual([test["context_size"] for test in tests], [4096, 8192])
@@ -1499,6 +1538,138 @@ class BenchmarkTests(unittest.TestCase):
             self.assertLessEqual(test["estimated_prompt_tokens"] + 512 + 128, test["context_size"])
             self.assertIn(test["expected_answer"], test["prompt"])
         self.assertEqual(make_context_tests(7, max_context=4096, output_budget=4224), [])
+
+    def test_accumulated_context_preserves_history_without_exceeding_total_window(self):
+        options = normalize_generation_options({"max_tokens": 512, "num_ctx": 16384})
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            history = []
+            tests = make_context_tests(7, 16384, output_budget=640)
+            for original in tests:
+                test = manager._accumulated_test(original, history, options)
+                required = (manager._history_tokens(history) +
+                            test["estimated_prompt_tokens"] + 512 + 128)
+                self.assertLessEqual(required, test["context_size"])
+                self.assertLessEqual(required, options["num_ctx"])
+                self.assertIn(test["expected_answer"], test["prompt"])
+                if history:
+                    self.assertLess(len(test["prompt"]), len(original["prompt"]))
+                if test["context_position"] == "middle":
+                    self.assertAlmostEqual(
+                        test["prompt"].index(test["expected_answer"]) / len(test["prompt"]),
+                        0.5, delta=0.02)
+                with patch.object(manager, "_answer", return_value=test["expected_answer"]) as answer:
+                    result = manager._execute({}, test, history, options)
+                self.assertEqual(result["status"], "PASS")
+                answer.assert_called_once()
+                history.extend([{"role": "user", "content": test["prompt"]},
+                                {"role": "assistant", "content": result["answer"]}])
+            self.assertEqual(manager._context_limit({"context_length": 131072}, options), 16384)
+
+    def test_over_budget_context_is_not_sent_to_backend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            options = normalize_generation_options({"max_tokens": 512, "num_ctx": 4096})
+            test = make_context_tests(7, 4096, output_budget=640)[0]
+            history = [{"role": "user", "content": "old context" * 3000}]
+            with patch.object(manager, "_answer") as answer:
+                result = manager._execute({}, test, history, options)
+            answer.assert_not_called()
+            self.assertEqual(result["status"], "NOT RUN")
+            self.assertEqual(result["error"], "CONTEXT_BUDGET_EXCEEDED")
+            self.assertIsNone(result["score"])
+            self.assertIn("no model request", result["evaluation"]["explanation"])
+
+    def test_context_checkpoint_validation_replays_resized_accumulated_prompts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            model = {"id": "demo-local", "backend": "Demo", "endpoint": "local://demo",
+                     "demo": True}
+            options = normalize_generation_options({"max_tokens": 512, "num_ctx": 8192})
+            context = make_context_tests(7, 8192, output_budget=640)
+            history, accumulated = [], []
+            for test in context:
+                bounded = manager._accumulated_test(test, history, options)
+                outcome = manager._execute(model, bounded, history, options)
+                accumulated.append(outcome)
+                history.extend([{"role": "user", "content": bounded["prompt"]},
+                                {"role": "assistant", "content": outcome["answer"]}])
+            state = {
+                "profile": "QUICK", "seed": 7, "model": model,
+                "generation_options": options, "repeat_runs": 1,
+                "tests": make_tests("QUICK", 7), "task_set_version": TASK_SET_VERSION,
+                "evaluator_version": EVALUATOR_VERSION, "resume_phase": "accumulated_context",
+                "completed_tests": [], "failures": [], "not_run": [], "warmup_errors": [],
+                "context_results": [], "accumulated_results": accumulated,
+            }
+            manager._validate_checkpoint(state)
+            tampered = copy.deepcopy(state)
+            tampered["accumulated_results"][1]["prompt"] = context[1]["prompt"]
+            with self.assertRaisesRegex(ValueError, "accumulated_results"):
+                manager._validate_checkpoint(tampered)
+            reordered = copy.deepcopy(state)
+            reordered["accumulated_results"].reverse()
+            with self.assertRaisesRegex(ValueError, "accumulated_results"):
+                manager._validate_checkpoint(reordered)
+
+    def test_evaluator_becoming_unavailable_after_precheck_remains_not_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = BenchmarkManager(Path(directory))
+            test = {"id": "code", "category": "Coding", "prompt": "define f",
+                    "evaluation_method": "code", "tests": ["assert f() == 1"]}
+            evaluation = {"passed": None, "score": None, "status": "NOT RUN",
+                          "criteria": "execute tests", "explanation": "Docker became unavailable."}
+            with patch("backend.benchmark.code_evaluator_available", return_value=True), \
+                    patch("backend.benchmark.evaluate_with_details", return_value=evaluation), \
+                    patch.object(manager, "_answer", return_value="def f(): return 1") as answer:
+                result = manager._execute({}, test)
+            answer.assert_called_once()
+            self.assertEqual(result["status"], "NOT RUN")
+            self.assertIsNone(result["passed"])
+            self.assertIsNone(result["score"])
+            self.assertEqual(result["error"], "EVALUATOR_UNAVAILABLE")
+            self.assertEqual(result["attempts"][0]["status"], "NOT RUN")
+
+    def test_context_degradation_uses_matched_scored_windows_only(self):
+        fresh = [{"id": "small", "score": 10}, {"id": "large", "score": 0}]
+        accumulated = [{"id": "small", "score": 8}, {"id": "large", "score": None}]
+        scores = BenchmarkManager._context_score(fresh, accumulated)
+        self.assertEqual(scores["fresh"], 50)
+        self.assertEqual(scores["accumulated"], 80)
+        self.assertEqual(scores["degradation"], 20)
+        self.assertEqual(scores["matched_count"], 1)
+        self.assertEqual(scores["matched_test_ids"], ["small"])
+        self.assertIsNotNone(scores["coverage_warning"])
+        unmatched = BenchmarkManager._context_score(fresh, [{"id": "other", "score": 10}])
+        self.assertIsNone(unmatched["degradation"])
+
+    def test_api_output_default_scales_with_hardware_without_applying_runtime_settings(self):
+        hardware = {"ram_bytes": 64 * 1024**3, "gpu_vram_bytes": None}
+        recommendations = {
+            "generation_options": {"max_tokens": 16384, "num_ctx": 32768,
+                                   "num_gpu": 24, "num_thread": 12},
+            "runtime_settings": {"context_length": 32768, "gpu_layers": 24},
+        }
+        for supplied, expected in (({}, 16384), ({"max_tokens": 17}, 17),
+                                   ({"temperature": 0.5, "num_ctx": 4096}, 16384)):
+            with self.subTest(supplied=supplied), tempfile.TemporaryDirectory() as directory:
+                manager = BenchmarkManager(Path(directory))
+                with patch("backend.benchmark.hardware_info", return_value=hardware) as probe, \
+                        patch("backend.benchmark.recommend_settings", return_value=recommendations) as recommend, \
+                        patch("backend.benchmark.make_tests", return_value=[]), \
+                        patch("backend.benchmark.make_context_tests", return_value=[]), \
+                        patch.object(manager, "_performance", return_value={"score": None}), \
+                        patch.object(manager, "_write_outputs") as outputs:
+                    self.assertTrue(manager.run({"profile": "QUICK", "generation_options": supplied}))
+                result = outputs.call_args.args[0]
+                options = result["configuration"]["generation_options"]
+                self.assertEqual(options["max_tokens"], expected)
+                self.assertNotIn("num_gpu", options)
+                self.assertNotIn("num_thread", options)
+                self.assertEqual(options.get("num_ctx"), supplied.get("num_ctx"))
+                self.assertEqual(result["hardware"], hardware)
+                probe.assert_called_once_with()
+                recommend.assert_called_once_with(hardware)
 
 
 if __name__ == "__main__":

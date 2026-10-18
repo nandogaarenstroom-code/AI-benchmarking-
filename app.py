@@ -232,6 +232,11 @@ class Handler(BaseHTTPRequestHandler):
                 "generation_options": payload.get("generation_options", {}),
                 "repeat_runs": payload.get("repeat_runs", 1),
             }
+            options = clean_payload["generation_options"]
+            options = dict(options) if isinstance(options, dict) else {}
+            if "max_tokens" not in options:
+                options["max_tokens"] = recommend_settings(hardware_info())["generation_options"]["max_tokens"]
+            clean_payload["generation_options"] = options
             try:
                 clean_payload["seed"] = int(clean_payload["seed"])
             except (TypeError, ValueError, OverflowError):

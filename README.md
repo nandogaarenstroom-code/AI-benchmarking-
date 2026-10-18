@@ -289,6 +289,9 @@ smaller limit, larger sizes are skipped and recorded in `context_skipped`. If th
 unknown, the conservative 128K ceiling is used; 256K is only attempted when explicitly
 advertised. This makes large-context results transparent rather than turning an overflow into a
 misleading quality failure.
+Context probes reserve the requested output allowance and chat overhead. Accumulated requests
+also account for prior messages; requests that do not fit the estimated budget are not scored as
+incorrect answers. These are text-length estimates, not exact tokenizer guarantees.
 
 Performance runs perform three warm-ups, discard their outputs, then collect latency samples,
 streamed TTFT and generation time when available, and concurrency samples at levels 1, 2, and 4.

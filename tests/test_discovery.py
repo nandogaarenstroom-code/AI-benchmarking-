@@ -1,9 +1,10 @@
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.discovery import (
-    AdapterError, MAX_MODEL_RESPONSE_BYTES, ask_model, normalize_generation_options,
+    AdapterError, MAX_MODEL_RESPONSE_BYTES, MODEL_READ_TIMEOUT_SECONDS, ask_model,
+    normalize_generation_options,
 )
 
 
@@ -49,6 +50,8 @@ class DiscoveryTests(unittest.TestCase):
             captured = {}
 
             def opened(request, timeout):
+                self.assertEqual(timeout, MODEL_READ_TIMEOUT_SECONDS)
+                self.assertGreater(timeout, 60)
                 captured.update(json.loads(request.data))
                 if model["backend"] == "Ollama":
                     return Response([b'{"message":{"content":"ok"},"done":true}\n'])
@@ -79,8 +82,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result["output_tokens"], 12)
         self.assertEqual(result["prefill_tokens_per_second"], 10)
         self.assertEqual(result["decode_tokens_per_second"], 4)
+        self.assertEqual(result["generation_s"], 3)
         self.assertEqual(result["timing_source"], "ollama")
         self.assertFalse(result["token_count_is_estimated"])
+        self.assertFalse(result["timing_is_estimated"])
         self.assertTrue(result["truncated"])
         self.assertEqual(progress[0]["phase"], "prefill")
         self.assertIsNone(progress[0]["prefill_tokens_per_second"])
@@ -98,6 +103,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(result["text"], "visible")
         self.assertEqual(result["prefill_tokens_per_second"], 50)
         self.assertEqual(result["decode_tokens_per_second"], 5)
+        self.assertEqual(result["generation_s"], 4)
         self.assertEqual(result["timing_source"], "llama.cpp")
         self.assertFalse(result["token_count_is_estimated"])
         self.assertFalse(result["truncated"])
@@ -112,6 +118,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertIsNone(result["prefill_tokens_per_second"])
         self.assertIsNone(result["prefill_s"])
         self.assertIsNotNone(result["ttft_s"])
+        self.assertIsNone(result["decode_tokens_per_second"])
 
     def test_usage_counts_do_not_claim_backend_timing(self):
         with patch("backend.discovery._open", return_value=sse({
@@ -120,6 +127,7 @@ class DiscoveryTests(unittest.TestCase):
             result = ask_model(OPENAI, "prompt")
         self.assertFalse(result["token_count_is_estimated"])
         self.assertTrue(result["decode_timing_is_estimated"])
+        self.assertTrue(result["timing_is_estimated"])
         self.assertEqual(result["timing_source"], "backend_usage")
         self.assertIsNone(result["prefill_tokens_per_second"])
 
@@ -145,6 +153,29 @@ class DiscoveryTests(unittest.TestCase):
         self.assertAlmostEqual(result["ttft_s"], 0.2)
         self.assertAlmostEqual(result["generation_s"], 0.8)
         self.assertIsNone(result["prefill_tokens_per_second"])
+
+    def test_client_decode_estimate_excludes_first_chunk(self):
+        with patch("backend.discovery._open", return_value=sse(
+                {"choices": [{"delta": {"content": "a" * 400}}]},
+                {"choices": [{"delta": {"content": "b" * 40}, "finish_reason": "stop"}]})), \
+                patch("backend.discovery.time.perf_counter", side_effect=[10, 10.2, 12.2]):
+            result = ask_model(OPENAI, "prompt")
+        self.assertEqual(result["output_tokens"], 110)
+        self.assertAlmostEqual(result["decode_tokens_per_second"], 5)
+
+    def test_finish_marker_preserves_answer_when_optional_metadata_times_out(self):
+        class TimeoutResponse(Response):
+            def __iter__(self):
+                yield b'data: {"choices":[{"delta":{"content":"complete"},"finish_reason":"stop"}]}\n\n'
+                raise TimeoutError("optional usage never arrived")
+
+        response = TimeoutResponse([])
+        response.fp = Mock()
+        with patch("backend.discovery._open", return_value=response):
+            result = ask_model(OPENAI, "prompt")
+        self.assertEqual(result["text"], "complete")
+        self.assertEqual(result["finish_reason"], "stop")
+        response.fp.raw._sock.settimeout.assert_called_once_with(0.25)
 
     def test_long_answers_not_silently_clipped(self):
         text = "a" * 60000

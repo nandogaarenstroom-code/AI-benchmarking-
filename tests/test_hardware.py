@@ -17,6 +17,9 @@ class HardwareTests(unittest.TestCase):
         for error in (FileNotFoundError(), subprocess.TimeoutExpired("probe", 4)):
             with patch("backend.hardware.subprocess.run", side_effect=error):
                 self.assertEqual(hardware._command(["nvidia-smi"]), "")
+        with patch("backend.hardware.subprocess.run", return_value=subprocess.CompletedProcess(
+                ["probe"], 0, None, None)):
+            self.assertEqual(hardware._command(["nvidia-smi"]), "")
 
     def test_linux_cpu_ram_and_nvidia_vram_are_detected(self):
         cpu = "model name : Test CPU\nphysical id : 0\ncore id : 0\n\n" * 2
@@ -121,15 +124,28 @@ class HardwareTests(unittest.TestCase):
         self.assertEqual(len(result["gpus"]), 2)
         self.assertEqual(result["gpu_vram_bytes"], 8 * hardware.GIB)
 
+    def test_platform_probe_failures_degrade_to_unknown(self):
+        with patch("backend.hardware.platform.processor", side_effect=AttributeError("unavailable")), \
+                patch("backend.hardware.platform.platform", side_effect=OSError("unavailable")), \
+                patch("backend.hardware.platform.system", return_value="Other"), \
+                patch("backend.hardware._command", return_value=""):
+            result = hardware.hardware_info()
+        self.assertEqual(result["cpu"], "Unknown")
+        self.assertEqual(result["os"], "Unknown")
+
     def test_recommendations_scale_output_but_never_guarantee_fit(self):
         small = hardware.recommend_settings({})
         medium = hardware.recommend_settings({"ram_bytes": 16 * hardware.GIB, "cores": 8})
         large = hardware.recommend_settings({"ram_bytes": 64 * hardware.GIB, "cores": 32,
                                              "gpu_vram_bytes": 24 * hardware.GIB, "gpus": [{}]})
         self.assertEqual(small["generation_options"]["max_tokens"], 2048)
+        self.assertEqual(small["threads"], 1)
         self.assertLess(medium["generation_options"]["max_tokens"], large["generation_options"]["max_tokens"])
         self.assertTrue(large["advisory"])
         self.assertEqual(medium["generation_options"]["num_thread"], 8)
+        self.assertEqual(medium["threads"], 8)
+        self.assertEqual(large["context_size"], large["generation_options"]["num_ctx"])
+        self.assertEqual(large["gpu_layers"], large["runtime_settings"]["gpu_layers"])
         self.assertGreater(large["runtime_settings"]["gpu_layers"], 0)
         self.assertTrue(any("quantization" in note for note in large["notes"]))
         self.assertTrue(any("external" in note for note in large["notes"]))

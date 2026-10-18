@@ -36,6 +36,7 @@ def write_pdf(path, result):
     failed = sum(test.get("status") == "FAILED" for test in tests)
     not_run = sum(test.get("status") == "NOT RUN" for test in tests)
     not_run_by_code = result.get("summary", {}).get("not_run_by_code", {})
+    performance = result.get("performance", {})
     score = lambda key: (f"{result['scores'][key]}/100"
                          if result["scores"].get(key) is not None else "Not available")
     lines = ["LOCAL AI BENCHMARK",
@@ -44,6 +45,10 @@ def write_pdf(path, result):
              f"Date: {result['timestamp']}", f"Quality: {score('quality')}",
              f"Performance: {score('performance')}",
              f"Overall: {score('overall')}",
+             "Performance token counts: " + (
+                 "estimated" if performance.get("token_count_is_estimated", True)
+                 else "backend-reported"),
+             "Performance timing source: " + str(performance.get("timing_source", "unavailable")),
              f"Task set / evaluator: {result.get('task_set_version', 'unknown')} / "
              f"{result.get('evaluator_version', 'unknown')}",
              f"Tests: {passed} passed, {failed} failed, {not_run} not run",
@@ -132,6 +137,11 @@ def write_html(path, result):
         rows = []
         for test in tests:
             evaluation = test.get("evaluation") or {}
+            measurements = {key: test[key] for key in (
+                "latency_s", "ttft_s", "generation_s", "prompt_tokens", "output_tokens",
+                "prefill_tokens_per_second", "decode_tokens_per_second",
+                "token_count_is_estimated", "timing_is_estimated", "timing_source",
+                "backend_metrics", "finish_reason", "output_truncated") if key in test}
             rows.append(
                 f"<details><summary>{escaped(test.get('id', 'Test'))} · "
                 f"{escaped(test.get('status', 'Unknown'))} · Score: "
@@ -140,6 +150,7 @@ def write_html(path, result):
                 f"<h4>Answer</h4><pre>{escaped(test.get('answer', ''))}</pre>"
                 f"<h4>Expected answer</h4><pre>{escaped(test.get('expected_answer', ''))}</pre>"
                 f"<h4>Evaluation evidence</h4><pre>{escaped(json.dumps(evaluation, ensure_ascii=False, indent=2))}</pre>"
+                f"<h4>Measurement provenance</h4><pre>{escaped(json.dumps(measurements, ensure_ascii=False, indent=2))}</pre>"
                 f"<h4>Attempts and diagnostics</h4><pre>{escaped(json.dumps(test.get('attempts', []), ensure_ascii=False, indent=2))}</pre>"
                 f"</details>")
         evidence.append(f"<section><h2>{escaped(label)}</h2>{''.join(rows)}</section>")
